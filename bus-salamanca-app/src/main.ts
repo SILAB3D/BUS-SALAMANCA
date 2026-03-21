@@ -4,9 +4,8 @@ import * as L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 
 import './style.css'
-import { loadGtfsDataset } from './services/gtfs'
-import { getHubRealtimeArrivals, getRealtimeBaseUrl, getRealtimeSnapshot, getStopRealtimeArrivals } from './services/realtime'
-import type { DepartureInsight, GtfsDataset, RealtimeSnapshot, RouteDirectionOption, RouteInsight, ServiceDayType, StopOption } from './types'
+import { getHubRealtimeArrivals, getRealtimeBaseUrl, getRealtimeNetworkMetadata, getRealtimeSnapshot, getStopRealtimeArrivals } from './services/realtime'
+import type { DepartureInsight, GtfsDataset, RealtimeSnapshot, RouteDirectionOption, RouteInsight, RouteStop, ServiceDayType, StopOption } from './types'
 
 interface BatteryOptimizationPlugin {
   isIgnoringBatteryOptimizations(): Promise<{ ignored: boolean }>
@@ -24,15 +23,13 @@ const LOCATOR_STORAGE_KEY = 'bus-salamanca-locators'
 const SETTINGS_UPDATES_STORAGE_KEY = 'bus-salamanca-settings-updates'
 const REALTIME_FAILURES_STORAGE_KEY = 'bus-salamanca-realtime-failures'
 const MONITORING_AVG_FAILURES_STORAGE_KEY = 'bus-salamanca-monitoring-avg-failures'
-const GTFS_FIRST_LOADED_AT_KEY = 'bus-salamanca-gtfs-first-loaded-at'
-const APP_BUILD_VERSION = 'v3.0'
+const APP_BUILD_VERSION = 'v3.4'
 const TOPBAR_CLOCK_REFRESH_SECONDS = 1
 const LOCATOR_REFRESH_SECONDS = 30
 const TRACKING_REFRESH_SECONDS = 30
 const MONITORING_REFRESH_SECONDS = 30
 const MANUAL_REFRESH_COOLDOWN_SECONDS = 25
 const DEFAULT_GLOBAL_UPDATE_COOLDOWN_SECONDS = 25
-const GTFS_ONLY_GLOBAL_UPDATE_COOLDOWN_SECONDS = 15
 const INICIO_STOP_REFRESH_COOLDOWN_SECONDS = 15
 
 const PASS_NEAR_THRESHOLD_MIN = 3
@@ -42,7 +39,7 @@ const PASS_MISSING_CHECKPOINTS_REQUIRED = 2
 const SEGUIMIENTO_STICKY_MAX_MISSES = 3
 
 type TabId = 'home' | 'inicio' | 'hub' | 'monitorizacion' | 'localizador' | 'estado' | 'registros'
-type DataMode = 'gtfs' | 'realtime' | 'mixed'
+type DataMode = 'realtime'
 type InicioSearchMode = 'stop' | 'route' | 'map'
 
 interface TrackingState {
@@ -140,10 +137,8 @@ const state: {
   refreshing: boolean
   phase: string
   error: string | null
-  dataset: GtfsDataset | null
-  datasetLoadedAt: Date | null
-  gtfsFirstLoadedAt: Date | null
   appReloadedAt: Date | null
+  dataset: GtfsDataset | null
   realtime: RealtimeSnapshot | null
   realtimeArrivalsByStop: Record<string, DepartureInsight[]>
   selectedStopId: string | null
@@ -197,10 +192,8 @@ const state: {
   refreshing: false,
   phase: 'Preparando lectura del feed...',
   error: null,
-  dataset: null,
-  datasetLoadedAt: null,
-  gtfsFirstLoadedAt: loadGtfsFirstLoadedAt(),
   appReloadedAt: null,
+  dataset: null,
   realtime: null,
   realtimeArrivalsByStop: {},
   selectedStopId: null,
@@ -318,39 +311,28 @@ async function checkBatteryOptimization(allowPrompt: boolean): Promise<void> {
 async function loadInitialData(): Promise<void> {
   state.loading = true
   state.error = null
-  state.phase = 'Abriendo feed principal...'
+  state.phase = 'Cargando datos en tiempo real...'
   render()
 
   try {
-    const [dataset, realtime] = await Promise.all([
-      loadGtfsDataset('/data/gtfs.zip', {
-        onProgress: (phase) => {
-          state.phase = phase
-          render()
-        },
-      }),
-      getRealtimeSnapshot(import.meta.env.VITE_REALTIME_URL),
+    const realtimeBaseUrl = getRealtimeBaseUrl(import.meta.env.VITE_REALTIME_URL)
+    const [realtime, metadata] = await Promise.all([
+      getRealtimeSnapshot(realtimeBaseUrl),
+      getRealtimeNetworkMetadata(realtimeBaseUrl),
     ])
 
-    state.dataset = dataset
-    state.datasetLoadedAt = new Date()
     state.appReloadedAt = new Date()
-    if (!state.gtfsFirstLoadedAt) {
-      state.gtfsFirstLoadedAt = new Date()
-      persistGtfsFirstLoadedAt(state.gtfsFirstLoadedAt)
-    }
+    state.dataset = buildRealtimeDataset(metadata)
+    syncStoredStopsWithDataset()
     state.realtime = realtime
     // No default selection in the stop dropdown — user must pick manually
     state.selectedStopId = null
-    const directionOptions = dataset.getRouteDirectionOptions()
-    const firstDirectionKey = directionOptions[0]?.key ?? ''
-    state.inicioRouteDirectionKey = firstDirectionKey
-    state.inicioMapRouteShortName = firstDirectionKey
-    state.inicioRouteShortName = directionOptions[0]?.routeShortName ?? dataset.routes[0]?.shortName ?? ''
+    state.inicioRouteDirectionKey = ''
+    state.inicioMapRouteShortName = ''
+    state.inicioRouteShortName = ''
 
-    syncStoredStopsWithDataset()
     await refreshArrivals('manual')
-    pushSettingsUpdate('Carga inicial de datos', 'system', 'ok', 'inicio', 'GTFS y estado en tiempo real cargados')
+    pushSettingsUpdate('Carga inicial de datos', 'system', 'ok', 'inicio', 'Datos en tiempo real cargados')
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'No se pudieron cargar los datos.'
     setTransientError(errorMessage)
@@ -391,64 +373,46 @@ async function refreshArrivals(source: 'manual' | 'auto', force = false): Promis
     const monitoringStopIds = getMonitoringRealtimeStopIds()
     const hubStopIds = Array.from(new Set([...state.hubStopIds, ...locatorStopIds, ...monitoringStopIds]))
     const shouldFetchForLocator = state.activeTab === 'localizador' && state.locators.length > 0
-    const shouldFetchForMonitoring = hasMonitoringInActiveWindow()
-    const shouldFetchRealtimeArrivals = state.dataMode !== 'gtfs'
-      || Object.keys(state.trackingByKey).length > 0
-      || shouldFetchForMonitoring
-      || shouldFetchForLocator
 
     const [snapshot, selectedArrivals, hubArrivals] = await Promise.all([
       getRealtimeSnapshot(realtimeBaseUrl ?? undefined),
-      shouldFetchRealtimeArrivals && selectedStopId
+      selectedStopId
         ? getStopRealtimeArrivals(realtimeBaseUrl ?? undefined, selectedStopId, 12)
         : Promise.resolve([]),
-      shouldFetchRealtimeArrivals
-        ? getHubRealtimeArrivals(realtimeBaseUrl ?? undefined, hubStopIds, 10)
-        : Promise.resolve({}),
+      getHubRealtimeArrivals(realtimeBaseUrl ?? undefined, hubStopIds, 10)      
     ])
 
     state.realtime = snapshot
 
-    if (shouldFetchRealtimeArrivals) {
-      state.realtimeArrivalsByStop = {
-        ...hubArrivals,
-        ...(selectedStopId ? { [selectedStopId]: selectedArrivals } : {}),
-      }
+    state.realtimeArrivalsByStop = {
+      ...hubArrivals,
+      ...(selectedStopId ? { [selectedStopId]: selectedArrivals } : {}),
+    }
 
-      if (shouldFetchForLocator) {
-        state.locatorLastUpdatedAt = new Date()
-        updateLocatorStickyCache()
-      }
+    if (shouldFetchForLocator) {
+      state.locatorLastUpdatedAt = new Date()
+      updateLocatorStickyCache()
+    }
 
-      const eventCount = Object.values(state.realtimeArrivalsByStop)
-        .reduce((count, arrivals) => count + arrivals.length, 0)
+    const eventCount = Object.values(state.realtimeArrivalsByStop)
+      .reduce((count, arrivals) => count + arrivals.length, 0)
 
-      if (eventCount > 0) {
-        state.lastEventDetectedAt = new Date()
-      } else if (state.dataMode !== 'gtfs') {
-        recordRealtimeFailure(
-          'Sin eventos en tiempo real',
-          `No se recibieron llegadas realtime para ${hubStopIds.length} paradas solicitadas.`,
-          state.activeTab,
-        )
-      }
-
-      if (state.dataMode !== 'gtfs' && state.realtime?.connected !== true) {
-        recordRealtimeFailure(
-          'Canal realtime desconectado',
-          'La fuente de tiempo real no aparece conectada en este ciclo de actualización.',
-          state.activeTab,
-        )
-      }
+    if (eventCount > 0) {
+      state.lastEventDetectedAt = new Date()
     } else {
-      state.realtimeArrivalsByStop = {}
-      if (state.dataMode !== 'gtfs') {
-        recordRealtimeFailure(
-          'Realtime no solicitado',
-          'La actualización se completó sin solicitar llegadas en tiempo real por condiciones de la pestaña/modo.',
-          state.activeTab,
-        )
-      }
+      recordRealtimeFailure(
+        'Sin eventos en tiempo real',
+        `No se recibieron llegadas realtime para ${hubStopIds.length} paradas solicitadas.`,
+        state.activeTab,
+      )
+    }
+
+    if (state.realtime?.connected !== true) {
+      recordRealtimeFailure(
+        'Canal realtime desconectado',
+        'La fuente de tiempo real no aparece conectada en este ciclo de actualización.',
+        state.activeTab,
+      )
     }
 
     await evaluateTrackingStates()
@@ -655,7 +619,7 @@ function render(): void {
   const isManualCooldownActive = Date.now() < (state.manualRefreshCooldownUntil ?? 0)
   const realtimeEventCount = Object.values(state.realtimeArrivalsByStop)
     .reduce((count, arrivals) => count + arrivals.length, 0)
-  const hasRealtimeData = state.dataMode !== 'gtfs' && state.realtime?.connected === true && realtimeEventCount > 0
+  const hasRealtimeData = state.realtime?.connected === true && realtimeEventCount > 0
   const bannerClass = hasRealtimeData
     ? (isManualCooldownActive ? 'banner-warning' : 'banner-ok')
     : 'banner-error'
@@ -853,9 +817,7 @@ function renderInicioTab(
             <span class="badge">${departures.length} eventos</span>
           </div>
           <div class="departure-list">
-            ${renderDepartureList(departures, state.dataMode === 'gtfs'
-              ? 'No hay salidas de información predeterminada para esta parada.'
-              : 'No hay llegadas de información en tiempo real para esta parada.')}
+            ${renderDepartureList(departures, 'No hay llegadas de información en tiempo real para esta parada.')}
           </div>
         </div>
         ` : '<p class="empty-state">Selecciona una parada para ver sus próximas llegadas.</p>'}
@@ -963,9 +925,7 @@ function renderHubStopCard(stop: StopOption): string {
         ` : ''}
 
         <div class="departure-list">
-          ${renderDepartureList(departures, state.dataMode === 'gtfs'
-            ? 'Sin salidas de información predeterminada para esta parada.'
-            : 'Sin llegadas de información en tiempo real para esta parada.')}
+          ${renderDepartureList(departures, 'Sin llegadas de información en tiempo real para esta parada.')}
         </div>
 
         <div class="button-row wrap compact action-row-below-events">
@@ -1055,26 +1015,10 @@ function renderEstadoTab(_dataset: GtfsDataset | null): string {
 
       <section class="status-actual-card settings-status-card">
         <div class="panel-head compact-title">
-          <h3>Modos de obtención de información</h3>
-          <p class="panel-copy">Selecciona cómo se calculan las próximas llegadas en toda la app.</p>
+          <h3>Fuente de información</h3>
+          <p class="panel-copy">La app usa exclusivamente datos de tiempo real y fallback desde el proxy.</p>
         </div>
-        <section class="source-cards">
-          ${renderSourceOptionCard(
-            'gtfs',
-            'Información predeterminada',
-            'Muestra solo horarios base del feed estático.',
-          )}
-          ${renderSourceOptionCard(
-            'realtime',
-            'Información en tiempo real',
-            'Usa exclusivamente datos recibidos desde la fuente en tiempo real.',
-          )}
-          ${renderSourceOptionCard(
-            'mixed',
-            'Mix inteligente',
-            'Prioriza tiempo real y, si no hay eventos, usa información predeterminada.',
-          )}
-        </section>
+        <p class="tracking-state">Modo activo: TIEMPO REAL / FALLBACK.</p>
       </section>
 
       <section class="status-actual-card settings-status-card">
@@ -1267,19 +1211,6 @@ function renderMonitorizacionTab(dataset: GtfsDataset | null): string {
   `
 }
 
-function renderSourceOptionCard(mode: DataMode, title: string, description: string): string {
-  return `
-    <label class="source-option ${state.dataMode === mode ? 'selected' : ''}">
-      <div class="source-option-head">
-        <input type="radio" name="data-mode" value="${mode}" ${state.dataMode === mode ? 'checked' : ''} />
-          <span class="mode-dot mode-dot-${mode}"></span>
-          <strong>${escapeHtml(title)}</strong>
-      </div>
-      <p>${escapeHtml(description)}</p>
-    </label>
-  `
-}
-
 function bindEvents(): void {
   document.querySelector<HTMLButtonElement>('#menu-toggle')?.addEventListener('click', () => {
     state.menuOpen = !state.menuOpen
@@ -1358,7 +1289,7 @@ function bindEvents(): void {
     const selected = getRouteDirectionOptions().find((option) => option.key === target.value)
     state.inicioRouteShortName = selected?.routeShortName ?? ''
     // Keep the selection manual: do not auto-pick a stop when route changes.
-    if (state.dataMode !== 'gtfs' && state.selectedStopId) {
+    if (state.selectedStopId) {
       void triggerManualRefresh()
       return
     }
@@ -1385,12 +1316,8 @@ function bindEvents(): void {
       return
     }
 
-    if (state.dataMode !== 'gtfs') {
-      void triggerManualRefresh()
-      return
-    }
-
-    render()
+    void triggerManualRefresh()
+    return
   })
 
   document.querySelector<HTMLButtonElement>('#refresh-selected-stop')?.addEventListener('click', () => {
@@ -1422,26 +1349,6 @@ function bindEvents(): void {
 
       state.hubAutoRefreshStopId = state.hubAutoRefreshStopId === stopId ? null : stopId
       setupAutoRefresh()
-      render()
-    })
-  })
-
-  document.querySelectorAll<HTMLInputElement>('input[name="data-mode"]').forEach((input) => {
-    input.addEventListener('change', () => {
-      const selected = parseDataMode(input.value)
-      if (state.dataMode === selected) {
-        return
-      }
-
-      state.dataMode = selected
-      persistDataMode(state.dataMode)
-      pushSettingsUpdate('Cambio de modo de datos', 'manual', 'info', 'estado', `Modo seleccionado: ${selected.toUpperCase()}`)
-
-      if (selected !== 'gtfs') {
-        void triggerManualRefresh()
-        return
-      }
-
       render()
     })
   })
@@ -1985,11 +1892,6 @@ async function startTracking(stopId: string, stopName: string, routeShortName: s
     `🚌 SALBUS · Seguimiento activo · ${stopName}`,
     `Línea ${routeShortName} · ${getDirectionLabelForRoute(routeShortName)} · iniciando seguimiento · actualizado ${formatTimeOnly(new Date())}`,
   )
-
-  if (state.dataMode === 'gtfs') {
-    state.dataMode = 'mixed'
-    persistDataMode(state.dataMode)
-  }
 
   await refreshArrivals('manual')
   render()
@@ -2775,9 +2677,7 @@ function renderRefreshTag(value: Date | null): string {
 }
 
 function getGlobalUpdateCooldownSeconds(): number {
-  return state.dataMode === 'gtfs'
-    ? GTFS_ONLY_GLOBAL_UPDATE_COOLDOWN_SECONDS
-    : DEFAULT_GLOBAL_UPDATE_COOLDOWN_SECONDS
+  return DEFAULT_GLOBAL_UPDATE_COOLDOWN_SECONDS
 }
 
 function getNextAllowedRefreshAt(): number {
@@ -2800,10 +2700,6 @@ function canUseManualRefresh(): boolean {
 }
 
 function getManualRefreshCooldownSeconds(): number {
-  if (state.dataMode === 'gtfs') {
-    return GTFS_ONLY_GLOBAL_UPDATE_COOLDOWN_SECONDS
-  }
-
   if (state.activeTab === 'inicio') {
     return state.inicioSearchMode === 'stop'
       ? INICIO_STOP_REFRESH_COOLDOWN_SECONDS

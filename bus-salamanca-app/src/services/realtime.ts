@@ -1,4 +1,4 @@
-import type { DepartureInsight, RealtimeSnapshot } from '../types'
+import type { DepartureInsight, RealtimeNetworkMetadata, RealtimeSnapshot, RouteDirectionOption, RouteInsight, RouteStop, StopOption } from '../types'
 
 const DEFAULT_REALTIME_URL = 'http://localhost:8787'
 const EMULATOR_REALTIME_URLS = ['http://10.0.2.2:8787', 'http://10.0.3.2:8787']
@@ -10,6 +10,13 @@ interface StopArrivalsResponse {
 
 interface HubArrivalsResponse {
   stops: Record<string, DepartureInsight[]>
+}
+
+interface MetadataResponse {
+  routes: RouteInsight[]
+  stopOptions: StopOption[]
+  routeDirectionOptions: RouteDirectionOption[]
+  routeStopsByDirectionKey: Record<string, RouteStop[]>
 }
 
 function normalizeBaseUrl(baseUrl?: string): string {
@@ -109,6 +116,20 @@ export async function getHubRealtimeArrivals(baseUrl: string | undefined, stopId
     return response
   } catch {
     return {}
+  }
+}
+
+export async function getRealtimeNetworkMetadata(baseUrl?: string): Promise<RealtimeNetworkMetadata> {
+  const data = await fetchJsonWithFallback<MetadataResponse>(
+    baseUrl,
+    (resolvedBaseUrl) => `${resolvedBaseUrl}/metadata`,
+  )
+
+  return {
+    routes: Array.isArray(data.routes) ? data.routes : [],
+    stopOptions: Array.isArray(data.stopOptions) ? data.stopOptions : [],
+    routeDirectionOptions: Array.isArray(data.routeDirectionOptions) ? data.routeDirectionOptions : [],
+    routeStopsByDirectionKey: data.routeStopsByDirectionKey ?? {},
   }
 }
 

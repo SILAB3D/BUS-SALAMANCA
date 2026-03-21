@@ -39,8 +39,12 @@ const state = {
   updatedAt: null,
   statusMessage: 'Inicializando proxy realtime...',
   routesById: new Map(),
+  stopsById: new Map(),
   tripsById: new Map(),
   staticStopTimesByStopId: new Map(),
+  stopTimesByTripId: new Map(),
+  routeDirectionOptions: [],
+  routeStopsByDirectionKey: {},
   rtByTripStop: new Map(),
   rtByTripSequence: new Map(),
   webArrivalsCache: new Map(),
@@ -87,6 +91,30 @@ app.get('/hub/arrivals', async (request, response) => {
   })
 })
 
+app.get('/metadata', (_request, response) => {
+  response.json({
+    routes: Array.from(state.routesById.values()).map((route) => ({
+      routeId: route.route_id,
+      shortName: route.route_short_name || route.route_id,
+      longName: route.route_long_name || route.route_short_name || route.route_id,
+      description: route.route_desc || '',
+      routeColor: normalizeColor(route.route_color, '173764'),
+      routeTextColor: normalizeColor(route.route_text_color, 'FFFFFF'),
+      tripCount: 0,
+      headsigns: [],
+    })),
+    stopOptions: Array.from(state.stopsById.values()).map((stop) => ({
+      stopId: stop.stop_id,
+      stopName: stop.stop_name || stop.stop_id,
+      lat: Number.parseFloat(stop.stop_lat || '0') || 0,
+      lon: Number.parseFloat(stop.stop_lon || '0') || 0,
+      url: stop.stop_url || '',
+    })),
+    routeDirectionOptions: state.routeDirectionOptions,
+    routeStopsByDirectionKey: state.routeStopsByDirectionKey,
+  })
+})
+
 app.listen(config.port, () => {
   console.log(`[realtime-proxy] Escuchando en http://localhost:${config.port}`)
 })
@@ -110,12 +138,28 @@ async function loadStaticGtfs() {
   const zipBuffer = await fs.readFile(config.staticZipPath)
   const zip = await JSZip.loadAsync(zipBuffer)
   const routes = await readCsv(zip, 'routes.txt')
+  const stops = await readCsv(zip, 'stops.txt')
   const trips = await readCsv(zip, 'trips.txt')
   const stopTimes = await readCsv(zip, 'stop_times.txt')
 
   state.routesById = new Map(routes.map((route) => [route.route_id, route]))
+  state.stopsById = new Map(stops.map((stop) => [stop.stop_id, stop]))
   state.tripsById = new Map(trips.map((trip) => [trip.trip_id, trip]))
   state.staticStopTimesByStopId = new Map()
+  state.stopTimesByTripId = new Map()
+
+  for (const stopTime of stopTimes) {
+    const listByTrip = state.stopTimesByTripId.get(stopTime.trip_id) ?? []
+    listByTrip.push(stopTime)
+    state.stopTimesByTripId.set(stopTime.trip_id, listByTrip)
+  }
+
+  for (const entries of state.stopTimesByTripId.values()) {
+    entries.sort((left, right) => Number.parseInt(left.stop_sequence, 10) - Number.parseInt(right.stop_sequence, 10))
+  }
+
+  state.routeDirectionOptions = buildRouteDirectionOptions()
+  state.routeStopsByDirectionKey = buildRouteStopsByDirectionKey()
 
   for (const stopTime of stopTimes) {
     const trip = state.tripsById.get(stopTime.trip_id)
@@ -144,6 +188,76 @@ async function loadStaticGtfs() {
 
   state.staticLoaded = true
   state.statusMessage = 'GTFS estatico cargado. Esperando datos realtime.'
+}
+
+function buildRouteDirectionOptions() {
+  const options = []
+  const seen = new Set()
+
+  for (const trip of state.tripsById.values()) {
+    const route = state.routesById.get(trip.route_id)
+    if (!route) {
+      continue
+    }
+
+    const routeShortName = route.route_short_name || route.route_id
+    const headsign = String(trip.trip_headsign || route.route_long_name || routeShortName).trim()
+    const directionId = String(trip.direction_id ?? '').trim()
+    const key = `${routeShortName}|${headsign}|${directionId}`
+    if (seen.has(key)) {
+      continue
+    }
+
+    seen.add(key)
+    options.push({
+      key,
+      routeShortName,
+      headsign,
+      label: `${routeShortName} · ${headsign}`,
+    })
+  }
+
+  options.sort((left, right) => left.label.localeCompare(right.label, 'es', { numeric: true }))
+  return options
+}
+
+function buildRouteStopsByDirectionKey() {
+  const result = {}
+
+  for (const option of state.routeDirectionOptions) {
+    const [routeShortName, headsign, directionId] = String(option.key).split('|')
+    const trip = Array.from(state.tripsById.values()).find((candidate) => {
+      const route = state.routesById.get(candidate.route_id)
+      if (!route) {
+        return false
+      }
+
+      const candidateShortName = route.route_short_name || route.route_id
+      const candidateHeadsign = String(candidate.trip_headsign || route.route_long_name || candidateShortName).trim()
+      const candidateDirectionId = String(candidate.direction_id ?? '').trim()
+
+      return candidateShortName === routeShortName
+        && candidateHeadsign === headsign
+        && candidateDirectionId === directionId
+    })
+
+    if (!trip) {
+      result[option.key] = []
+      continue
+    }
+
+    const routeStops = (state.stopTimesByTripId.get(trip.trip_id) ?? []).map((entry) => {
+      const stop = state.stopsById.get(entry.stop_id)
+      return {
+        stopId: entry.stop_id,
+        stopName: stop?.stop_name || entry.stop_id,
+      }
+    })
+
+    result[option.key] = routeStops
+  }
+
+  return result
 }
 
 async function refreshRealtimeFeeds() {

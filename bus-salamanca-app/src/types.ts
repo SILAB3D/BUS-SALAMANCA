@@ -1,11 +1,3 @@
-export interface FeedSummary {
-  routes: number
-  stops: number
-  trips: number
-  stopTimes: number
-  serviceDates: number
-}
-
 export interface StopOption {
   stopId: string
   stopName: string
@@ -63,7 +55,20 @@ export interface RealtimeSnapshot {
   statusMessage: string
 }
 
-export type ServiceDayType = 'weekday' | 'saturday' | 'sunday'
+export interface FeedSummary {
+  routes: number
+  stops: number
+  trips: number
+  stopTimes: number
+  serviceDates: number
+}
+
+export interface RealtimeNetworkMetadata {
+  routes: RouteInsight[]
+  stopOptions: StopOption[]
+  routeDirectionOptions: RouteDirectionOption[]
+  routeStopsByDirectionKey: Record<string, RouteStop[]>
+}
 
 export interface GtfsDataset {
   summary: FeedSummary
@@ -76,3 +81,5 @@ export interface GtfsDataset {
   getScheduledTimesByDayType(stopId: string, routeShortName: string, dayType: ServiceDayType, startHour: number, endHour: number): string[]
   getRouteStops(routeShortName: string, pivotStopId?: string, headsign?: string): RouteStop[]
 }
+
+export type ServiceDayType = 'weekday' | 'saturday' | 'sunday'
