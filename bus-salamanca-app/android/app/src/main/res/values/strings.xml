@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">SALBUS</string>
+    <string name="title_activity_main">SALBUS</string>
+    <string name="package_name">com.icuas.bussalamanca</string>
+    <string name="custom_url_scheme">com.icuas.bussalamanca</string>
+</resources>
