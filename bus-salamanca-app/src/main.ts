@@ -1,11 +1,12 @@
-﻿import { Capacitor, registerPlugin } from '@capacitor/core'
+import { Capacitor, registerPlugin } from '@capacitor/core'
 import { LocalNotifications } from '@capacitor/local-notifications'
 import * as L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 
 import './style.css'
-import { getHubRealtimeArrivals, getRealtimeBaseUrl, getRealtimeNetworkMetadata, getRealtimeSnapshot, getStopRealtimeArrivals } from './services/realtime'
-import type { DepartureInsight, GtfsDataset, RealtimeSnapshot, RouteDirectionOption, RouteInsight, RouteStop, ServiceDayType, StopOption } from './types'
+import { loadGtfsDataset } from './services/gtfs'
+import { fetchWebArrivals, fetchWebArrivalsForMultipleStops } from './services/web-fallback'
+import type { DepartureInsight, GtfsDataset, RealtimeSnapshot, RouteDirectionOption, RouteInsight, ServiceDayType, StopOption } from './types'
 
 interface BatteryOptimizationPlugin {
   isIgnoringBatteryOptimizations(): Promise<{ ignored: boolean }>
@@ -39,7 +40,7 @@ const PASS_MISSING_CHECKPOINTS_REQUIRED = 2
 const SEGUIMIENTO_STICKY_MAX_MISSES = 3
 
 type TabId = 'home' | 'inicio' | 'hub' | 'monitorizacion' | 'localizador' | 'estado' | 'registros'
-type DataMode = 'realtime'
+type DataMode = 'realtime' | 'gtfs' | 'mixed'
 type InicioSearchMode = 'stop' | 'route' | 'map'
 
 interface TrackingState {
@@ -311,28 +312,34 @@ async function checkBatteryOptimization(allowPrompt: boolean): Promise<void> {
 async function loadInitialData(): Promise<void> {
   state.loading = true
   state.error = null
-  state.phase = 'Cargando datos en tiempo real...'
+  state.phase = 'Cargando datos GTFS...'
   render()
 
   try {
-    const realtimeBaseUrl = getRealtimeBaseUrl(import.meta.env.VITE_REALTIME_URL)
-    const [realtime, metadata] = await Promise.all([
-      getRealtimeSnapshot(realtimeBaseUrl),
-      getRealtimeNetworkMetadata(realtimeBaseUrl),
-    ])
+    const dataset = await loadGtfsDataset('/data/gtfs.zip', {
+      onProgress: (phase) => {
+        state.phase = phase
+        render()
+      },
+    })
 
     state.appReloadedAt = new Date()
-    state.dataset = buildRealtimeDataset(metadata)
+    state.dataset = dataset
     syncStoredStopsWithDataset()
-    state.realtime = realtime
-    // No default selection in the stop dropdown — user must pick manually
+    state.realtime = {
+      providerName: 'salamanca-web-fallback',
+      connected: true,
+      vehicleCount: 0,
+      updatedAt: new Date().toISOString(),
+      statusMessage: 'Datos estáticos cargados. Llegadas vía web.',
+    }
     state.selectedStopId = null
     state.inicioRouteDirectionKey = ''
     state.inicioMapRouteShortName = ''
     state.inicioRouteShortName = ''
 
     await refreshArrivals('manual')
-    pushSettingsUpdate('Carga inicial de datos', 'system', 'ok', 'inicio', 'Datos en tiempo real cargados')
+    pushSettingsUpdate('Carga inicial de datos', 'system', 'ok', 'inicio', 'Datos GTFS y llegadas web cargados')
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'No se pudieron cargar los datos.'
     setTransientError(errorMessage)
@@ -367,22 +374,26 @@ async function refreshArrivals(source: 'manual' | 'auto', force = false): Promis
   const previousArrivals = JSON.stringify(state.realtimeArrivalsByStop)
 
   try {
-    const realtimeBaseUrl = getRealtimeBaseUrl(import.meta.env.VITE_REALTIME_URL)
     const selectedStopId = state.selectedStopId
     const locatorStopIds = getLocatorRealtimeStopIds()
     const monitoringStopIds = getMonitoringRealtimeStopIds()
     const hubStopIds = Array.from(new Set([...state.hubStopIds, ...locatorStopIds, ...monitoringStopIds]))
     const shouldFetchForLocator = state.activeTab === 'localizador' && state.locators.length > 0
 
-    const [snapshot, selectedArrivals, hubArrivals] = await Promise.all([
-      getRealtimeSnapshot(realtimeBaseUrl ?? undefined),
+    const [selectedArrivals, hubArrivals] = await Promise.all([
       selectedStopId
-        ? getStopRealtimeArrivals(realtimeBaseUrl ?? undefined, selectedStopId, 12)
+        ? fetchWebArrivals(selectedStopId, 12)
         : Promise.resolve([]),
-      getHubRealtimeArrivals(realtimeBaseUrl ?? undefined, hubStopIds, 10)      
+      fetchWebArrivalsForMultipleStops(hubStopIds, 10),
     ])
 
-    state.realtime = snapshot
+    state.realtime = {
+      providerName: 'salamanca-web-fallback',
+      connected: true,
+      vehicleCount: 0,
+      updatedAt: new Date().toISOString(),
+      statusMessage: 'Llegadas obtenidas desde la web pública.',
+    }
 
     state.realtimeArrivalsByStop = {
       ...hubArrivals,
@@ -3223,20 +3234,6 @@ function persistHubCustomNames(values: Record<string, string>): void {
   window.localStorage.setItem(HUB_CUSTOM_NAMES_STORAGE_KEY, JSON.stringify(values))
 }
 
-function loadGtfsFirstLoadedAt(): Date | null {
-  const raw = window.localStorage.getItem(GTFS_FIRST_LOADED_AT_KEY)
-  if (!raw) {
-    return null
-  }
-
-  const parsed = new Date(raw)
-  return Number.isNaN(parsed.getTime()) ? null : parsed
-}
-
-function persistGtfsFirstLoadedAt(value: Date): void {
-  window.localStorage.setItem(GTFS_FIRST_LOADED_AT_KEY, value.toISOString())
-}
-
 function loadMonitorings(): MonitoringRegistration[] {
   const raw = window.localStorage.getItem(MONITORING_STORAGE_KEY)
   if (!raw) {
@@ -3476,9 +3473,7 @@ function parseDataMode(value: string): DataMode {
   return 'mixed'
 }
 
-function persistDataMode(mode: DataMode): void {
-  window.localStorage.setItem(DATA_MODE_STORAGE_KEY, mode)
-}
+
 
 function loadSettingsUpdates(): SettingsUpdateEntry[] {
   const raw = window.localStorage.getItem(SETTINGS_UPDATES_STORAGE_KEY)

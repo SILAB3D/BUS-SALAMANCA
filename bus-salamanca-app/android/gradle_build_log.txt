@@ -1,0 +1,224 @@
+﻿
+> Configure project :app
+WARNING: Using flatDir should be avoided because it doesn't support any meta-data formats.
+
+> Configure project :capacitor-cordova-android-plugins
+WARNING: Using flatDir should be avoided because it doesn't support any meta-data formats.
+
+> Task :app:preBuild UP-TO-DATE
+> Task :app:preDebugBuild UP-TO-DATE
+> Task :app:mergeDebugNativeDebugMetadata NO-SOURCE
+> Task :app:javaPreCompileDebug UP-TO-DATE
+> Task :capacitor-android:preBuild UP-TO-DATE
+> Task :capacitor-android:preDebugBuild UP-TO-DATE
+> Task :capacitor-cordova-android-plugins:preBuild UP-TO-DATE
+> Task :capacitor-cordova-android-plugins:preDebugBuild UP-TO-DATE
+> Task :capacitor-cordova-android-plugins:writeDebugAarMetadata UP-TO-DATE
+> Task :capacitor-local-notifications:preBuild UP-TO-DATE
+> Task :capacitor-local-notifications:preDebugBuild UP-TO-DATE
+> Task :capacitor-android:writeDebugAarMetadata
+> Task :capacitor-local-notifications:writeDebugAarMetadata
+> Task :capacitor-android:processDebugNavigationResources
+> Task :app:checkDebugAarMetadata UP-TO-DATE
+> Task :capacitor-cordova-android-plugins:processDebugNavigationResources UP-TO-DATE
+> Task :capacitor-local-notifications:processDebugNavigationResources
+> Task :app:processDebugNavigationResources UP-TO-DATE
+> Task :app:compileDebugNavigationResources UP-TO-DATE
+> Task :app:generateDebugResValues UP-TO-DATE
+> Task :capacitor-android:generateDebugResValues
+> Task :capacitor-android:generateDebugResources
+> Task :capacitor-android:packageDebugResources
+> Task :capacitor-cordova-android-plugins:generateDebugResValues UP-TO-DATE
+> Task :capacitor-cordova-android-plugins:generateDebugResources UP-TO-DATE
+> Task :capacitor-cordova-android-plugins:packageDebugResources UP-TO-DATE
+> Task :capacitor-local-notifications:generateDebugResValues
+> Task :capacitor-local-notifications:generateDebugResources
+> Task :capacitor-local-notifications:packageDebugResources
+> Task :app:mapDebugSourceSetPaths UP-TO-DATE
+> Task :app:generateDebugResources UP-TO-DATE
+> Task :app:mergeDebugResources UP-TO-DATE
+> Task :app:packageDebugResources UP-TO-DATE
+> Task :app:parseDebugLocalResources UP-TO-DATE
+> Task :app:createDebugCompatibleScreenManifests UP-TO-DATE
+> Task :app:extractDeepLinksDebug UP-TO-DATE
+> Task :capacitor-android:extractDeepLinksDebug
+> Task :capacitor-cordova-android-plugins:extractDeepLinksDebug UP-TO-DATE
+> Task :capacitor-cordova-android-plugins:processDebugManifest UP-TO-DATE
+> Task :capacitor-local-notifications:extractDeepLinksDebug
+> Task :capacitor-android:processDebugManifest
+> Task :capacitor-local-notifications:processDebugManifest
+> Task :capacitor-android:compileDebugLibraryResources
+> Task :app:processDebugMainManifest UP-TO-DATE
+> Task :app:processDebugManifest UP-TO-DATE
+> Task :app:processDebugManifestForPackage UP-TO-DATE
+> Task :capacitor-cordova-android-plugins:compileDebugLibraryResources UP-TO-DATE
+> Task :capacitor-cordova-android-plugins:parseDebugLocalResources UP-TO-DATE
+> Task :capacitor-cordova-android-plugins:generateDebugRFile UP-TO-DATE
+> Task :capacitor-android:parseDebugLocalResources
+> Task :capacitor-local-notifications:compileDebugLibraryResources
+> Task :capacitor-cordova-android-plugins:javaPreCompileDebug UP-TO-DATE
+> Task :capacitor-android:javaPreCompileDebug
+> Task :capacitor-cordova-android-plugins:compileDebugJavaWithJavac NO-SOURCE
+> Task :capacitor-cordova-android-plugins:bundleLibCompileToJarDebug UP-TO-DATE
+> Task :capacitor-local-notifications:parseDebugLocalResources
+> Task :app:mergeDebugShaders UP-TO-DATE
+> Task :capacitor-local-notifications:javaPreCompileDebug
+> Task :app:compileDebugShaders NO-SOURCE
+> Task :app:generateDebugAssets UP-TO-DATE
+> Task :capacitor-android:mergeDebugShaders
+> Task :capacitor-android:compileDebugShaders NO-SOURCE
+> Task :capacitor-android:generateDebugAssets UP-TO-DATE
+> Task :capacitor-local-notifications:generateDebugRFile
+> Task :capacitor-android:generateDebugRFile
+> Task :capacitor-android:mergeDebugAssets
+> Task :app:processDebugResources
+
+> Task :capacitor-android:compileDebugJavaWithJavac
+.\gradlew : Note: Some input 
+files use unchecked or 
+unsafe operations.
+En línea: 1 Carácter: 1
++ .\gradlew assembleDebug 
+2>&1 | Out-File -Encoding 
+utf8 gradle_build_l ...
++ 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo           
+   : NotSpecified: (Note: S  
+  ome inpu...afe operation   
+ s.:String) [], RemoteExc    
+eption
+    + FullyQualifiedErrorId  
+   : NativeCommandError
+ 
+Note: Recompile with 
+-Xlint:unchecked for details.
+
+> Task :capacitor-cordova-android-plugins:mergeDebugShaders UP-TO-DATE
+> Task :capacitor-cordova-android-plugins:compileDebugShaders NO-SOURCE
+> Task :capacitor-cordova-android-plugins:generateDebugAssets UP-TO-DATE
+> Task :capacitor-cordova-android-plugins:mergeDebugAssets UP-TO-DATE
+> Task :capacitor-local-notifications:mergeDebugShaders
+> Task :capacitor-local-notifications:compileDebugShaders NO-SOURCE
+> Task :capacitor-local-notifications:generateDebugAssets UP-TO-DATE
+> Task :capacitor-local-notifications:mergeDebugAssets
+> Task :capacitor-android:bundleLibCompileToJarDebug
+> Task :app:mergeDebugAssets FAILED
+
+[Incubating] Problems report is available at: file:///H:/icuas/Documents/SCRIPTS/SALBUS%20-%20VB/bus-salamanca-app/android/build/reports/problems/problems-report.html
+
+FAILURE: Build failed with 
+an exception.
+
+* What went wrong:
+Execution failed for task 
+':app:mergeDebugAssets'.
+> java.io.IOException: 
+Unable to delete directory 'H
+:\icuas\Documents\SCRIPTS\SAL
+BUS - VB\bus-salamanca-app\an
+droid\app\build\intermediates
+\assets\debug\mergeDebugAsset
+s'
+    Failed to delete some 
+children. This might happen 
+because a process has files 
+open or has its working 
+directory set in the target 
+directory.
+    - H:\icuas\Documents\SCRI
+PTS\SALBUS - VB\bus-salamanca
+-app\android\app\build\interm
+ediates\assets\debug\mergeDeb
+ugAssets\public\assets
+    - H:\icuas\Documents\SCRI
+PTS\SALBUS - VB\bus-salamanca
+-app\android\app\build\interm
+ediates\assets\debug\mergeDeb
+ugAssets\public\data
+    - H:\icuas\Documents\SCRI
+PTS\SALBUS - VB\bus-salamanca
+-app\android\app\build\interm
+ediates\assets\debug\mergeDeb
+ugAssets\public
+    - H:\icuas\Documents\SCRI
+PTS\SALBUS - VB\bus-salamanca
+-app\android\app\build\interm
+ediates\assets\debug\mergeDeb
+ugAssets\public (1)\assets
+    - H:\icuas\Documents\SCRI
+PTS\SALBUS - VB\bus-salamanca
+-app\android\app\build\interm
+ediates\assets\debug\mergeDeb
+ugAssets\public (1)\data
+    - H:\icuas\Documents\SCRI
+PTS\SALBUS - VB\bus-salamanca
+-app\android\app\build\interm
+ediates\assets\debug\mergeDeb
+ugAssets\public (1)
+    - H:\icuas\Documents\SCRI
+PTS\SALBUS - VB\bus-salamanca
+-app\android\app\build\interm
+ediates\assets\debug\mergeDeb
+ugAssets\public (2)\assets
+    - H:\icuas\Documents\SCRI
+PTS\SALBUS - VB\bus-salamanca
+-app\android\app\build\interm
+ediates\assets\debug\mergeDeb
+ugAssets\public (2)\data
+    - H:\icuas\Documents\SCRI
+PTS\SALBUS - VB\bus-salamanca
+-app\android\app\build\interm
+ediates\assets\debug\mergeDeb
+ugAssets\public (2)
+    - H:\icuas\Documents\SCRI
+PTS\SALBUS - VB\bus-salamanca
+-app\android\app\build\interm
+ediates\assets\debug\mergeDeb
+ugAssets\public (3)\assets
+    - H:\icuas\Documents\SCRI
+PTS\SALBUS - VB\bus-salamanca
+-app\android\app\build\interm
+ediates\assets\debug\mergeDeb
+ugAssets\public (3)\data
+    - H:\icuas\Documents\SCRI
+PTS\SALBUS - VB\bus-salamanca
+-app\android\app\build\interm
+ediates\assets\debug\mergeDeb
+ugAssets\public (3)
+    - H:\icuas\Documents\SCRI
+PTS\SALBUS - VB\bus-salamanca
+-app\android\app\build\interm
+ediates\assets\debug\mergeDeb
+ugAssets\public (4)\assets
+    - H:\icuas\Documents\SCRI
+PTS\SALBUS - VB\bus-salamanca
+-app\android\app\build\interm
+ediates\assets\debug\mergeDeb
+ugAssets\public (4)\data
+    - H:\icuas\Documents\SCRI
+PTS\SALBUS - VB\bus-salamanca
+-app\android\app\build\interm
+ediates\assets\debug\mergeDeb
+ugAssets\public (4)
+    - H:\icuas\Documents\SCRI
+PTS\SALBUS - VB\bus-salamanca
+-app\android\app\build\interm
+ediates\assets\debug\mergeDeb
+ugAssets\public (5)\assets
+    - and more ...
+
+* Try:
+> Run with --stacktrace 
+option to get the stack 
+trace.
+> Run with --info or --debug 
+option to get more log 
+output.
+> Run with --scan to get 
+full insights.
+> Get more help at 
+https://help.gradle.org.
+
+BUILD FAILED in 34s
+60 actionable tasks: 30 executed, 30 up-to-date
