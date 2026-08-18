@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="SALBUS">
+  <!--
+    Silueta monocroma SIN fondo. Es la fuente del icono pequeno de notificacion:
+    Android descarta el color y usa solo el canal alfa, asi que cualquier fondo
+    se veria como un cuadrado solido en la barra de estado.
+  -->
+  <path fill="#ffffff" d="M8 2h8a4 4 0 0 1 4 4v9.5a4 4 0 0 1-1.5 3.12V20a1.5 1.5 0 0 1-1.5 1.5h-1A1.5 1.5 0 0 1 14.5 20v-.5h-5v.5A1.5 1.5 0 0 1 8 21.5H7A1.5 1.5 0 0 1 5.5 20v-1.38A4 4 0 0 1 4 15.5V6a4 4 0 0 1 4-4Zm-1.5 5.5v4h11v-4Zm1.75 6.75a1.25 1.25 0 1 0 0 2.5 1.25 1.25 0 0 0 0-2.5Zm7.5 0a1.25 1.25 0 1 0 0 2.5 1.25 1.25 0 0 0 0-2.5Z"/>
+</svg>

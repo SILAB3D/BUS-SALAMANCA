@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/icon-192.png" />
+    <meta
+      name="description"
+      content="SALBUS · Tiempos de llegada en tiempo real de los autobuses urbanos de Salamanca."
+    />
+    <meta name="theme-color" content="#0d47c8" />
+    <title>SALBUS</title>
+  </head>
+  <body>
+    <!--
+      Pantalla de carga de marca. Dura 1,5 s exactos: el icono entra, late una vez
+      y la barra de progreso se completa. Se retira desde main.ts cuando la app
+      esta lista (y nunca antes de que termine la animacion, para que no parpadee).
+    -->
+    <div id="splash" class="splash" role="status" aria-live="polite">
+      <div class="splash-mark">
+        <img src="/favicon.svg" alt="" width="112" height="112" />
+      </div>
+      <p class="splash-name">SALBUS</p>
+      <p class="splash-tagline">Autobuses urbanos de Salamanca</p>
+      <div class="splash-track"><div class="splash-bar"></div></div>
+    </div>
+
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

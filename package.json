@@ -1,0 +1,39 @@
+{
+  "name": "salbus",
+  "private": true,
+  "version": "4.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:host": "vite --host",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "test": "node tools/selftest.mjs",
+    "test:live": "node tools/selftest.mjs --live",
+    "data:network": "node tools/fetch-official-network.mjs",
+    "assets:icons": "node tools/build-icons.mjs && npx capacitor-assets generate --android",
+    "ui:check": "node tools/uicheck.mjs --overflow",
+    "android:sync": "npm run build && npx cap sync android",
+    "android:build": "npm run android:sync && cd android && gradlew assembleDebug",
+    "android:open": "npx cap open android",
+    "ui:stability": "node tools/uicheck.mjs --overflow --stability --seed",
+    "test:punctuality": "node tools/punctuality-live.mjs"
+  },
+  "devDependencies": {
+    "@capacitor/assets": "^3.0.5",
+    "@capacitor/cli": "^8.2.0",
+    "@types/leaflet": "^1.9.21",
+    "@types/papaparse": "^5.5.2",
+    "typescript": "~5.9.3",
+    "vite": "^8.0.0"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.2.0",
+    "@capacitor/core": "^8.2.0",
+    "@capacitor/local-notifications": "^8.0.2",
+    "jszip": "^3.10.1",
+    "leaflet": "^1.9.4",
+    "papaparse": "^5.5.3"
+  },
+  "description": "Tiempos de llegada en tiempo real de los autobuses urbanos de Salamanca."
+}
