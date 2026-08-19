@@ -48,7 +48,8 @@ public class BusTrackingPlugin extends Plugin {
         intent.putExtra(BusTrackingService.EXTRA_STOP_NAME, call.getString("stopName", stopId));
         intent.putExtra(BusTrackingService.EXTRA_LINE_ID, lineId);
         intent.putExtra(BusTrackingService.EXTRA_DESTINATION, call.getString("destination", ""));
-        intent.putExtra(BusTrackingService.EXTRA_INTERVAL, call.getInt("intervalSeconds", 30));
+        intent.putExtra(BusTrackingService.EXTRA_INTERVAL, call.getInt("intervalSeconds", 15));
+        intent.putExtra(BusTrackingService.EXTRA_BUSES_SEEN, call.getInt("busesSeen", 0));
 
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -78,15 +79,36 @@ public class BusTrackingPlugin extends Plugin {
     }
 
     /** Invocado desde el servicio en cada ciclo para que la UI se mantenga al dia. */
-    void emitArrivalUpdate(String stopId, String lineId, int minutes, boolean arriving, int status) {
+    void emitArrivalUpdate(
+        String stopId,
+        String lineId,
+        int minutes,
+        boolean arriving,
+        int status,
+        int busesSeen,
+        boolean finished
+    ) {
         JSObject payload = new JSObject();
         payload.put("stopId", stopId);
         payload.put("lineId", lineId);
         payload.put("minutes", minutes);
         payload.put("arriving", arriving);
         payload.put("status", statusName(status));
+        payload.put("busesSeen", busesSeen);
+        payload.put("finished", finished);
         payload.put("at", System.currentTimeMillis());
         notifyListeners("arrivalUpdate", payload);
+    }
+
+    /** Un autobus mas ha pasado por la parada y el aviso sigue con el siguiente. */
+    void emitBusPassed(String stopId, String lineId, int busesSeen, int target) {
+        JSObject payload = new JSObject();
+        payload.put("stopId", stopId);
+        payload.put("lineId", lineId);
+        payload.put("busesSeen", busesSeen);
+        payload.put("target", target);
+        payload.put("at", System.currentTimeMillis());
+        notifyListeners("busPassed", payload);
     }
 
     private static String statusName(int status) {

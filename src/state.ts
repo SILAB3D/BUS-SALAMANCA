@@ -3,7 +3,7 @@ import { averageMinutes } from './services/punctuality'
 import type { MonitorRuntime } from './services/punctuality'
 import type { ScheduleDataset, ServiceDayType, StopFeed } from './types'
 
-export const APP_VERSION = 'v4.1'
+export const APP_VERSION = 'v4.2'
 
 export type TabId = 'inicio' | 'buscar' | 'paradas' | 'monitor' | 'seguimiento' | 'ajustes'
 export type SearchMode = 'nombre' | 'linea' | 'mapa'
@@ -27,7 +27,12 @@ export interface TrackingJob {
   /** Se arma cuando el bus se acerca; al desaparecer o alejarse se da por pasado. */
   armed: boolean
   missingStreak: number
+  /** Autobuses ya vistos pasar; el aviso termina al llegar a TRACKING_BUS_TARGET. */
+  busesSeen: number
 }
+
+/** Autobuses que hay que ver pasar antes de dar por terminado el aviso. */
+export const TRACKING_BUS_TARGET = 3
 
 /** Monitorizacion: registra pasos reales en una franja para calcular medias. */
 export interface MonitorJob {
@@ -153,6 +158,14 @@ const KEYS = {
   tab: 'salbus.tab',
 }
 
+function normalizeTracking(job: TrackingJob | null): TrackingJob | null {
+  if (!job || typeof job.id !== 'string') {
+    return null
+  }
+
+  return { ...job, busesSeen: typeof job.busesSeen === 'number' ? job.busesSeen : 0 }
+}
+
 export const state: AppState = {
   ready: false,
   bootPhase: 'Iniciando…',
@@ -183,7 +196,8 @@ export const state: AppState = {
   ),
   expandedStopId: null,
 
-  tracking: readJson<TrackingJob | null>(KEYS.tracking, null),
+  // busesSeen no existia en versiones anteriores: un aviso guardado sin el empieza a contar de cero.
+  tracking: normalizeTracking(readJson<TrackingJob | null>(KEYS.tracking, null)),
   monitors: readJson<MonitorJob[]>(KEYS.monitors, [])
     .filter((item) => typeof item?.id === 'string')
     .map((item) => ({ ...item, directionKey: item.directionKey ?? null })),

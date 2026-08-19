@@ -117,20 +117,43 @@ export async function showTrackingNotification(payload: TrackingNotification): P
   }
 }
 
-export async function showArrivalAlert(id: number, lineId: string, stopName: string): Promise<void> {
+/**
+ * Aviso puntual de que un autobus ya ha pasado.
+ *
+ * Se reutiliza siempre el mismo `id` a lo largo de un seguimiento para que cada
+ * paso sustituya al anterior en lugar de apilar avisos sueltos.
+ */
+export async function showArrivalAlert(
+  id: number,
+  lineId: string,
+  stopName: string,
+  progress?: { seen: number, target: number },
+): Promise<void> {
   if (!isNative()) {
     return
   }
 
   await ensureChannel()
 
+  const done = progress ? progress.seen >= progress.target : true
+
+  const title = done
+    ? `Línea ${lineId} · aviso completado`
+    : `Línea ${lineId} · autobús ${progress?.seen} de ${progress?.target}`
+
+  const body = done
+    ? progress
+      ? `Han pasado ${progress.target} autobuses por ${stopName}.`
+      : `Tu autobús ha pasado por ${stopName}.`
+    : `Ha pasado por ${stopName}. Seguimos con el siguiente.`
+
   try {
     await LocalNotifications.schedule({
       notifications: [
         {
           id,
-          title: `Línea ${lineId} está llegando`,
-          body: `Tu autobús está entrando en ${stopName}.`,
+          title,
+          body,
           channelId: CHANNEL_ID,
           smallIcon: SMALL_ICON,
           ongoing: false,

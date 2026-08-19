@@ -39,6 +39,7 @@ import {
   persistTab,
   persistTracking,
   state,
+  TRACKING_BUS_TARGET,
   type MonitorJob,
   type TabId,
 } from './state'
@@ -62,6 +63,18 @@ interface TrackingUpdate {
   minutes: number
   arriving: boolean
   status: 'ok' | 'empty' | 'throttled' | 'error'
+  /** Autobuses ya contados por el servicio, que es quien manda mientras esta vivo. */
+  busesSeen: number
+  /** El servicio ha completado los tres autobuses y se esta deteniendo. */
+  finished: boolean
+  at: number
+}
+
+interface BusPassedUpdate {
+  stopId: string
+  lineId: string
+  busesSeen: number
+  target: number
   at: number
 }
 
@@ -72,12 +85,17 @@ interface BusTrackingPlugin {
     lineId: string
     destination: string
     intervalSeconds: number
+    busesSeen: number
   }): Promise<void>
   stop(): Promise<void>
   isRunning(): Promise<{ running: boolean }>
   addListener(
     event: 'arrivalUpdate',
     handler: (update: TrackingUpdate) => void,
+  ): Promise<{ remove: () => Promise<void> }>
+  addListener(
+    event: 'busPassed',
+    handler: (update: BusPassedUpdate) => void,
   ): Promise<{ remove: () => Promise<void> }>
 }
 
@@ -106,6 +124,9 @@ const FRESHNESS = {
 /** Cadencia minima entre lotes automaticos completos. */
 const AUTO_CYCLE_MS = 20_000
 
+/** Cuatro actualizaciones por minuto del aviso de proximo bus. */
+const TRACKING_INTERVAL_SECONDS = 15
+
 const root = document.querySelector<HTMLDivElement>('#app')
 if (!root) {
   throw new Error('No se encontró el contenedor #app.')
@@ -115,6 +136,15 @@ const appRoot = root
 
 let renderQueued = false
 let lastAutoCycleAt = 0
+
+/**
+ * El servicio nativo esta al mando del aviso.
+ *
+ * Mientras lo este, la parte web no publica su propia notificacion: serian dos
+ * avisos distintos, y el de la web se congelaria en cuanto la app pasara a
+ * segundo plano. Tampoco cuenta autobuses aqui, para no contar dos veces.
+ */
+let trackingServiceActive = false
 let refreshInFlight = false
 let toastTimer: number | null = null
 let map: L.Map | null = null
@@ -444,11 +474,16 @@ async function startTracking(stopId: string, lineId: string): Promise<void> {
     lastNotifiedAt: 0,
     armed: false,
     missingStreak: 0,
+    busesSeen: 0,
   }
 
   state.tracking = job
   persistTracking()
-  log('info', 'aviso', `Seguimiento iniciado: línea ${lineId} en ${job.stopName}.`)
+  log(
+    'info',
+    'aviso',
+    `Seguimiento iniciado: línea ${lineId} en ${job.stopName} (${TRACKING_BUS_TARGET} autobuses).`,
+  )
 
   // El servicio nativo mantiene vivo el aviso aunque la app pase a segundo plano.
   if (isNative()) {
@@ -458,9 +493,15 @@ async function startTracking(stopId: string, lineId: string): Promise<void> {
         stopName: job.stopName,
         lineId,
         destination: describeArrival(stopId, lineId),
-        intervalSeconds: 30,
+        intervalSeconds: TRACKING_INTERVAL_SECONDS,
+        busesSeen: 0,
       })
+      trackingServiceActive = true
+      // Si una version anterior dejo una notificacion web, aqui sobra: el servicio
+      // ya publica la suya y esa se quedaria fija para siempre.
+      await cancelNotification(notificationId(job.id))
     } catch (error) {
+      trackingServiceActive = false
       log('warn', 'aviso', `No se pudo iniciar el servicio en segundo plano: ${errorMessage(error)}`)
       showToast('El aviso funcionará solo con la app abierta', 'error')
     }
@@ -481,6 +522,7 @@ async function stopTracking(notify = true): Promise<void> {
   await cancelNotification(notificationId(job.id))
 
   if (isNative()) {
+    trackingServiceActive = false
     try {
       await BusTracking.stop()
     } catch {
@@ -531,25 +573,69 @@ async function restoreTrackingService(): Promise<void> {
         message: null,
       }
 
+      // El servicio es quien cuenta los autobuses mientras vive: la web se limita
+      // a copiar su cuenta para que la pantalla diga lo mismo que la notificación.
+      if (state.tracking && state.tracking.stopId === update.stopId) {
+        state.tracking.busesSeen = update.busesSeen
+        persistTracking()
+      }
+
+      if (update.finished) {
+        trackingServiceActive = false
+        void finishTracking()
+        return
+      }
+
+      render()
+    })
+
+    await BusTracking.addListener('busPassed', (update) => {
+      if (!state.tracking || state.tracking.stopId !== update.stopId) {
+        return
+      }
+
+      state.tracking.busesSeen = update.busesSeen
+      state.tracking.armed = false
+      state.tracking.lastMinutes = null
+      state.tracking.missingStreak = 0
+      persistTracking()
+
+      log(
+        'info',
+        'aviso',
+        `Autobús ${update.busesSeen} de ${update.target} de la línea ${update.lineId} ha pasado por ${stopName(update.stopId)}.`,
+      )
+      showToast(`Autobús ${update.busesSeen} de ${update.target} ya ha pasado`, 'info')
       render()
     })
 
     const { running } = await BusTracking.isRunning()
+    trackingServiceActive = running && Boolean(state.tracking)
 
     if (running && !state.tracking) {
       // El servicio quedó vivo pero la app perdió el estado: se detiene para no
       // dejar una notificación huérfana.
       await BusTracking.stop()
+    } else if (!running && state.tracking && state.tracking.busesSeen >= TRACKING_BUS_TARGET) {
+      // El servicio completó los tres autobuses con la app cerrada: se cierra el
+      // aviso en lugar de revivirlo.
+      await finishTracking()
     } else if (!running && state.tracking) {
       await BusTracking.start({
         stopId: state.tracking.stopId,
         stopName: state.tracking.stopName,
         lineId: state.tracking.lineId,
         destination: describeArrival(state.tracking.stopId, state.tracking.lineId),
-        intervalSeconds: 30,
+        intervalSeconds: TRACKING_INTERVAL_SECONDS,
+        busesSeen: state.tracking.busesSeen,
       })
+      trackingServiceActive = true
+      // El servicio publica su propia notificación: cualquier resto de la web
+      // sobra, porque ya no se volvería a actualizar.
+      await cancelNotification(notificationId(state.tracking.id))
     }
   } catch (error) {
+    trackingServiceActive = false
     log('warn', 'aviso', `Servicio en segundo plano no disponible: ${errorMessage(error)}`)
   }
 }
@@ -564,12 +650,22 @@ function evaluateTracking(feed: StopFeed): void {
     .filter((item) => item.lineId === job.lineId)
     .sort((left, right) => liveMinutes(left) - liveMinutes(right))[0]
 
+  // Mientras el servicio nativo vive, es él quien cuenta los pasos: contar también
+  // aquí duplicaría autobuses y terminaría el aviso antes de tiempo.
+  const countsPasses = !trackingServiceActive
+
   if (!arrival) {
+    // Un fallo de red no dice nada del autobús; solo una respuesta buena sin la
+    // línea cuenta como ausencia.
+    if (feed.status !== 'ok' && feed.status !== 'empty') {
+      return
+    }
+
     job.missingStreak += 1
 
     // Dos ciclos sin ver la línea después de haberla tenido encima: ha pasado.
-    if (job.armed && job.missingStreak >= 2) {
-      void completeTracking()
+    if (countsPasses && job.armed && job.missingStreak >= 2) {
+      void registerBusPassed()
     }
 
     return
@@ -583,8 +679,8 @@ function evaluateTracking(feed: StopFeed): void {
   }
 
   // Se alejó tras haber estado encima: el bus ya pasó.
-  if (job.armed && job.lastMinutes !== null && job.lastMinutes <= 2 && minutes >= 6) {
-    void completeTracking()
+  if (countsPasses && job.armed && job.lastMinutes !== null && job.lastMinutes <= 2 && minutes >= 6) {
+    void registerBusPassed()
     return
   }
 
@@ -592,9 +688,10 @@ function evaluateTracking(feed: StopFeed): void {
   job.lastNotifiedAt = Date.now()
   persistTracking()
 
-  // En nativo la notificación la mantiene el servicio; aquí solo se refleja
-  // cuando la app está en primer plano y el servicio no está disponible.
-  if (isNative() && !document.hidden) {
+  // Con el servicio nativo vivo, la notificación es suya y solo suya: publicar
+  // otra desde aquí dejaría un segundo aviso que se congela al irse a segundo
+  // plano. Esto es solo el respaldo para cuando el servicio no está disponible.
+  if (isNative() && !trackingServiceActive && !document.hidden) {
     void showTrackingNotification({
       id: notificationId(job.id),
       stopName: job.stopName,
@@ -608,16 +705,59 @@ function evaluateTracking(feed: StopFeed): void {
   }
 }
 
-async function completeTracking(): Promise<void> {
+/**
+ * Un autobús más ha pasado. El aviso solo termina cuando se han visto pasar
+ * TRACKING_BUS_TARGET; hasta entonces se rearma y sigue con el siguiente.
+ */
+async function registerBusPassed(): Promise<void> {
   const job = state.tracking
   if (!job) {
     return
   }
 
-  await showArrivalAlert(notificationId(`${job.id}|done`), job.lineId, job.stopName)
-  log('info', 'aviso', `La línea ${job.lineId} ya ha pasado por ${job.stopName}.`)
+  job.busesSeen += 1
+  job.armed = false
+  job.lastMinutes = null
+  job.missingStreak = 0
+  persistTracking()
+
+  if (job.busesSeen >= TRACKING_BUS_TARGET) {
+    await finishTracking()
+    return
+  }
+
+  // Mismo id en todos los avisos intermedios: se sustituyen en vez de apilarse.
+  await showArrivalAlert(notificationId(`${job.id}|done`), job.lineId, job.stopName, {
+    seen: job.busesSeen,
+    target: TRACKING_BUS_TARGET,
+  })
+  log(
+    'info',
+    'aviso',
+    `Autobús ${job.busesSeen} de ${TRACKING_BUS_TARGET} de la línea ${job.lineId} ha pasado por ${job.stopName}.`,
+  )
+  showToast(`Autobús ${job.busesSeen} de ${TRACKING_BUS_TARGET} ya ha pasado`, 'info')
+  render()
+}
+
+/** Cierra el aviso: ya han pasado los tres autobuses. */
+async function finishTracking(): Promise<void> {
+  const job = state.tracking
+  if (!job) {
+    return
+  }
+
+  await showArrivalAlert(notificationId(`${job.id}|done`), job.lineId, job.stopName, {
+    seen: TRACKING_BUS_TARGET,
+    target: TRACKING_BUS_TARGET,
+  })
+  log(
+    'info',
+    'aviso',
+    `Aviso completado: han pasado ${TRACKING_BUS_TARGET} autobuses de la línea ${job.lineId} por ${job.stopName}.`,
+  )
   await stopTracking(false)
-  showToast(`La línea ${job.lineId} ya ha pasado`, 'success')
+  showToast(`Han pasado ${TRACKING_BUS_TARGET} autobuses de la línea ${job.lineId}`, 'success')
   render()
 }
 

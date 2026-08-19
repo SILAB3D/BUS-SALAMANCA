@@ -8,6 +8,7 @@ import {
   isWithinWindow,
   state,
   summariseMonitor,
+  TRACKING_BUS_TARGET,
   type MonitorJob,
   type MonitorRow,
   type TabId,
@@ -297,7 +298,7 @@ function renderTrackingBanner(): string {
         ${lineChip(tracking.lineId, lineColor(tracking.lineId), 'lg')}
         <div class="card-head-copy">
           <h2 class="card-title">${esc(tracking.stopName)}</h2>
-          <p class="card-sub">Aviso activo · ${esc(describeArrival(tracking.stopId, tracking.lineId))}</p>
+          <p class="card-sub">Autobús ${Math.min(tracking.busesSeen + 1, TRACKING_BUS_TARGET)} de ${TRACKING_BUS_TARGET} · ${esc(describeArrival(tracking.stopId, tracking.lineId))}</p>
         </div>
         <div class="card-actions">
           <div class="arrival-eta">${
