@@ -158,11 +158,15 @@ export async function fetchStopArrivals(stopId: string, options: FetchOptions = 
 /**
  * Refresca varias paradas de forma SECUENCIAL. Devuelve los resultados segun se
  * completan a traves de `onFeed`, para que la interfaz pueda ir pintando sin
- * esperar al lote completo.
+ * esperar al lote completo. `onStart` avisa de la parada que entra en turno,
+ * para poder distinguir en pantalla lo que ya esta al dia de lo que espera.
  */
 export async function fetchStopsSequentially(
   stopIds: string[],
-  options: FetchOptions & { onFeed?: (feed: StopFeed) => void } = {},
+  options: FetchOptions & {
+    onFeed?: (feed: StopFeed) => void
+    onStart?: (stopId: string) => void
+  } = {},
 ): Promise<StopFeed[]> {
   const results: StopFeed[] = []
 
@@ -171,6 +175,7 @@ export async function fetchStopsSequentially(
       break
     }
 
+    options.onStart?.(stopId)
     const feed = await fetchStopArrivals(stopId, options)
     results.push(feed)
     options.onFeed?.(feed)

@@ -45,7 +45,7 @@ import {
 } from './state'
 import type { StopFeed } from './types'
 import { patch } from './dom'
-import { liveMinutes } from './ui'
+import { esc, liveMinutes, readableTextColor } from './ui'
 import { describeArrival, renderApp, stopName } from './views'
 
 /* ------------------------------------------------------------------ *
@@ -385,6 +385,12 @@ async function refreshVisible(source: 'auto' | 'manual'): Promise<void> {
   lastAutoCycleAt = Date.now()
   state.refreshing = true
 
+  // Todas entran en cola a la vez; se iran marcando "en curso" segun les toque.
+  // Es lo que permite distinguir en pantalla lo actualizado de lo que espera.
+  for (const entry of plan) {
+    state.stopSync[entry.stopId] = 'queued'
+  }
+
   if (plan.length > 1) {
     const seconds = Math.round(((plan.length - 1) * MIN_REQUEST_SPACING_MS) / 1000)
     state.refreshQueueLabel = `Actualizando ${plan.length} paradas · ~${seconds} s`
@@ -400,8 +406,13 @@ async function refreshVisible(source: 'auto' | 'manual'): Promise<void> {
       {
         maxAgeMs: source === 'manual' ? 0 : DEFAULT_MAX_AGE_MS,
         priority: plan[0]?.priority,
+        onStart: (stopId) => {
+          state.stopSync[stopId] = 'loading'
+          render()
+        },
         onFeed: (feed) => {
           done += 1
+          delete state.stopSync[feed.stopId]
           applyFeed(feed)
           state.refreshQueueLabel =
             plan.length > 1 && done < plan.length ? `Actualizando ${done + 1} de ${plan.length}…` : null
@@ -417,6 +428,12 @@ async function refreshVisible(source: 'auto' | 'manual'): Promise<void> {
     refreshInFlight = false
     state.refreshing = false
     state.refreshQueueLabel = null
+    // Un error a mitad de lote dejaria paradas colgadas en "en cola" para
+    // siempre. Solo se limpian las de este lote: una consulta suelta en curso
+    // (refreshOneStop) lleva su propia marca y la gestiona ella.
+    for (const entry of plan) {
+      delete state.stopSync[entry.stopId]
+    }
     render()
   }
 }
@@ -424,6 +441,7 @@ async function refreshVisible(source: 'auto' | 'manual'): Promise<void> {
 /** Refresca una sola parada de inmediato (botón de la tarjeta). */
 async function refreshOneStop(stopId: string): Promise<void> {
   state.refreshing = true
+  state.stopSync[stopId] = 'loading'
   render()
 
   try {
@@ -436,6 +454,7 @@ async function refreshOneStop(stopId: string): Promise<void> {
     }
   } finally {
     state.refreshing = false
+    delete state.stopSync[stopId]
     render()
   }
 }
@@ -924,11 +943,19 @@ appRoot.addEventListener('change', (event) => {
   if (action === 'pick-search-line') {
     state.search.lineId = target.value
     state.search.directionKey = state.network?.lineById.get(target.value)?.directions[0]?.key ?? ''
+    // Ya hay linea y sentido: el recorrido es lo unico que interesa mirar ahora,
+    // asi que el mapa ocupa toda la pantalla en lugar de una franja de 46 dvh.
+    if (state.search.mode === 'mapa' && state.search.directionKey) {
+      state.search.mapExpanded = true
+    }
     render()
   }
 
   if (action === 'pick-search-direction') {
     state.search.directionKey = target.value
+    if (state.search.mode === 'mapa' && state.search.directionKey) {
+      state.search.mapExpanded = true
+    }
     render()
   }
 
@@ -988,10 +1015,31 @@ async function handleAction(action: string, element: HTMLElement): Promise<void>
           state.search.lineId = firstLine?.lineId ?? ''
           state.search.directionKey = firstLine?.directions[0]?.key ?? ''
         }
+        if (mode !== 'mapa') {
+          state.search.mapExpanded = false
+        }
         render()
       }
       return
     }
+
+    case 'expand-map':
+      state.search.mapExpanded = true
+      render()
+      return
+
+    case 'collapse-map':
+      state.search.mapExpanded = false
+      render()
+      return
+
+    // Desde el globo del mapa: cierra la pantalla completa y baja a la ficha.
+    case 'map-select-stop':
+      state.search.selectedStopId = stopId
+      state.search.mapExpanded = false
+      render()
+      await refreshOneStop(stopId)
+      return
 
     case 'select-stop':
       state.search.selectedStopId = stopId
@@ -1227,7 +1275,10 @@ function syncMap(): void {
 
   if (!map || map.getContainer() !== container) {
     map?.remove()
-    map = L.map(container, { zoomControl: true, attributionControl: true })
+    map = L.map(container, { zoomControl: false, attributionControl: true })
+    L.control.zoom({ position: 'bottomleft' }).addTo(map)
+    // Con el mapa ampliado las chinchetas se amontonarian: se encogen al alejar.
+    map.on('zoomend', () => applyZoomScale())
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
       attribution: '&copy; OpenStreetMap',
@@ -1238,7 +1289,11 @@ function syncMap(): void {
 
   const direction = state.network.directionByKey.get(state.search.directionKey)
   const stops = direction?.stops ?? []
-  const signature = `${state.search.directionKey}|${state.search.selectedStopId ?? ''}`
+  // La pantalla completa entra en la firma: al cambiar de tamano hay que
+  // reencuadrar el recorrido, no solo recalcular el lienzo.
+  const signature = `${state.search.directionKey}|${state.search.selectedStopId ?? ''}|${
+    state.search.mapExpanded ? 'full' : 'inline'
+  }`
 
   if (signature === mapSignature) {
     map.invalidateSize()
@@ -1248,49 +1303,132 @@ function syncMap(): void {
   mapSignature = signature
   mapLayer?.clearLayers()
 
+  // Al pasar a pantalla completa el contenedor cambia de tamano, pero Leaflet
+  // sigue con el anterior en cache. Sin esto el encuadre sale calculado sobre
+  // la franja pequena y el recorrido queda diminuto en el centro.
+  map.invalidateSize()
+
   const color = state.network.getLineColor(direction?.key.split('|')[0] ?? '')
   const points: Array<[number, number]> = []
 
-  for (const stop of stops) {
+  stops.forEach((stop, index) => {
     if (!Number.isFinite(stop.lat) || !Number.isFinite(stop.lon)) {
-      continue
+      return
     }
 
     points.push([stop.lat, stop.lon])
     const selected = state.search.selectedStopId === stop.stopId
 
-    const marker = L.circleMarker([stop.lat, stop.lon], {
-      radius: selected ? 9 : 6,
-      color: '#ffffff',
-      weight: 2,
-      fillColor: selected ? '#ffcf3d' : color,
-      fillOpacity: 1,
+    // Marcador con icono propio en lugar de un circulo de 6 px: en un movil hay
+    // que poder verlo y acertarle con el dedo sin ampliar el mapa.
+    const marker = L.marker([stop.lat, stop.lon], {
+      icon: buildStopIcon(stop.stopId, index + 1, color, selected),
+      keyboard: false,
+      zIndexOffset: selected ? 1000 : 0,
     })
 
-    marker.bindTooltip(`${stop.stopName} · ${stop.stopId}`)
-    marker.on('click', () => {
-      state.search.selectedStopId = stop.stopId
-      render()
-      void refreshOneStop(stop.stopId)
+    marker.bindPopup(buildStopPopup(stop), {
+      className: 'map-popup',
+      closeButton: true,
+      maxWidth: 260,
+      minWidth: 200,
+      autoPanPadding: [16, 16],
     })
 
     if (mapLayer) {
       marker.addTo(mapLayer)
     }
-  }
+  })
 
   // El trazado une las paradas en el orden real del trayecto.
   if (points.length > 1 && mapLayer) {
-    L.polyline(points, { color, weight: 4, opacity: 0.65 }).addTo(mapLayer)
+    L.polyline(points, { color, weight: 5, opacity: 0.7 }).addTo(mapLayer)
   }
 
   if (points.length > 0) {
-    map.fitBounds(points, { padding: [28, 28], maxZoom: 16 })
+    map.fitBounds(points, { padding: [34, 34], maxZoom: 16 })
   } else {
     map.setView([40.9701, -5.6635], 13)
   }
 
-  window.setTimeout(() => map?.invalidateSize(), 60)
+  applyZoomScale()
+
+  // Segunda pasada: la transicion de tamano del contenedor puede no haber
+  // terminado cuando se pinta, y el encuadre quedaria corrido.
+  window.setTimeout(() => {
+    if (!map) {
+      return
+    }
+    map.invalidateSize()
+    if (points.length > 0) {
+      map.fitBounds(points, { padding: [34, 34], maxZoom: 16 })
+    }
+    applyZoomScale()
+  }, 80)
+}
+
+/**
+ * Una linea entera cabe en pantalla solo muy alejado, y ahi 30 chinchetas se
+ * solapan hasta ser ilegibles. Alejado se dibujan como puntos; al acercarse
+ * recuperan tamano y numero de orden.
+ */
+function applyZoomScale(): void {
+  if (!map) {
+    return
+  }
+
+  const zoom = map.getZoom()
+  const container = map.getContainer()
+  container.classList.toggle('is-far', zoom < 14)
+  container.classList.toggle('is-mid', zoom >= 14 && zoom < 15.5)
+}
+
+/** Chincheta de parada: circulo grande con el numero de orden en el recorrido. */
+function buildStopIcon(stopId: string, order: number, color: string, selected: boolean): L.DivIcon {
+  const size = selected ? 42 : 34
+
+  return L.divIcon({
+    className: '',
+    html: `<span class="map-pin${selected ? ' is-selected' : ''}" style="--pin:${esc(
+      color,
+    )};--pin-text:${esc(readableTextColor(color))}" data-stop="${esc(stopId)}">${order}</span>`,
+    iconSize: [size, size],
+    iconAnchor: [size / 2, size / 2],
+    popupAnchor: [0, -size / 2],
+  })
+}
+
+/**
+ * Ficha reducida de la parada dentro del globo: nombre, codigo y lineas que
+ * pasan por ella. Los tiempos no van aqui: pedirlos abriria una consulta por
+ * cada parada que se toque, y la fuente oficial limita por IP.
+ */
+function buildStopPopup(stop: { stopId: string, stopName: string }): string {
+  const lines = state.network?.getLinesForStop(stop.stopId) ?? []
+
+  return `
+    <div class="map-popup-body">
+      <strong class="map-popup-name">${esc(stop.stopName)}</strong>
+      <span class="map-popup-code">Parada ${esc(stop.stopId)}</span>
+      <span class="map-popup-lines">
+        ${
+          lines.length === 0
+            ? '<em>Sin líneas registradas</em>'
+            : lines
+                .map(
+                  (line) =>
+                    `<span class="line-chip is-sm" style="background:${esc(
+                      line.color,
+                    )};color:${esc(readableTextColor(line.color))}">${esc(line.lineId)}</span>`,
+                )
+                .join('')
+        }
+      </span>
+      <button class="btn btn-primary btn-sm" type="button" data-action="map-select-stop" data-stop="${esc(
+        stop.stopId,
+      )}">Ver tiempos</button>
+    </div>
+  `
 }
 
 /* ------------------------------------------------------------------ *

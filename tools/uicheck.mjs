@@ -285,14 +285,70 @@ async function main() {
           same: window.__map === el,
           leafletClass: Boolean(el && el.classList.contains('leaflet-container')),
           tiles: document.querySelectorAll('#stop-map img.leaflet-tile').length,
-          markers: document.querySelectorAll('#stop-map path.leaflet-interactive').length
+          route: document.querySelectorAll('#stop-map path.leaflet-interactive').length,
+          pins: document.querySelectorAll('#stop-map .map-pin').length
         });
       })()`))
 
       report('el contenedor del mapa no se recrea', leaflet.same)
       report('Leaflet conserva sus clases en el contenedor', leaflet.leafletClass)
-      report('el mapa mantiene sus teselas y su trazado', leaflet.tiles > 0 && leaflet.markers > 0,
-        `teselas ${leaflet.tiles} · marcadores ${leaflet.markers}`)
+      report('el mapa mantiene sus teselas y su trazado', leaflet.tiles > 0 && leaflet.route > 0,
+        `teselas ${leaflet.tiles} · trazado ${leaflet.route}`)
+      report('las paradas se dibujan con chinchetas visibles', leaflet.pins > 0, `chinchetas ${leaflet.pins}`)
+
+      // El mapa a pantalla completa reutiliza el MISMO nodo: si se recreara,
+      // Leaflet perderia teselas y marcadores en cada apertura.
+      await cdp.evaluate(`(() => {
+        window.__mapBefore = document.querySelector('#stop-map');
+        const select = document.querySelector('[data-action="pick-search-direction"]');
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+      })()`)
+      await delay(1200)
+
+      const full = JSON.parse(await cdp.evaluate(`(() => {
+        const shell = document.querySelector('.map-shell');
+        const node = document.querySelector('#stop-map');
+        const rect = shell ? shell.getBoundingClientRect() : null;
+        return JSON.stringify({
+          expanded: Boolean(shell && shell.classList.contains('is-expanded')),
+          sameNode: window.__mapBefore === node,
+          coversViewport: Boolean(rect && rect.height > window.innerHeight - 4),
+          hasClose: Boolean(document.querySelector('[data-action="collapse-map"]')),
+          tiles: document.querySelectorAll('#stop-map img.leaflet-tile').length
+        });
+      })()`))
+
+      report('elegir sentido abre el mapa a pantalla completa', full.expanded)
+      report('el mapa a pantalla completa no reconstruye Leaflet', full.sameNode && full.tiles > 0,
+        `teselas ${full.tiles}`)
+      report('el mapa ampliado ocupa toda la pantalla', full.coversViewport)
+      report('el mapa ampliado ofrece un botón de cierre', full.hasClose)
+
+      // El globo de la parada: nombre y lineas, sin salir del mapa.
+      await cdp.evaluate(`document.querySelector('#stop-map .map-pin')?.closest('.leaflet-marker-icon')?.click(); true`)
+      await delay(700)
+
+      const popup = JSON.parse(await cdp.evaluate(`(() => {
+        const body = document.querySelector('.map-popup-body');
+        return JSON.stringify({
+          open: Boolean(body),
+          name: body ? (body.querySelector('.map-popup-name')?.textContent || '').trim() : '',
+          lines: body ? body.querySelectorAll('.line-chip').length : 0
+        });
+      })()`))
+
+      report('pulsar una parada abre su ficha emergente', popup.open)
+      report('la ficha emergente muestra el nombre de la parada', popup.name.length > 0, popup.name)
+      report('la ficha emergente muestra las líneas de la parada', popup.lines > 0, `líneas ${popup.lines}`)
+
+      await cdp.evaluate(`document.querySelector('[data-action="collapse-map"]')?.click(); true`)
+      await delay(600)
+
+      const collapsed = await cdp.evaluate(
+        `Boolean(document.querySelector('.map-shell') && !document.querySelector('.map-shell').classList.contains('is-expanded'))`,
+      )
+      report('el botón de cierre devuelve el mapa a su tamaño', collapsed)
 
       report('el cuadro de búsqueda mantiene el foco', typing.focused)
       report('mantiene el texto escrito', typing.value === 'gran', typing.value)

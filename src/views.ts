@@ -27,6 +27,7 @@ import {
   liveMinutes,
   notice,
   renderEta,
+  syncDot,
 } from './ui'
 
 /* ------------------------------------------------------------------ *
@@ -448,6 +449,7 @@ function renderSearchByMap(): string {
   const selectedLine = network.lineById.get(state.search.lineId) ?? network.lines[0]
   const direction =
     selectedLine?.directions.find((item) => item.key === state.search.directionKey) ?? selectedLine?.directions[0]
+  const expanded = state.search.mapExpanded
 
   return `
     <label class="field">
@@ -478,8 +480,41 @@ function renderSearchByMap(): string {
       </select>
     </label>
 
-    <div class="map-shell"><div id="stop-map" data-morph="skip"></div></div>
-    <p class="text-tiny">Toca un punto del mapa para ver los tiempos de esa parada.</p>
+    ${renderMapShell(direction ? directionLabel(direction) : '')}
+    <p class="text-tiny">
+      ${
+        expanded
+          ? 'Toca una parada para ver su ficha; cierra el mapa con la ✕ para volver al buscador.'
+          : 'Toca una parada del mapa para ver su ficha. Vuelve a elegir sentido para abrirlo a pantalla completa.'
+      }
+    </p>
+  `
+}
+
+/**
+ * El contenedor del mapa es SIEMPRE el mismo nodo, tanto encajado como a
+ * pantalla completa: Leaflet vive dentro (`data-morph="skip"`) y moverlo de
+ * sitio obligaria a reconstruir el mapa entero en cada cambio.
+ */
+function renderMapShell(caption: string): string {
+  const expanded = state.search.mapExpanded
+
+  return `
+    <div class="map-shell${expanded ? ' is-expanded' : ''}">
+      <div id="stop-map" data-morph="skip"></div>
+      ${
+        expanded
+          ? `
+        <div class="map-caption">${esc(caption)}</div>
+        <button class="map-close" type="button" data-action="collapse-map" aria-label="Cerrar el mapa">
+          ${icon('close')}
+        </button>
+      `
+          : `<button class="map-expand" type="button" data-action="expand-map">${icon(
+              'map',
+            )} Ampliar</button>`
+      }
+    </div>
   `
 }
 
@@ -770,7 +805,7 @@ function renderFollowCard(followId: string): string {
           windowStops.length === 0
             ? notice('warn', 'No se pudo reconstruir el recorrido de esta línea.')
             : `<div class="timeline">${etas
-                .map(({ stop, arrival }, index) => {
+                .map(({ stop, arrival, feed }, index) => {
                   const isTarget = stop.stopId === follow.stopId
                   const isBus = index === busIndex
                   const classes = [isTarget ? 'is-target' : '', isBus ? 'is-bus' : ''].filter(Boolean).join(' ')
@@ -785,17 +820,45 @@ function renderFollowCard(followId: string): string {
                       <div class="timeline-rail"><span class="timeline-dot"></span></div>
                       <span class="timeline-name">${esc(stop.stopName)}</span>
                       <span class="timeline-eta">${esc(eta)}</span>
+                      ${syncDot(feed, state.stopSync[stop.stopId])}
                     </div>
                   `
                 })
-                .join('')}</div>`
+                .join('')}</div>
+              ${renderSyncLegend()}`
         }
         <p class="text-tiny">
           Se consulta una parada cada ${(MIN_REQUEST_SPACING_MS / 1000).toFixed(0)} s para no saturar la fuente oficial,
-          así que las paradas más lejanas tardan algo más en refrescarse.
+          así que las paradas más lejanas tardan algo más en refrescarse. El punto de la derecha dice en qué punto
+          va cada una.
         </p>
       </div>
     </section>
+  `
+}
+
+/**
+ * Los tiempos de una parada y de la siguiente pueden llevar medio minuto de
+ * diferencia porque se piden en serie. La leyenda explica el codigo de color
+ * para que esa diferencia no se lea como un error.
+ */
+function renderSyncLegend(): string {
+  const items: Array<[string, string]> = [
+    ['loading', 'Consultando'],
+    ['queued', 'En cola'],
+    ['fresh', 'Al día'],
+    ['aged', 'Dato antiguo'],
+    ['error', 'Sin datos'],
+  ]
+
+  return `
+    <div class="sync-legend">
+      ${items
+        .map(([tone, label]) => `<span class="sync-legend-item"><span class="sync-dot is-${tone}"></span>${esc(
+          label,
+        )}</span>`)
+        .join('')}
+    </div>
   `
 }
 

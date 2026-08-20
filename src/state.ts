@@ -3,7 +3,7 @@ import { averageMinutes } from './services/punctuality'
 import type { MonitorRuntime } from './services/punctuality'
 import type { ScheduleDataset, ServiceDayType, StopFeed } from './types'
 
-export const APP_VERSION = 'v4.2'
+export const APP_VERSION = 'v4.3'
 
 export type TabId = 'inicio' | 'buscar' | 'paradas' | 'monitor' | 'seguimiento' | 'ajustes'
 export type SearchMode = 'nombre' | 'linea' | 'mapa'
@@ -79,6 +79,13 @@ export interface FollowJob {
   createdAt: number
 }
 
+/**
+ * Fase de refresco de una parada concreta. Las consultas van SIEMPRE en serie
+ * (la fuente oficial limita por IP), asi que en una lista larga conviven
+ * paradas ya actualizadas, una en curso y varias esperando turno.
+ */
+export type StopSyncPhase = 'queued' | 'loading'
+
 export interface LogEntry {
   id: string
   at: number
@@ -100,6 +107,8 @@ export interface AppState {
   toast: { message: string, tone: 'info' | 'error' | 'success' } | null
 
   feeds: Record<string, StopFeed>
+  /** Paradas en cola o en curso dentro del ciclo de refresco actual. */
+  stopSync: Record<string, StopSyncPhase>
   refreshing: boolean
   refreshQueueLabel: string | null
   lastRefreshAt: number | null
@@ -110,6 +119,8 @@ export interface AppState {
     lineId: string
     directionKey: string
     selectedStopId: string | null
+    /** El mapa pasa a pantalla completa al elegir linea y sentido. */
+    mapExpanded: boolean
   }
 
   favourites: FavouriteStop[]
@@ -179,6 +190,7 @@ export const state: AppState = {
   toast: null,
 
   feeds: {},
+  stopSync: {},
   refreshing: false,
   refreshQueueLabel: null,
   lastRefreshAt: null,
@@ -189,6 +201,7 @@ export const state: AppState = {
     lineId: '',
     directionKey: '',
     selectedStopId: null,
+    mapExpanded: false,
   },
 
   favourites: readJson<FavouriteStop[]>(KEYS.favourites, []).filter(

@@ -62,6 +62,40 @@ Por eso todas las consultas pasan por una cola serializada con 2 s de separació
 progresiva ante un 429. Ese es el mínimo seguro; bajar de ~1,5 s vuelve a
 provocar bloqueos.
 
+Consecuencia visible: en una lista larga los tiempos **no son de un mismo
+instante**. Cada parada de «Ver por dónde viene» lleva a su derecha un punto con
+la fase en la que está (`syncState` en `src/ui.ts`), y la tarjeta incluye la
+leyenda de colores:
+
+| Color | Significado |
+| --- | --- |
+| Azul, parpadeando | Se está consultando ahora |
+| Aro ámbar | En cola, esperando turno |
+| Verde | Dato de hace menos de un minuto |
+| Gris | Dato más antiguo |
+| Ámbar sólido | La fuente limitó la consulta (429) |
+| Rojo | Sin conexión con la fuente |
+
+El estado por parada vive en `state.stopSync`; lo alimentan `onStart`/`onFeed` de
+`fetchStopsSequentially`.
+
+## Buscar por mapa
+
+Al elegir línea y sentido el mapa pasa a **pantalla completa**, y se vuelve al
+buscador con la ✕ de la esquina superior derecha. El contenedor `#stop-map` no
+cambia de sitio en el árbol al ampliarse: solo cambia cómo se coloca (`.map-shell.is-expanded`),
+porque moverlo obligaría a reconstruir Leaflet en cada apertura. Tras el cambio
+de tamaño hay que llamar a `invalidateSize()` **antes** de `fitBounds()`: si no,
+el encuadre se calcula con el tamaño anterior y el recorrido sale diminuto.
+
+Las paradas se dibujan con chinchetas (`L.divIcon`) del color de la línea y su
+número de orden en el recorrido. Como una línea entera solo cabe en pantalla muy
+alejado, y ahí treinta chinchetas se solapan, el tamaño se escala con el zoom
+(`applyZoomScale`: clases `is-far` e `is-mid` sobre el contenedor). Al pulsar una
+parada se abre un globo con su nombre, su código y las líneas que pasan por ella;
+los tiempos no van en el globo, porque abrirían una consulta por cada parada que
+se tocara.
+
 ## Repintado de la interfaz
 
 La pantalla se repinta una vez por segundo para envejecer los minutos y las

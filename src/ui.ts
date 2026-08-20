@@ -1,3 +1,4 @@
+import type { StopSyncPhase } from './state'
 import type { Arrival, StopFeed } from './types'
 
 /* ------------------------------------------------------------------ *
@@ -172,6 +173,56 @@ export function feedPill(feed: StopFeed | undefined): string {
   }
 
   return `<span class="pill is-error">Sin conexión</span>`
+}
+
+/* ------------------------------------------------------------------ *
+ * Estado de sincronizacion de una parada                               *
+ * ------------------------------------------------------------------ */
+
+/** A partir de aqui un dato "en vivo" ya no lo es: se marca como envejecido. */
+const SYNC_FRESH_MS = 60_000
+
+export type SyncTone = 'loading' | 'queued' | 'fresh' | 'aged' | 'idle' | 'warn' | 'error'
+
+/**
+ * Resuelve el estado de refresco de una parada combinando la cola de consultas
+ * con el resultado ya guardado. Las paradas se piden de una en una, asi que en
+ * una lista larga hay siempre varias fases conviviendo en pantalla.
+ */
+export function syncState(
+  feed: StopFeed | undefined,
+  phase: StopSyncPhase | undefined,
+): { tone: SyncTone, label: string } {
+  if (phase === 'loading') {
+    return { tone: 'loading', label: 'Consultando ahora' }
+  }
+  if (phase === 'queued') {
+    return { tone: 'queued', label: 'Esperando turno' }
+  }
+  if (!feed) {
+    return { tone: 'idle', label: 'Sin consultar todavía' }
+  }
+  if (feed.status === 'error') {
+    return { tone: 'error', label: 'Sin conexión con la fuente' }
+  }
+  if (feed.status === 'throttled') {
+    return { tone: 'warn', label: `Fuente saturada · dato de ${formatAge(feed.fetchedAt)}` }
+  }
+  if (feed.status === 'empty') {
+    return { tone: 'idle', label: `Sin servicio ahora · ${formatAge(feed.fetchedAt)}` }
+  }
+  if (Date.now() - feed.fetchedAt <= SYNC_FRESH_MS) {
+    return { tone: 'fresh', label: `Al día · ${formatAge(feed.fetchedAt)}` }
+  }
+  return { tone: 'aged', label: `Dato de ${formatAge(feed.fetchedAt)}` }
+}
+
+/** Punto de color con el estado de refresco. Lleva el texto para lectores de pantalla. */
+export function syncDot(feed: StopFeed | undefined, phase: StopSyncPhase | undefined): string {
+  const { tone, label } = syncState(feed, phase)
+  return `<span class="sync-dot is-${tone}" title="${esc(label)}" role="img" aria-label="${esc(
+    label,
+  )}"></span>`
 }
 
 export function emptyState(iconName: string, title: string, description: string, action = ''): string {
