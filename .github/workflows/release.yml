@@ -27,19 +27,21 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           # Obligatorio: el checkout por defecto es superficial y
           # `git rev-list --count HEAD` devolvería 1, dejando el versionCode
           # por debajo de lo ya publicado.
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: 20
+          # El CLI de Capacitor exige Node >= 22: con la 20, "cap sync" aborta
+          # antes de copiar nada y el build falla sin haber tocado Gradle.
+          node-version: 22
           cache: npm
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 21

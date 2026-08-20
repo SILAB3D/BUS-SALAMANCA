@@ -489,6 +489,27 @@ async function main() {
   check('UpdaterPlugin esta registrado en MainActivity',
     mainActivity.includes('registerPlugin(UpdaterPlugin.class)'))
 
+  // El runner tiene que cumplir el requisito de Node del CLI de Capacitor. Con
+  // una version por debajo, `cap sync` aborta antes de copiar nada y el build
+  // falla sin haber llegado a Gradle.
+  const workflow = await fs.readFile(
+    path.join(projectRoot, '.github', 'workflows', 'release.yml'),
+    'utf8',
+  )
+  const capacitorCli = JSON.parse(await fs.readFile(
+    path.join(projectRoot, 'node_modules', '@capacitor', 'cli', 'package.json'),
+    'utf8',
+  ))
+
+  const requiredNode = Number(/(\d+)/.exec(capacitorCli.engines?.node ?? "")?.[1] ?? 0)
+  const workflowNode = Number(/node-version:\s*(\d+)/.exec(workflow)?.[1] ?? 0)
+
+  check('el workflow usa una version de Node valida para el CLI de Capacitor',
+    workflowNode >= requiredNode && requiredNode > 0,
+    `workflow ${workflowNode} · Capacitor exige ${capacitorCli.engines?.node}`)
+  check('el workflow clona la historia entera para poder contar los commits',
+    workflow.includes('fetch-depth: 0'))
+
   // Perder la clave de firma rompe el canal para siempre; publicarla es peor.
   const ignored = await fs.readFile(path.join(projectRoot, '.gitignore'), 'utf8')
   check('la clave de firma esta excluida de git',
