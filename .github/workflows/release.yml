@@ -1,0 +1,149 @@
+# Publica una APK firmada en cada cambio de main.
+#
+# El documento de referencia usa windows-latest porque allí el build parchea el
+# AndroidManifest y registra plugins desde un script de PowerShell que sería un
+# error duplicar en bash. En SALBUS no hace falta: la carpeta android/ está
+# versionada entera, así que el build es `cap sync` + Gradle y corre igual en
+# Linux, que además es el doble de rápido en minutos de runner.
+name: Publicar APK
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - '.gitignore'
+  workflow_dispatch:
+
+concurrency:
+  group: release-apk
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      # Necesario para crear la release.
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Obligatorio: el checkout por defecto es superficial y
+          # `git rev-list --count HEAD` devolvería 1, dejando el versionCode
+          # por debajo de lo ya publicado.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Calcular la versión
+        id: meta
+        run: node tools/ci-version.mjs
+
+      # Los logs de Actions exigen autenticación, pero las anotaciones de un
+      # repositorio público se leen por la API sin credenciales. Emitir el
+      # diagnóstico como ::notice:: y ::error:: permite depurar un fallo de CI
+      # desde fuera, sin copiar logs a mano.
+      - name: Restaurar y comprobar el keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.SALBUS_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.SALBUS_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.SALBUS_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.SALBUS_KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::error::Falta el secret SALBUS_KEYSTORE_BASE64. Compruébalo en Settings → Secrets and variables → Actions, pestaña Secrets (no Variables)."
+            exit 1
+          fi
+          for name in KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Falta el secret SALBUS_$name."
+              exit 1
+            fi
+          done
+
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/salbus-release.jks"
+
+          size=$(stat -c%s "$RUNNER_TEMP/salbus-release.jks")
+          echo "::notice::Keystore restaurado, $size bytes."
+          if [ "$size" -lt 1000 ]; then
+            echo "::error::El keystore restaurado ocupa $size bytes: el base64 del secret está truncado."
+            exit 1
+          fi
+
+          # Un keystore correcto pero con la contraseña equivocada falla mucho
+          # más tarde, en un error de Gradle difícil de leer.
+          if ! keytool -list -keystore "$RUNNER_TEMP/salbus-release.jks" -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" > /dev/null 2>&1; then
+            echo "::error::El keystore no se abre con esa contraseña, o no contiene el alias '$KEY_ALIAS'."
+            exit 1
+          fi
+          echo "::notice::Keystore verificado, alias '$KEY_ALIAS' presente."
+
+      - name: Compilar el bundle web
+        run: npm run build
+
+      - name: Sincronizar Capacitor
+        run: npx cap sync android
+
+      - name: Compilar la APK firmada
+        env:
+          SALBUS_KEYSTORE_FILE: ${{ runner.temp }}/salbus-release.jks
+          SALBUS_KEYSTORE_PASSWORD: ${{ secrets.SALBUS_KEYSTORE_PASSWORD }}
+          SALBUS_KEY_ALIAS: ${{ secrets.SALBUS_KEY_ALIAS }}
+          SALBUS_KEY_PASSWORD: ${{ secrets.SALBUS_KEY_PASSWORD }}
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon --console=plain
+
+      - name: Comprobar la APK
+        id: apk
+        run: |
+          src=android/app/build/outputs/apk/release/app-release.apk
+          if [ ! -f "$src" ]; then
+            echo "::error::Gradle no ha dejado ninguna APK en $src."
+            exit 1
+          fi
+
+          mkdir -p dist-apk
+          cp "$src" "dist-apk/${{ steps.meta.outputs.apkName }}"
+
+          # Una APK sin firmar se instala en un móvil limpio pero NUNCA como
+          # actualización, y el fallo aparecería semanas después.
+          build_tools=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          if ! "$build_tools/apksigner" verify --print-certs "$src" > certs.txt 2>&1; then
+            echo "::error::La APK generada no está firmada correctamente."
+            cat certs.txt
+            exit 1
+          fi
+          sha=$(grep -m1 'SHA-256 digest' certs.txt || true)
+          echo "::notice::APK firmada correctamente. $sha"
+          echo "::notice::$(du -h "$src" | cut -f1) · ${{ steps.meta.outputs.apkName }}"
+
+      - name: Publicar la release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: SALBUS v${{ steps.meta.outputs.versionName }}
+          # La app saca el versionCode de la ETIQUETA, no del cuerpo ni de un
+          # fichero adjunto: los assets de una release no se pueden leer desde
+          # JavaScript por CORS.
+          body: |
+            ${{ github.event.head_commit.message }}
+
+            ---
+            Compilación ${{ steps.meta.outputs.versionCode }}.
+            La aplicación instalada ofrece esta versión por sí sola al abrirse.
+          files: dist-apk/*.apk
+          fail_on_unmatched_files: true

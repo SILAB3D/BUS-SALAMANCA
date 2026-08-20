@@ -1,9 +1,14 @@
 import type { Network } from './services/network'
 import { averageMinutes } from './services/punctuality'
 import type { MonitorRuntime } from './services/punctuality'
+import type { ReleaseInfo } from './services/release-parser'
 import type { ScheduleDataset, ServiceDayType, StopFeed } from './types'
 
-export const APP_VERSION = 'v4.3'
+/** Version que se muestra en pantalla. Sale de package.json via Vite. */
+export const APP_VERSION = `v${__APP_VERSION__}`
+
+/** versionCode de esta compilacion; se compara con el de la ultima release. */
+export const APP_VERSION_CODE = __APP_VERSION_CODE__
 
 export type TabId = 'inicio' | 'buscar' | 'paradas' | 'monitor' | 'seguimiento' | 'ajustes'
 export type SearchMode = 'nombre' | 'linea' | 'mapa'
@@ -94,6 +99,37 @@ export interface LogEntry {
   message: string
 }
 
+/**
+ * Fase del aviso de actualizacion. El boton principal absorbe el estado en su
+ * propia etiqueta (Actualizar → Descargando… 45 % → Instalar → Reintentar) en
+ * vez de ir anadiendo elementos al aviso.
+ */
+export type UpdatePhase =
+  | 'idle'
+  | 'checking'
+  | 'available'
+  | 'downloading'
+  | 'ready'
+  | 'installing'
+  | 'error'
+
+export interface UpdateState {
+  phase: UpdatePhase
+  release: ReleaseInfo | null
+  /** -1 mientras no haya Content-Length: no se inventa un porcentaje. */
+  percent: number
+  /** Ruta local de la APK ya descargada; sobrevive a un permiso denegado. */
+  downloadedPath: string | null
+  /** El permiso de «instalar apps desconocidas» se concede fuera de la app. */
+  canInstall: boolean
+  error: string | null
+  /** El aviso se puede posponer; vuelve en el siguiente arranque. */
+  dismissed: boolean
+  /** Resultado de la comprobacion MANUAL de Ajustes, que si cuenta lo que pasa. */
+  manualMessage: { text: string, tone: 'info' | 'warn' | 'error' } | null
+  manualChecking: boolean
+}
+
 export interface AppState {
   ready: boolean
   bootPhase: string
@@ -153,6 +189,8 @@ export interface AppState {
     notifications: PermissionState
     battery: PermissionState
   }
+
+  update: UpdateState
 
   logs: LogEntry[]
 }
@@ -228,6 +266,18 @@ export const state: AppState = {
     startMinutes: 7 * 60,
     endMinutes: 8 * 60,
     alias: '',
+  },
+
+  update: {
+    phase: 'idle',
+    release: null,
+    percent: -1,
+    downloadedPath: null,
+    canInstall: false,
+    error: null,
+    dismissed: false,
+    manualMessage: null,
+    manualChecking: false,
   },
 
   permissions: {

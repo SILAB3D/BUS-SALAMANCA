@@ -2,6 +2,7 @@ import { getClientHealth, MIN_REQUEST_SPACING_MS } from './services/arrivals'
 import { currentDayType } from './services/schedule'
 import {
   APP_VERSION,
+  APP_VERSION_CODE,
   favouriteLabel,
   formatMinutesClock,
   isFavourite,
@@ -100,7 +101,7 @@ export function renderApp(): string {
   return `
     <div class="app-shell">
       ${renderTopbar()}
-      <main class="screen" id="screen">${renderScreen()}</main>
+      <main class="screen" id="screen">${renderUpdateBanner()}${renderScreen()}</main>
       ${renderTabbar()}
     </div>
     ${renderSheet()}
@@ -187,6 +188,90 @@ function renderScreen(): string {
       return renderAjustes()
     default:
       return renderInicio()
+  }
+}
+
+/**
+ * Aviso de version nueva. Ensena lo minimo: que la hay, cual es, que va a pasar
+ * y los botones. Nada de notas de la version ni tamano del descargable: son
+ * datos que nadie lee en un aviso y que solo alargan la decision.
+ */
+function renderUpdateBanner(): string {
+  const update = state.update
+  const active = update.phase === 'available'
+    || update.phase === 'downloading'
+    || update.phase === 'ready'
+    || update.phase === 'installing'
+    || (update.phase === 'error' && update.release !== null)
+
+  if (!active || update.dismissed || !update.release) {
+    return ''
+  }
+
+  const needsPermission = update.phase === 'ready' && !update.canInstall
+
+  return `
+    <section class="update-banner">
+      <div class="update-head">
+        ${icon('refresh')}
+        <div class="update-copy">
+          <strong>Hay una versión nueva</strong>
+          <span>SALBUS v${esc(update.release.versionName)} · tienes la ${esc(APP_VERSION)}</span>
+        </div>
+        <button class="mini-btn" type="button" data-action="dismiss-update" aria-label="Ahora no">${icon(
+          'close',
+        )}</button>
+      </div>
+
+      ${
+        needsPermission
+          ? `<p class="update-hint">Android pide tu permiso para instalar aplicaciones fuera de Play Store.
+             Se concede una sola vez, desde los ajustes del sistema.</p>`
+          : `<p class="update-hint">Al instalar, Android enseña una pantalla de advertencia: pulsa
+             <strong>Instalar de todos modos</strong>. Es segura, va firmada con la misma clave.
+             Tus paradas, avisos e historial se conservan.</p>`
+      }
+
+      ${update.error ? notice('error', update.error) : ''}
+
+      <div class="update-actions">
+        ${
+          needsPermission
+            ? `<button class="btn btn-primary btn-block" type="button" data-action="open-install-settings">
+                 Conceder permiso
+               </button>`
+            : `<button class="btn btn-primary btn-block" type="button" data-action="run-update" ${
+                update.phase === 'downloading' || update.phase === 'installing' ? 'disabled' : ''
+              }>${esc(updateButtonLabel())}</button>`
+        }
+      </div>
+
+      ${
+        update.phase === 'downloading'
+          ? `<div class="update-bar"><span style="width:${
+              update.percent >= 0 ? update.percent : 100
+            }%" class="${update.percent < 0 ? 'is-indeterminate' : ''}"></span></div>`
+          : ''
+      }
+    </section>
+  `
+}
+
+/** El boton principal absorbe el estado en su etiqueta, sin anadir elementos. */
+function updateButtonLabel(): string {
+  const update = state.update
+
+  switch (update.phase) {
+    case 'downloading':
+      return update.percent >= 0 ? `Descargando… ${update.percent} %` : 'Descargando…'
+    case 'ready':
+      return 'Instalar'
+    case 'installing':
+      return 'Abriendo el instalador…'
+    case 'error':
+      return 'Reintentar'
+    default:
+      return 'Actualizar'
   }
 }
 
@@ -1085,6 +1170,8 @@ function renderAjustes(): string {
       </div>
     </section>
 
+    ${renderUpdateCard()}
+
     <section class="card">
       <div class="card-head"><div class="card-head-copy">
         <h3 class="card-title">Origen de los datos</h3>
@@ -1159,6 +1246,51 @@ function renderAjustes(): string {
     </section>
 
     <p class="text-tiny" style="text-align:center">SALBUS ${esc(APP_VERSION)}</p>
+  `
+}
+
+/**
+ * Comprobacion MANUAL. La automatica del arranque se calla los errores para no
+ * molestar, y el precio de ese diseno es que un fallo real (repositorio
+ * privado, sin cobertura, GitHub limitando) se ve exactamente igual que «no hay
+ * novedades». Esta es la unica forma de distinguir «no hay nada» de «está roto».
+ */
+function renderUpdateCard(): string {
+  const update = state.update
+  const message = update.manualMessage
+
+  return `
+    <section class="card">
+      <div class="card-head"><div class="card-head-copy">
+        <h3 class="card-title">Actualizaciones</h3>
+        <p class="card-sub">Se publican solas en cada cambio del proyecto</p>
+      </div></div>
+      <div class="card-body">
+        <dl class="kv">
+          <dt>Versión instalada</dt><dd>${esc(APP_VERSION)} · compilación ${APP_VERSION_CODE}</dd>
+          <dt>Instalar apps desconocidas</dt><dd>${update.canInstall ? 'concedido' : 'sin conceder'}</dd>
+        </dl>
+        ${message ? notice(message.tone, message.text) : ''}
+        <div class="btn-row">
+          <button class="btn btn-secondary" type="button" data-action="check-update" ${
+            update.manualChecking ? 'disabled' : ''
+          }>
+            ${icon('refresh')} ${update.manualChecking ? 'Comprobando…' : 'Buscar actualización'}
+          </button>
+          ${
+            update.canInstall
+              ? ''
+              : `<button class="btn btn-secondary" type="button" data-action="open-install-settings">
+                   ${icon('settings')} Permiso de instalación
+                 </button>`
+          }
+        </div>
+        <p class="text-tiny">
+          Android no permite que una aplicación se instale sola: SALBUS comprueba, descarga y prepara
+          la versión nueva, y el último paso lo confirmas tú en el diálogo del sistema.
+        </p>
+      </div>
+    </section>
   `
 }
 

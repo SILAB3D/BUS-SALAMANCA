@@ -84,6 +84,7 @@ async function main() {
     'punctuality.ts',
     'network.ts',
     'schedule.ts',
+    'release-parser.ts',
   ])
 
   const { parseStopFeed } = await import(pathToUrl(path.join(build, 'arrival-parser.js')))
@@ -397,6 +398,101 @@ async function main() {
     })
     check('sin User-Agent de navegador la fuente rechaza', withoutUa.status === 403, `HTTP ${withoutUa.status}`)
   }
+
+  section('7 · Canal de actualización')
+
+  const { parseTag, readRelease, isNewer } = await import(
+    pathToUrl(path.join(build, 'release-parser.js'))
+  )
+  const { resolveVersion, VERSION_CODE_BASE } = await import(
+    pathToUrl(path.join(projectRoot, 'tools', 'version.mjs'))
+  )
+
+  const version = resolveVersion()
+
+  // La formula del versionCode vive por duplicado (tools/version.mjs y
+  // android/app/build.gradle) porque Gradle no puede importar JavaScript. Si
+  // las dos se separan, la app compara su versionCode contra otro numero y el
+  // canal falla EN SILENCIO: o se ofrece una actualizacion ya instalada, o no
+  // se ofrece ninguna nunca.
+  const gradle = await fs.readFile(
+    path.join(projectRoot, 'android', 'app', 'build.gradle'),
+    'utf8',
+  )
+
+  check('Gradle declara la misma base de versionCode que tools/version.mjs',
+    gradle.includes('ext.VERSION_CODE_BASE = ' + VERSION_CODE_BASE),
+    String(VERSION_CODE_BASE))
+  check('Gradle cuenta los commits para el versionCode',
+    gradle.includes("'rev-list', '--count', 'HEAD'"))
+  check('Gradle toma el versionName de package.json',
+    gradle.includes('readPackageVersion(rootProject.projectDir)'))
+
+  // Las versiones anteriores a este sistema llegaron a mano hasta la 430: por
+  // debajo de ese numero el movil no reconoceria la release como actualizacion.
+  check('el versionCode calculado supera al ultimo publicado a mano',
+    version.versionCode > 430, String(version.versionCode))
+
+  check('la etiqueta combina version y compilacion',
+    version.tag === `v${version.versionName}-b${version.versionCode}`, version.tag)
+  check('la etiqueta se lee de vuelta sin perder nada',
+    parseTag(version.tag)?.versionCode === version.versionCode
+      && parseTag(version.tag)?.versionName === version.versionName)
+  check('una etiqueta sin compilacion se descarta', parseTag('v4.3.0') === null)
+  check('una etiqueta vacia se descarta', parseTag('') === null)
+
+  const release = {
+    tag_name: 'v4.4.0-b1010',
+    published_at: '2026-08-20T10:00:00Z',
+    assets: [
+      { name: 'notas.txt', browser_download_url: 'https://x/notas.txt' },
+      { name: 'SALBUS-v4.4.0-b1010.apk', browser_download_url: 'https://x/app.apk' },
+    ],
+  }
+
+  check('se elige el asset .apk y no otro adjunto',
+    readRelease(release)?.apkUrl === 'https://x/app.apk')
+  check('la release publicada aporta su versionCode',
+    readRelease(release)?.versionCode === 1010)
+  check('un borrador no se ofrece', readRelease({ ...release, draft: true }) === null)
+  check('una release sin APK no se ofrece',
+    readRelease({ ...release, assets: [{ name: 'n.txt', browser_download_url: 'https://x/n' }] }) === null)
+
+  const parsed = readRelease(release)
+  check('solo se ofrece un versionCode estrictamente mayor', isNewer(parsed, 1009) === true)
+  check('un versionCode igual no se ofrece', isNewer(parsed, 1010) === false)
+  check('un versionCode menor no se ofrece', isNewer(parsed, 1011) === false)
+
+  // El plugin nativo y el permiso son la otra mitad: sin ellos la app
+  // detectaria la actualizacion pero no podria instalarla.
+  const manifest = await fs.readFile(
+    path.join(projectRoot, 'android', 'app', 'src', 'main', 'AndroidManifest.xml'),
+    'utf8',
+  )
+  check('el manifiesto pide REQUEST_INSTALL_PACKAGES',
+    manifest.includes('android.permission.REQUEST_INSTALL_PACKAGES'))
+  check('el manifiesto declara el FileProvider que expone la APK',
+    manifest.includes('.fileprovider'))
+
+  const filePaths = await fs.readFile(
+    path.join(projectRoot, 'android', 'app', 'src', 'main', 'res', 'xml', 'file_paths.xml'),
+    'utf8',
+  )
+  check('el FileProvider cubre la cache, que es donde se descarga la APK',
+    filePaths.includes('cache-path'))
+
+  const mainActivity = await fs.readFile(
+    path.join(projectRoot, 'android', 'app', 'src', 'main', 'java', 'com', 'icuas',
+      'bussalamanca', 'MainActivity.java'),
+    'utf8',
+  )
+  check('UpdaterPlugin esta registrado en MainActivity',
+    mainActivity.includes('registerPlugin(UpdaterPlugin.class)'))
+
+  // Perder la clave de firma rompe el canal para siempre; publicarla es peor.
+  const ignored = await fs.readFile(path.join(projectRoot, '.gitignore'), 'utf8')
+  check('la clave de firma esta excluida de git',
+    ignored.includes('*.jks') && ignored.includes('android/keystore.properties'))
 
   console.log(`\n${passed} correctas · ${failed} fallidas`)
   process.exitCode = failed > 0 ? 1 : 0

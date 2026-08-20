@@ -11,6 +11,7 @@ import {
   MIN_REQUEST_SPACING_MS,
 } from './services/arrivals'
 import { loadNetwork } from './services/network'
+import { checkForUpdate, isNativeAndroid, Updater } from './services/updates'
 import { matchSlot, observe } from './services/punctuality'
 import { currentDayType, loadSchedule } from './services/schedule'
 import {
@@ -203,10 +204,162 @@ async function bootstrap(): Promise<void> {
     if (document.visibilityState === 'visible') {
       void refreshVisible('manual')
       void syncPermissions()
+      // El permiso de instalacion se concede en una pantalla de ajustes DEL
+      // SISTEMA, y nada dentro de la app avisa de que ha cambiado. Sin releerlo
+      // aqui, el aviso seguiria pidiendolo para siempre despues de concederlo.
+      void syncInstallPermission()
     }
   })
 
   void refreshVisible('auto')
+  void setupUpdates()
+}
+
+/* ------------------------------------------------------------------ *
+ * Actualizacion automatica                                             *
+ * ------------------------------------------------------------------ */
+
+async function setupUpdates(): Promise<void> {
+  if (!isNativeAndroid()) {
+    return
+  }
+
+  await Updater.addListener('downloadProgress', (payload) => {
+    state.update.percent = payload.percent
+    render()
+  })
+
+  await syncInstallPermission()
+
+  // Una descarga anterior que se quedo sin instalar (permiso denegado, o la
+  // persona salio del dialogo) no se repite: se retoma en «Instalar».
+  try {
+    const pending = await Updater.pendingUpdate()
+    if (pending.ready && pending.path) {
+      state.update.downloadedPath = pending.path
+    }
+  } catch {
+    /* sin descarga previa */
+  }
+
+  // Comprobacion del arranque: CALLA sus errores. Sin cobertura, o con GitHub
+  // limitando por peticiones, la app tiene que seguir funcionando sin molestar.
+  // El precio es que un fallo real se ve igual que «no hay novedades»; para eso
+  // esta la comprobacion manual de Ajustes.
+  const outcome = await checkForUpdate()
+  if (outcome.status === 'update') {
+    state.update.release = outcome.release
+    state.update.phase = state.update.downloadedPath ? 'ready' : 'available'
+    log('info', 'actualización', `Disponible la versión ${outcome.release.versionName}.`)
+    render()
+  } else if (outcome.status === 'error') {
+    log('warn', 'actualización', outcome.message)
+  }
+}
+
+async function syncInstallPermission(): Promise<void> {
+  if (!isNativeAndroid()) {
+    return
+  }
+
+  try {
+    const { granted } = await Updater.canInstall()
+    if (granted !== state.update.canInstall) {
+      state.update.canInstall = granted
+      render()
+    }
+  } catch {
+    /* el plugin solo existe en Android */
+  }
+}
+
+/** Descarga si hace falta e invoca al instalador del sistema. */
+async function runUpdate(): Promise<void> {
+  const update = state.update
+  if (!update.release) {
+    return
+  }
+
+  update.error = null
+
+  try {
+    if (!update.downloadedPath) {
+      update.phase = 'downloading'
+      update.percent = -1
+      render()
+
+      const result = await Updater.download({ url: update.release.apkUrl })
+      update.downloadedPath = result.path
+    }
+
+    update.phase = 'ready'
+    render()
+
+    await syncInstallPermission()
+    if (!state.update.canInstall) {
+      // La APK ya esta en disco: al conceder el permiso se instala sin
+      // volver a descargarla.
+      render()
+      return
+    }
+
+    update.phase = 'installing'
+    render()
+    await Updater.install({ path: update.downloadedPath })
+  } catch (error) {
+    const message = errorMessage(error)
+
+    if (message.includes('PERMISSION_REQUIRED')) {
+      update.phase = 'ready'
+      state.update.canInstall = false
+      render()
+      return
+    }
+
+    update.phase = 'error'
+    update.error = message
+    // Una descarga rota no debe reutilizarse en el reintento.
+    if (message.includes('descargar')) {
+      update.downloadedPath = null
+    }
+    log('error', 'actualización', message)
+    render()
+  }
+}
+
+/** Comprobacion manual: esta SI cuenta lo que ocurre, sea lo que sea. */
+async function checkUpdateManually(): Promise<void> {
+  state.update.manualChecking = true
+  state.update.manualMessage = null
+  render()
+
+  await syncInstallPermission()
+  const outcome = await checkForUpdate()
+
+  if (outcome.status === 'update') {
+    state.update.release = outcome.release
+    state.update.phase = state.update.downloadedPath ? 'ready' : 'available'
+    state.update.dismissed = false
+    state.update.manualMessage = {
+      text: `Disponible SALBUS v${outcome.release.versionName}.`,
+      tone: 'info',
+    }
+  } else if (outcome.status === 'current') {
+    state.update.manualMessage = {
+      text: `Ya tienes la última versión (compilación ${outcome.versionCode}).`,
+      tone: 'info',
+    }
+  } else if (outcome.status === 'unsupported') {
+    state.update.manualMessage = {
+      text: 'Las actualizaciones automáticas solo funcionan en la aplicación de Android.',
+      tone: 'warn',
+    }
+  } else {
+    state.update.manualMessage = { text: outcome.message, tone: 'error' }
+  }
+
+  state.update.manualChecking = false
+  render()
 }
 
 function dismissSplash(): void {
@@ -890,6 +1043,14 @@ function render(): void {
   })
 }
 
+// Solo en el servidor de desarrollo: permite a tools/uicheck.mjs colocar la
+// interfaz en estados que de otro modo exigirian un dispositivo (aviso de
+// actualizacion, descarga en curso). Vite lo elimina de la compilacion de
+// produccion, asi que no viaja en la APK.
+if (import.meta.env.DEV) {
+  ;(window as unknown as { __salbus?: unknown }).__salbus = { state, render }
+}
+
 function paint(): void {
   // Repintado incremental: solo se tocan los nodos que han cambiado. Antes se
   // reescribía todo el HTML cada segundo, y eso cerraba cualquier desplegable
@@ -1000,6 +1161,28 @@ async function handleAction(action: string, element: HTMLElement): Promise<void>
 
     case 'refresh-stop':
       await refreshOneStop(stopId)
+      return
+
+    case 'run-update':
+      await runUpdate()
+      return
+
+    case 'check-update':
+      await checkUpdateManually()
+      return
+
+    case 'dismiss-update':
+      // Solo hasta el proximo arranque: no se guarda en disco a proposito.
+      state.update.dismissed = true
+      render()
+      return
+
+    case 'open-install-settings':
+      try {
+        await Updater.openInstallSettings()
+      } catch (error) {
+        showToast(errorMessage(error), 'error')
+      }
       return
 
     case 'retry-boot':

@@ -1,5 +1,71 @@
 apply plugin: 'com.android.application'
 
+/*
+ * Version derivada de git, no escrita a mano.
+ *
+ * Android solo acepta actualizar a un versionCode ESTRICTAMENTE mayor. Si hay
+ * que acordarse de subirlo en cada push, el canal de actualizacion deja de
+ * funcionar en silencio el dia que se olvide. Contarlo de los commits lo hace
+ * crecer solo.
+ *
+ * VERSION_CODE_BASE existe porque las versiones anteriores a este sistema
+ * llegaron a mano hasta el 430, muy por encima de los commits del repositorio:
+ * sin la base, la primera release automatica saldria por debajo de lo ya
+ * instalado y el movil no la reconoceria como actualizacion.
+ *
+ * Contrapartida: no se puede reescribir la historia de main. Un rebase o un
+ * push --force que reduzca el numero de commits deja las releases nuevas por
+ * debajo de lo instalado.
+ */
+ext.VERSION_CODE_BASE = 1000
+
+static def gitCommitCount(providers) {
+    try {
+        def result = providers.exec {
+            commandLine 'git', 'rev-list', '--count', 'HEAD'
+        }.standardOutput.asText.get().trim()
+        return result.isInteger() ? result.toInteger() : 0
+    } catch (Exception ignored) {
+        // Sin git (por ejemplo, compilando desde un zip) se cae a 0: la version
+        // sale como la base y el build no se rompe.
+        return 0
+    }
+}
+
+static def readPackageVersion(rootDir) {
+    def file = new File(rootDir, '../package.json')
+    if (!file.exists()) {
+        return '0.0.0'
+    }
+    return new groovy.json.JsonSlurper().parse(file).version ?: '0.0.0'
+}
+
+def salbusVersionCode = ext.VERSION_CODE_BASE + gitCommitCount(providers)
+def salbusVersionName = readPackageVersion(rootProject.projectDir)
+
+/*
+ * Firma de release. La clave NO vive en el repositorio: en local se lee de
+ * android/keystore.properties (ignorado por git) y en CI de variables de
+ * entorno que salen de los secrets. Sin ninguna de las dos, la tarea de
+ * release falla con un mensaje claro en vez de firmar con la clave de debug,
+ * que produciria una APK que el movil rechaza como actualizacion.
+ */
+def keystorePropertiesFile = rootProject.file('keystore.properties')
+def keystoreProperties = new Properties()
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+}
+
+def resolveSigning = { String key, String env ->
+    return System.getenv(env) ?: keystoreProperties.getProperty(key)
+}
+
+def releaseStoreFile = resolveSigning('storeFile', 'SALBUS_KEYSTORE_FILE')
+def releaseStorePassword = resolveSigning('storePassword', 'SALBUS_KEYSTORE_PASSWORD')
+def releaseKeyAlias = resolveSigning('keyAlias', 'SALBUS_KEY_ALIAS')
+def releaseKeyPassword = resolveSigning('keyPassword', 'SALBUS_KEY_PASSWORD')
+def hasReleaseSigning = releaseStoreFile != null && file(releaseStoreFile).exists()
+
 android {
     namespace = "com.icuas.bussalamanca"
     compileSdk = rootProject.ext.compileSdkVersion
@@ -7,8 +73,8 @@ android {
         applicationId "com.icuas.bussalamanca"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 430
-        versionName "4.3"
+        versionCode salbusVersionCode
+        versionName salbusVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -16,10 +82,38 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    signingConfigs {
+        release {
+            if (hasReleaseSigning) {
+                storeFile file(releaseStoreFile)
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+}
+
+// Firmar una release con la clave de debug produce una APK que ningun movil
+// aceptara como actualizacion de la anterior. Mejor romper el build aqui.
+tasks.whenTaskAdded { task ->
+    if (task.name == 'assembleRelease' && !hasReleaseSigning) {
+        task.doFirst {
+            throw new GradleException(
+                'Falta la clave de firma de release. Crea android/keystore.properties ' +
+                '(storeFile, storePassword, keyAlias, keyPassword) o exporta ' +
+                'SALBUS_KEYSTORE_FILE, SALBUS_KEYSTORE_PASSWORD, SALBUS_KEY_ALIAS y SALBUS_KEY_PASSWORD.'
+            )
         }
     }
 }

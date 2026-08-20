@@ -51,4 +51,11 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!--
+        Actualizacion desde las releases de GitHub. Android no permite instalar
+        en silencio: este permiso solo deja LANZAR el instalador del sistema, y
+        en Android 8+ hay que concederlo ademas por app desde los ajustes.
+    -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 </manifest>

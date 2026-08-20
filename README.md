@@ -150,6 +150,108 @@ El icono pequeño de la notificación (`res/drawable/ic_stat_salbus.xml`) es una
 silueta monocroma **sin fondo**: Android descarta el color y usa solo el canal
 alfa, así que un icono con fondo se vería como un cuadrado blanco.
 
+## Actualización automática
+
+Un `git push` a `main` acaba convertido en una actualización instalada en el
+móvil. El workflow `.github/workflows/release.yml` compila y **firma** la APK,
+la publica como release, y la app la ofrece al abrirse.
+
+```
+git push a main
+      │
+      ▼
+GitHub Actions ── compila y firma ──▶ Release (tag: v<versionName>-b<versionCode>)
+      │
+      ▼
+La app, al arrancar
+   1. GET api.github.com/.../releases/latest   (JavaScript, con CORS)
+   2. compara versionCode con el suyo
+   3. descarga la APK                          (Java, sin CORS)
+   4. lanza el instalador del sistema
+      │
+      ▼
+1 toque → instalada, datos intactos
+```
+
+**Android no permite que una app normal instale nada en silencio.** Eso exige
+ser *device owner* o app de sistema. Comprobar, descargar y preparar sí es
+automático; el último paso es un diálogo del sistema que se confirma a mano.
+
+### La trampa del CORS
+
+La app corre en una WebView cuyo origen es `localhost`, así que todo `fetch`
+está sujeto a CORS:
+
+| Petición | ¿Manda `Access-Control-Allow-Origin`? |
+| --- | --- |
+| `api.github.com/.../releases/latest` | **Sí**, `*` |
+| La URL de descarga de un asset | **No** (redirige a `release-assets.githubusercontent.com`) |
+
+Por eso el `versionCode` publicado sale de la **etiqueta** de la release
+(`v4.3.0-b1007` → 1007), que ya viene en la respuesta de la API, y no de un
+`latest.json` adjunto que la WebView no podría leer. La APK sí se descarga del
+asset, pero eso lo hace `UpdaterPlugin.java`, que no pasa por CORS.
+
+### El versionado
+
+`versionCode` = `VERSION_CODE_BASE` + número de commits. Crece solo en cada
+push, sin que haya que acordarse de subirlo. La base es **1000** porque las
+versiones anteriores a este sistema llegaron a mano hasta la 430, muy por
+encima del número de commits: sin ella la primera release automática habría
+salido por debajo de lo ya instalado y el móvil no la habría reconocido.
+
+La fórmula vive por duplicado, en `tools/version.mjs` (que alimenta al bundle
+vía `vite.config.ts` y al workflow) y en `android/app/build.gradle`, porque
+Gradle no puede importar JavaScript. **`npm test` comprueba que las dos
+coinciden**: si se separan, la app compara su `versionCode` contra otro número
+y el canal falla en silencio.
+
+*Contrapartida:* no se puede reescribir la historia de `main`. Un rebase o un
+`push --force` que reduzca el número de commits deja las releases nuevas por
+debajo de lo instalado.
+
+### El fallo silencioso
+
+La comprobación del arranque **calla sus errores**: sin cobertura, o con
+GitHub limitando por peticiones, la app sigue funcionando sin molestar. El
+precio es que un fallo real se ve exactamente igual que «no hay novedades».
+
+Por eso Ajustes → *Actualizaciones* incluye una comprobación **manual** que sí
+cuenta lo que ocurre: versión encontrada, ya al día, o el error exacto. No es
+un adorno; es la única forma de distinguir «no hay nada» de «está roto».
+
+### La clave de firma
+
+Android identifica una app por `applicationId` + firma. Una APK firmada con
+otra clave no es una actualización sino una app distinta, y la instalación
+falla con `INSTALL_FAILED_UPDATE_INCOMPATIBLE`.
+
+- La clave vive **fuera del repositorio**, en `../salbus-keystore/`.
+- `android/keystore.properties` y `*.jks` están en `.gitignore`.
+- En CI viaja como secret en base64 y se reconstruye en el runner.
+- **Si se pierde, ningún dispositivo con la app instalada podrá actualizarse
+  nunca más**: habría que desinstalar y reinstalar, perdiendo los datos locales.
+
+Secrets necesarios en *Settings → Secrets and variables → Actions*, pestaña
+**Secrets** (no *Variables*): `SALBUS_KEYSTORE_BASE64`,
+`SALBUS_KEYSTORE_PASSWORD`, `SALBUS_KEY_ALIAS`, `SALBUS_KEY_PASSWORD`.
+
+El repositorio debe ser **público**: la app consulta la API sin credenciales y
+en uno privado recibiría un 404 y no ofrecería nada nunca. Meter un token en
+la APK no es una opción, porque cualquiera puede extraerlo.
+
+### Compilar una release a mano
+
+```powershell
+npm run build
+npx cap sync android
+cd android; .\gradlew.bat assembleRelease
+```
+
+Sin clave de firma disponible la tarea **falla a propósito**, en vez de
+producir una APK firmada en debug que ningún móvil aceptaría como
+actualización.
+
 ## Comandos
 
 ```bash

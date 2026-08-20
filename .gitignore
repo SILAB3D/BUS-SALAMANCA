@@ -40,3 +40,8 @@ tools/.punctuality-live.json
 
 # APK: solo se versiona el de la ultima version (git add -f)
 releases/*.apk
+
+# Clave de firma de release: nunca al repositorio
+android/keystore.properties
+*.jks
+*.keystore
