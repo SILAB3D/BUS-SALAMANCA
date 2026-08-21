@@ -362,6 +362,11 @@ p {
   height: 20px;
 }
 
+.icon-btn.is-current {
+  background: #fff;
+  color: var(--brand-600);
+}
+
 .icon-btn.is-spinning svg {
   animation: spin 0.9s linear infinite;
 }
@@ -410,7 +415,7 @@ p {
 
 .tabbar {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 2px;
   padding: 6px 4px calc(var(--safe-bottom) + 6px);
   background: var(--surface);
@@ -555,6 +560,43 @@ button.card-head {
   gap: 6px;
   flex: none;
   align-items: center;
+}
+
+/* La cabecera de la tarjeta de parada tiene DOS zonas tactiles: el cuerpo, que
+   despliega, y los tres botones de la derecha. Por eso el boton ya no es la
+   cabecera entera (un boton dentro de otro no es HTML valido). */
+.card-head-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  text-align: left;
+  color: inherit;
+  cursor: pointer;
+}
+
+.card-head-main > svg {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  color: var(--text-3);
+}
+
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 2px;
+}
+
+.section-head h2 {
+  font-size: 17px;
+  font-weight: 750;
 }
 
 .card-divider {
@@ -865,6 +907,18 @@ button.card-head {
   background: var(--brand-600);
   border-color: var(--brand-600);
   color: #fff;
+}
+
+/* El interruptor de un recorrido en marcha: verde, para distinguirlo de un
+   boton normal sin tener que leer nada. */
+.mini-btn.is-on {
+  background: var(--ok-soft);
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+.mini-btn.is-spinning svg {
+  animation: spin 0.9s linear infinite;
 }
 
 .mini-btn.is-danger:hover {
@@ -1269,47 +1323,6 @@ button.card-head {
   opacity: 0.85;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-}
-
-.quick-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.quick-tile {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-lg);
-  background: var(--surface);
-  box-shadow: var(--shadow-1);
-  text-align: left;
-  cursor: pointer;
-  transition: transform 0.15s ease, border-color 0.15s ease;
-}
-
-.quick-tile:active {
-  transform: scale(0.98);
-}
-
-.quick-tile svg {
-  width: 24px;
-  height: 24px;
-  color: var(--brand-500);
-}
-
-.quick-tile strong {
-  font-size: 14.5px;
-  font-weight: 700;
-}
-
-.quick-tile span {
-  font-size: 12px;
-  color: var(--text-2);
-  line-height: 1.35;
 }
 
 /* ==================================================================
@@ -2010,10 +2023,6 @@ button.card-head {
     padding: 24px 24px 32px;
   }
 
-  .quick-grid {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-  }
-
   .tabbar {
     max-width: 780px;
     margin: 0 auto;
@@ -2035,16 +2044,70 @@ button.card-head {
    Aviso de actualización
    ================================================================== */
 
-.update-banner {
+/* Ventana centrada por encima de todo. La usan la actualizacion (que se abre
+   en cada arranque mientras siga pendiente) y la ficha de una parada del
+   buscador, que encajada al final de la pantalla quedaba fuera de la vista. */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 620;
+  background: rgba(6, 12, 26, 0.62);
+  backdrop-filter: blur(3px);
+  animation: fade-in 0.2s ease;
+}
+
+.modal {
+  position: fixed;
+  z-index: 621;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(420px, calc(100vw - 32px));
+  max-height: 84dvh;
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 14px;
-  margin-bottom: 14px;
+  gap: 12px;
+  padding: 16px;
   border-radius: var(--r-lg);
-  border: 1px solid color-mix(in srgb, var(--brand-500) 40%, var(--border));
-  background: var(--info-soft);
-  box-shadow: var(--shadow-1);
+  background: var(--surface);
+  box-shadow: var(--shadow-3);
+  animation: dialog-in 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -46%) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .modal {
+    animation: none;
+  }
+}
+
+/* El fondo de la ficha de parada SI cierra al tocarlo: a diferencia de la
+   actualizacion, no hay ninguna decision pendiente que valga la pena forzar. */
+.modal-backdrop {
+  border: 0;
+  cursor: pointer;
+}
+
+/* La ficha se abre tambien sobre el mapa a pantalla completa (z-index 300). */
+.stop-modal {
+  gap: 14px;
+}
+
+.modal-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
 .update-head {
@@ -2147,9 +2210,16 @@ button.card-head {
   color: var(--text-2);
 }
 
-.job-group-copy p {
+.job-group-copy {
+  flex: 1;
+  min-width: 0;
+}
+
+.job-group-count {
   font-size: 12px;
+  font-variant-numeric: tabular-nums;
   color: var(--text-3);
+  flex: none;
 }
 
 .job-group-empty {

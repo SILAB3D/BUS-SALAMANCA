@@ -14,29 +14,22 @@
     </linearGradient>
   </defs>
 
-  <!-- Estelas de movimiento -->
-  <g fill="#ffffff" opacity="0.4">
-    <rect x="1" y="22" width="10" height="3.6" rx="1.8"/>
-    <rect x="0" y="30.2" width="12" height="3.6" rx="1.8"/>
-    <rect x="2" y="38.4" width="9" height="3.6" rx="1.8"/>
-  </g>
-
   <!-- Ruedas -->
   <g fill="#062a86">
-    <rect x="22" y="52" width="8" height="9" rx="3.5"/>
-    <rect x="48" y="52" width="8" height="9" rx="3.5"/>
+    <rect x="15" y="52" width="8" height="9" rx="3.5"/>
+    <rect x="41" y="52" width="8" height="9" rx="3.5"/>
   </g>
 
   <!-- Carroceria -->
-  <rect x="15" y="4" width="48" height="50" rx="11" fill="#ffffff"/>
+  <rect x="8" y="4" width="48" height="50" rx="11" fill="#ffffff"/>
 
   <!-- Parabrisas -->
-  <rect x="21" y="11" width="36" height="16" rx="5" fill="url(#salbus-glass)"/>
+  <rect x="14" y="11" width="36" height="16" rx="5" fill="url(#salbus-glass)"/>
 
   <!-- Faros -->
-  <circle cx="25.5" cy="41" r="4" fill="#ffcf3d"/>
-  <circle cx="52.5" cy="41" r="4" fill="#ffcf3d"/>
+  <circle cx="18.5" cy="41" r="4" fill="#ffcf3d"/>
+  <circle cx="45.5" cy="41" r="4" fill="#ffcf3d"/>
 
   <!-- Parrilla -->
-  <rect x="32" y="38" width="14" height="5.5" rx="2.75" fill="#0d47c8"/>
+  <rect x="25" y="38" width="14" height="5.5" rx="2.75" fill="#0d47c8"/>
 </svg>

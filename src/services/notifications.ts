@@ -142,7 +142,7 @@ export async function showArrivalAlert(
     : `Línea ${lineId} · autobús ${progress?.seen} de ${progress?.target}`
 
   const body = done
-    ? progress
+    ? progress && progress.target > 1
       ? `Han pasado ${progress.target} autobuses por ${stopName}.`
       : `Tu autobús ha pasado por ${stopName}.`
     : `Ha pasado por ${stopName}. Seguimos con el siguiente.`

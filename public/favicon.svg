@@ -21,14 +21,7 @@
 
   <rect width="64" height="64" fill="url(#salbus-bg)"/>
 
-  <g transform="translate(6.4 6.4) scale(0.8)">
-    <!-- Estelas de movimiento -->
-    <g fill="#ffffff" opacity="0.4">
-      <rect x="1" y="22" width="10" height="3.6" rx="1.8"/>
-      <rect x="0" y="30.2" width="12" height="3.6" rx="1.8"/>
-      <rect x="2" y="38.4" width="9" height="3.6" rx="1.8"/>
-    </g>
-
+  <g transform="translate(0.8 6.4) scale(0.8)">
     <!-- Ruedas -->
     <g fill="#062a86">
       <rect x="22" y="52" width="8" height="9" rx="3.5"/>

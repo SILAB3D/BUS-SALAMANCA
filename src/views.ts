@@ -14,7 +14,8 @@ import {
   MAX_TRACKING_JOBS,
   state,
   summariseMonitor,
-  TRACKING_BUS_TARGET,
+  trackingBusTarget,
+  TRACKING_BUS_TARGET_MAX,
   TRACKING_WARN_MINUTES,
   type MonitorJob,
   type MonitorRow,
@@ -95,30 +96,43 @@ interface TabDefinition {
   iconName: string
 }
 
+/**
+ * Barra inferior. "Mis paradas" ya no es una pestaña propia —vive dentro de
+ * Inicio— y Ajustes se abre desde el icono de la barra superior, junto al de
+ * actualizar: son dos destinos menos que elegir cada vez que se mira abajo.
+ */
 const TABS: TabDefinition[] = [
   { id: 'inicio', label: 'Inicio', iconName: 'home' },
   { id: 'buscar', label: 'Buscar', iconName: 'search' },
-  { id: 'paradas', label: 'Mis paradas', iconName: 'star' },
   { id: 'seguimiento', label: 'Seguir', iconName: 'route' },
   { id: 'monitor', label: 'Puntualidad', iconName: 'chart' },
-  { id: 'ajustes', label: 'Ajustes', iconName: 'settings' },
 ]
+
+/** Ajustes no esta en la barra, pero su pantalla tambien necesita titulo. */
+const TAB_TITLES: Record<TabId, string> = {
+  inicio: 'Inicio',
+  buscar: 'Buscar',
+  seguimiento: 'Seguir',
+  monitor: 'Puntualidad',
+  ajustes: 'Ajustes',
+}
 
 export function renderApp(): string {
   return `
     <div class="app-shell">
       ${renderTopbar()}
-      <main class="screen" id="screen">${renderUpdateBanner()}${renderScreen()}</main>
+      <main class="screen" id="screen">${renderScreen()}</main>
       ${renderTabbar()}
     </div>
     ${renderSheet()}
     ${renderTour()}
+    ${renderStopDialog()}
+    ${renderUpdateDialog()}
     ${renderToast()}
   `
 }
 
 function renderTopbar(): string {
-  const active = TABS.find((tab) => tab.id === state.tab)
   const health = getClientHealth()
   const busy = state.refreshing || health.queued > 0
 
@@ -129,7 +143,7 @@ function renderTopbar(): string {
     <header class="topbar">
       <div class="topbar-mark"><img src="/favicon.svg" alt="" /></div>
       <div class="topbar-copy">
-        <h1 class="topbar-title">${esc(active?.label ?? 'SALBUS')}</h1>
+        <h1 class="topbar-title">${esc(TAB_TITLES[state.tab] ?? 'SALBUS')}</h1>
         <p class="topbar-sub">${esc(subtitle)}</p>
       </div>
       <div class="topbar-actions">
@@ -140,6 +154,14 @@ function renderTopbar(): string {
           aria-label="Actualizar ahora"
           ${busy ? 'disabled' : ''}
         >${icon('refresh')}</button>
+        <button
+          class="icon-btn${state.tab === 'ajustes' ? ' is-current' : ''}"
+          type="button"
+          data-action="tab"
+          data-tab="ajustes"
+          aria-label="Ajustes"
+          ${state.tab === 'ajustes' ? 'aria-current="page"' : ''}
+        >${icon('settings')}</button>
       </div>
     </header>
   `
@@ -186,8 +208,6 @@ function renderScreen(): string {
       return renderInicio()
     case 'buscar':
       return renderBuscar()
-    case 'paradas':
-      return renderParadas()
     case 'seguimiento':
       return renderSeguimiento()
     case 'monitor':
@@ -200,11 +220,16 @@ function renderScreen(): string {
 }
 
 /**
- * Aviso de version nueva. Ensena lo minimo: que la hay, cual es, que va a pasar
- * y los botones. Nada de notas de la version ni tamano del descargable: son
- * datos que nadie lee en un aviso y que solo alargan la decision.
+ * Aviso de version nueva. Ventana centrada, por encima de todo: es lo primero
+ * que hay que decidir al abrir la app. Ensena lo minimo: que la hay, cual es,
+ * que va a pasar y los botones. Nada de notas de la version ni tamano del
+ * descargable: son datos que nadie lee en un aviso y que solo alargan la
+ * decision.
+ *
+ * «Ahora no» solo vale para esta sesion (`dismissed` no se guarda en disco):
+ * mientras la actualizacion siga pendiente, la ventana vuelve en cada arranque.
  */
-function renderUpdateBanner(): string {
+function renderUpdateDialog(): string {
   const update = state.update
   const active = update.phase === 'available'
     || update.phase === 'downloading'
@@ -212,23 +237,27 @@ function renderUpdateBanner(): string {
     || update.phase === 'installing'
     || (update.phase === 'error' && update.release !== null)
 
-  if (!active || update.dismissed || !update.release) {
+  // El tour manda mientras esta abierto: dos ventanas apiladas no se leen.
+  if (!active || update.dismissed || !update.release || !state.ready || state.tour.open) {
     return ''
   }
 
   const needsPermission = update.phase === 'ready' && !update.canInstall
+  /** Una descarga o una instalacion en curso no se dejan cerrar a medias. */
+  const busy = update.phase === 'downloading' || update.phase === 'installing'
 
   return `
-    <section class="update-banner">
+    <div class="modal-backdrop"></div>
+    <section class="modal" role="dialog" aria-modal="true" aria-label="Hay una versión nueva">
       <div class="update-head">
         ${icon('refresh')}
         <div class="update-copy">
           <strong>Hay una versión nueva</strong>
           <span>SALBUS v${esc(update.release.versionName)} · tienes la ${esc(APP_VERSION)}</span>
         </div>
-        <button class="mini-btn" type="button" data-action="dismiss-update" aria-label="Ahora no">${icon(
-          'close',
-        )}</button>
+        <button class="mini-btn" type="button" data-action="dismiss-update" aria-label="Ahora no" ${
+          busy ? 'disabled' : ''
+        }>${icon('close')}</button>
       </div>
 
       ${
@@ -249,10 +278,18 @@ function renderUpdateBanner(): string {
                  Conceder permiso
                </button>`
             : `<button class="btn btn-primary btn-block" type="button" data-action="run-update" ${
-                update.phase === 'downloading' || update.phase === 'installing' ? 'disabled' : ''
+                busy ? 'disabled' : ''
               }>${esc(updateButtonLabel())}</button>`
         }
       </div>
+
+      ${
+        busy
+          ? ''
+          : `<button class="btn btn-secondary btn-block" type="button" data-action="dismiss-update">
+               Ahora no
+             </button>`
+      }
 
       ${
         update.phase === 'downloading'
@@ -303,17 +340,18 @@ function renderBooting(): string {
  * 1 · INICIO                                                          *
  * ================================================================== */
 
+/**
+ * Inicio absorbe "Mis paradas".
+ *
+ * Antes la pantalla abria con "Proximos autobuses" —una mezcla de llegadas de
+ * todas las paradas guardadas— y las paradas en si vivian en otra pestaña. Eran
+ * los mismos datos contados dos veces, y la lista mezclada no dejaba ver a que
+ * parada pertenecia cada autobus. Ahora manda la parada: cada una con lo suyo,
+ * en el mismo sitio donde se administran.
+ */
 function renderInicio(): string {
   const now = new Date()
   const favourites = state.favourites
-  const liveFeeds = favourites
-    .map((favourite) => feedOf(favourite.stopId))
-    .filter((feed): feed is StopFeed => feed?.status === 'ok')
-
-  const nextArrivals = liveFeeds
-    .flatMap((feed) => feed.arrivals.map((arrival) => ({ arrival, feed })))
-    .sort((left, right) => liveMinutes(left.arrival) - liveMinutes(right.arrival))
-    .slice(0, 5)
 
   return `
     <section class="hero">
@@ -336,76 +374,67 @@ function renderInicio(): string {
       .map((job) => renderTrackingBanner(job))
       .join('')}
 
-    <section class="card">
-      <div class="card-head">
-        <div class="card-head-copy">
-          <h2 class="card-title">Próximos autobuses</h2>
-          <p class="card-sub">De todas tus paradas guardadas</p>
-        </div>
-      </div>
-      <div class="card-body">
-        ${
-          favourites.length === 0
-            ? emptyState(
-                'star',
-                'Aún no tienes paradas',
-                'Guarda las paradas que más usas y verás aquí sus próximas llegadas.',
-                '<button class="btn btn-primary" type="button" data-action="tab" data-tab="buscar">Buscar una parada</button>',
-              )
-            : nextArrivals.length === 0
-              ? emptyState('clock', 'Sin llegadas ahora', 'No hay autobuses próximos en tus paradas guardadas.')
-              : `<div class="arrivals">${nextArrivals
-                  .map(({ arrival, feed }) => renderArrivalRow(arrival, feed.stopId, true))
-                  .join('')}</div>`
-        }
-      </div>
-    </section>
-
-    <div class="quick-grid">
-      ${renderQuickTile('buscar', 'search', 'Buscar parada', 'Por nombre, línea o mapa')}
-      ${renderQuickTile('paradas', 'star', 'Mis paradas', 'Tus favoritas con tiempos')}
-      ${renderQuickTile('seguimiento', 'route', 'Seguir un bus', 'Mira por dónde viene')}
-      ${renderQuickTile('monitor', 'chart', 'Puntualidad', 'Compara horario y realidad')}
-    </div>
+    ${renderFavourites()}
   `
 }
 
-function renderQuickTile(tab: TabId, iconName: string, title: string, description: string): string {
+function renderFavourites(): string {
+  if (state.favourites.length === 0) {
+    return `
+      <section class="card"><div class="card-body">
+        ${emptyState(
+          'star',
+          'Todavía no tienes paradas',
+          'Guarda las paradas que más uses y las verás aquí con sus tiempos.',
+          '<button class="btn btn-primary" type="button" data-action="tab" data-tab="buscar">Buscar una parada</button>',
+        )}
+      </div></section>
+    `
+  }
+
   return `
-    <button class="quick-tile" type="button" data-action="tab" data-tab="${tab}">
-      ${icon(iconName)}
-      <strong>${esc(title)}</strong>
-      <span>${esc(description)}</span>
-    </button>
+    <div class="section-head">
+      <h2>Mis paradas</h2>
+      <button class="btn btn-secondary btn-sm" type="button" data-action="tab" data-tab="buscar">
+        ${icon('plus')} Añadir
+      </button>
+    </div>
+    ${state.favourites.map((favourite) => renderFavouriteCard(favourite.stopId)).join('')}
   `
 }
 
+/**
+ * Un aviso de proximo bus.
+ *
+ * No lleva interruptor de activar/pausar: un aviso creado esta siempre en
+ * marcha. Pausarlo no significaba nada distinto de quitarlo —la notificacion
+ * desaparecia igual— y era un boton mas que decidir en la tarjeta.
+ */
 function renderTrackingBanner(tracking: TrackingJob): string {
   const feed = feedOf(tracking.stopId)
   const arrival = feed?.arrivals.find((item) => item.lineId === tracking.lineId) ?? null
+  const target = trackingBusTarget()
+
+  // Con un solo autobus por aviso el contador no dice nada: sobra.
+  const progress = target > 1
+    ? `Autobús ${Math.min(tracking.busesSeen + 1, target)} de ${target} · `
+    : ''
 
   return `
-    <section class="card${tracking.active ? '' : ' is-paused'}" data-key="tracking-${esc(tracking.id)}">
+    <section class="card" data-key="tracking-${esc(tracking.id)}">
       <div class="card-head">
         ${lineChip(tracking.lineId, lineColor(tracking.lineId), 'lg')}
         <div class="card-head-copy">
           <h2 class="card-title">${esc(tracking.stopName)}</h2>
-          <p class="card-sub">Autobús ${Math.min(tracking.busesSeen + 1, TRACKING_BUS_TARGET)} de ${TRACKING_BUS_TARGET} · ${esc(describeArrival(tracking.stopId, tracking.lineId))}</p>
+          <p class="card-sub">${esc(progress + describeArrival(tracking.stopId, tracking.lineId))}</p>
         </div>
         <div class="card-actions">
           <div class="arrival-eta">${
             arrival ? renderEta(arrival) : '<span class="eta-unit">buscando…</span>'
           }</div>
-        </div>
-      </div>
-      <div class="card-body">
-        <div class="btn-row">
-          ${renderJobToggle('tracking', tracking.id, tracking.active)}
-          <button class="btn btn-danger" type="button" data-action="stop-tracking" data-tracking="${esc(
+          <button class="mini-btn is-danger" type="button" data-action="stop-tracking" data-tracking="${esc(
             tracking.id,
-          )}">
-            ${icon('bellOff')} Detener
-          </button>
+          )}" aria-label="Detener el aviso">${icon('bellOff')}</button>
         </div>
       </div>
     </section>
@@ -424,13 +453,14 @@ function renderJobToggle(kind: 'tracking' | 'follow', id: string, active: boolea
 
   return `
     <button
-      class="btn ${active ? 'btn-secondary is-on' : 'btn-secondary'}"
+      class="mini-btn${active ? ' is-on' : ''}"
       type="button"
       data-action="toggle-job"
       data-kind="${kind}"
       data-job="${esc(id)}"
+      aria-label="${active ? 'Pausar' : 'Activar'}"
       title="${full ? `Se pausará la más antigua: solo ${MAX_ACTIVE_JOBS} pueden estar activas` : ''}"
-    >${icon(active ? 'pause' : 'play')} ${active ? 'Activa' : 'En pausa'}</button>
+    >${icon(active ? 'pause' : 'play')}</button>
   `
 }
 
@@ -459,8 +489,6 @@ function renderBuscar(): string {
     ${state.search.mode === 'nombre' ? renderSearchByName() : ''}
     ${state.search.mode === 'linea' ? renderSearchByLine() : ''}
     ${state.search.mode === 'mapa' ? renderSearchByMap() : ''}
-
-    ${state.search.selectedStopId ? renderSelectedStop(state.search.selectedStopId) : ''}
   `
 }
 
@@ -677,116 +705,111 @@ function renderStopResult(stop: NetworkStop, order?: number): string {
   `
 }
 
-function renderSelectedStop(stopId: string): string {
+/**
+ * Ficha de la parada tocada en el buscador.
+ *
+ * Es una ventana y no un bloque al final de la pantalla: encajada abajo quedaba
+ * por debajo del listado (y del mapa, que ocupa la pantalla entera), asi que
+ * tocar una parada parecia no hacer nada hasta que se bajaba a buscarla.
+ */
+function renderStopDialog(): string {
+  const stopId = state.search.selectedStopId
+  if (!stopId || !state.ready) {
+    return ''
+  }
+
   const feed = feedOf(stopId)
   const saved = isFavourite(stopId)
 
   return `
-    <section class="card" id="selected-stop">
-      <div class="card-head">
+    <button class="modal-backdrop" type="button" data-action="close-stop" aria-label="Cerrar"></button>
+    <section class="modal stop-modal" role="dialog" aria-modal="true" aria-label="${esc(stopName(stopId))}">
+      <div class="modal-head">
         <span class="stop-code">${esc(stopId)}</span>
         <div class="card-head-copy">
           <h2 class="card-title">${esc(stopName(stopId))}</h2>
           <p class="card-sub">${feedPill(feed)}</p>
         </div>
+        <button class="mini-btn" type="button" data-action="close-stop" aria-label="Cerrar">${icon(
+          'close',
+        )}</button>
       </div>
-      <div class="card-body">
-        ${renderArrivals(stopId, feed)}
-        <div class="btn-row">
-          <button class="btn ${saved ? 'btn-secondary' : 'btn-primary'}" type="button" data-action="toggle-favourite" data-stop="${esc(
-            stopId,
-          )}">
-            ${icon('star')} ${saved ? 'Quitar de mis paradas' : 'Guardar parada'}
-          </button>
-          <button class="btn btn-secondary" type="button" data-action="stop-actions" data-stop="${esc(stopId)}">
-            ${icon('bell')} Avisos
-          </button>
-        </div>
+
+      ${renderArrivals(stopId, feed)}
+
+      <div class="btn-row">
+        <button class="btn ${saved ? 'btn-secondary' : 'btn-primary'}" type="button" data-action="toggle-favourite" data-stop="${esc(
+          stopId,
+        )}">
+          ${icon('star')} ${saved ? 'Quitar' : 'Guardar'}
+        </button>
+        <button class="btn btn-secondary" type="button" data-action="stop-actions" data-stop="${esc(stopId)}">
+          ${icon('bell')} Avisos
+        </button>
       </div>
     </section>
   `
 }
 
-/* ================================================================== *
- * 3 · MIS PARADAS                                                     *
- * ================================================================== */
+/* ------------------------------------------------------------------ *
+ * Tarjeta de parada guardada (dentro de Inicio)                        *
+ * ------------------------------------------------------------------ */
 
-function renderParadas(): string {
-  if (state.favourites.length === 0) {
-    return `
-      <div class="screen-intro">
-        <h2>Mis paradas</h2>
-        <p>Tus paradas favoritas, siempre a mano.</p>
-      </div>
-      <section class="card"><div class="card-body">
-        ${emptyState(
-          'star',
-          'Todavía no hay paradas guardadas',
-          'Busca una parada y pulsa “Guardar parada” para verla aquí con sus tiempos.',
-          '<button class="btn btn-primary" type="button" data-action="tab" data-tab="buscar">Buscar una parada</button>',
-        )}
-      </div></section>
-    `
-  }
-
-  return `
-    <div class="screen-intro">
-      <h2>Mis paradas</h2>
-      <p>Toca una parada para ver sus próximas llegadas.</p>
-    </div>
-    ${state.favourites.map((favourite) => renderFavouriteCard(favourite.stopId)).join('')}
-  `
-}
-
+/**
+ * Una parada guardada.
+ *
+ * La cabecera lleva a la derecha actualizar / renombrar / quitar, no el tiempo
+ * del proximo autobus: ese tiempo ya sale en la lista de llegadas al desplegar,
+ * y ocupando la esquina obligaba a abrir la parada solo para poder gestionarla.
+ */
 function renderFavouriteCard(stopId: string): string {
   const feed = feedOf(stopId)
   const expanded = state.expandedStopId === stopId
   const label = favouriteLabel(stopId, stopName(stopId))
   const lines = state.network?.getLinesForStop(stopId) ?? []
-
-  const preview = feed?.status === 'ok' ? feed.arrivals.slice(0, 1)[0] : null
+  const syncing = state.stopSync[stopId] !== undefined
+  // El nombre oficial solo aporta algo si la parada se ha renombrado.
+  const official = label === stopName(stopId) ? '' : stopName(stopId)
 
   return `
     <section class="card">
-      <button class="card-head" type="button" data-action="expand-stop" data-stop="${esc(stopId)}" aria-expanded="${expanded}">
-        <span class="stop-code">${esc(stopId)}</span>
-        <span class="card-head-copy">
-          <span class="card-title">${esc(label)}</span>
-          <span class="card-sub${expanded ? '' : ' is-chips'}">${
-            expanded
-              ? esc(stopName(stopId))
-              : lines
-                  .slice(0, 8)
-                  .map((line) => lineChip(line.lineId, line.color, 'sm'))
-                  .join('')
-          }</span>
+      <div class="card-head">
+        <button class="card-head-main" type="button" data-action="expand-stop" data-stop="${esc(
+          stopId,
+        )}" aria-expanded="${expanded}">
+          <span class="stop-code">${esc(stopId)}</span>
+          <span class="card-head-copy">
+            <span class="card-title">${esc(label)}</span>
+            <span class="card-sub${expanded ? '' : ' is-chips'}">${
+              expanded
+                ? esc(official)
+                : lines
+                    .slice(0, 8)
+                    .map((line) => lineChip(line.lineId, line.color, 'sm'))
+                    .join('')
+            }</span>
+          </span>
+          ${icon(expanded ? 'chevronDown' : 'chevron')}
+        </button>
+        <span class="card-actions">
+          <button class="mini-btn${syncing ? ' is-spinning' : ''}" type="button" data-action="refresh-stop" data-stop="${esc(
+            stopId,
+          )}" aria-label="Actualizar esta parada">${icon('refresh')}</button>
+          <button class="mini-btn" type="button" data-action="rename-stop" data-stop="${esc(
+            stopId,
+          )}" aria-label="Cambiar nombre">${icon('pencil')}</button>
+          <button class="mini-btn is-danger" type="button" data-action="remove-favourite" data-stop="${esc(
+            stopId,
+          )}" aria-label="Quitar parada">${icon('trash')}</button>
         </span>
-        ${
-          preview
-            ? `<span class="arrival-eta">${renderEta(preview)}</span>`
-            : `<span class="card-actions">${icon(expanded ? 'chevronDown' : 'chevron')}</span>`
-        }
-      </button>
+      </div>
 
       ${
         expanded
           ? `
         <div class="card-divider"></div>
         <div class="card-body">
-          <div class="row-between">
-            ${feedPill(feed)}
-            <span class="card-actions">
-              <button class="mini-btn" type="button" data-action="refresh-stop" data-stop="${esc(
-                stopId,
-              )}" aria-label="Actualizar esta parada">${icon('refresh')}</button>
-              <button class="mini-btn" type="button" data-action="rename-stop" data-stop="${esc(
-                stopId,
-              )}" aria-label="Cambiar nombre">${icon('pencil')}</button>
-              <button class="mini-btn is-danger" type="button" data-action="remove-favourite" data-stop="${esc(
-                stopId,
-              )}" aria-label="Quitar parada">${icon('trash')}</button>
-            </span>
-          </div>
+          ${feedPill(feed)}
 
           ${renderArrivals(stopId, feed)}
 
@@ -824,8 +847,8 @@ function renderArrivals(stopId: string, feed: StopFeed | undefined): string {
 
   const staleClass = feed.status === 'throttled' ? ' stale' : ''
 
-  // Solo las primeras seis. Una parada con doce líneas llenaba la pantalla
-  // entera y empujaba fuera de la vista los botones de la tarjeta.
+  // Solo las primeras ARRIVALS_PREVIEW. Una parada con doce líneas llenaba la
+  // pantalla entera y empujaba fuera de la vista los botones de la tarjeta.
   const expanded = state.arrivalsExpanded[stopId] === true
   const hidden = feed.arrivals.length - ARRIVALS_PREVIEW
   const visible = expanded ? feed.arrivals : feed.arrivals.slice(0, ARRIVALS_PREVIEW)
@@ -871,41 +894,33 @@ function renderArrivalRow(arrival: Arrival, stopId: string, showStop: boolean): 
  * 4 · SEGUIMIENTO                                                     *
  * ================================================================== */
 
+/**
+ * Seguir un autobus.
+ *
+ * La pantalla se ha vaciado de explicaciones a proposito: antes abria con un
+ * parrafo, seguia con un aviso de cuantas funciones estaban activas y cada
+ * tarjeta cerraba con otro parrafo sobre el ritmo de consulta. Con cuatro
+ * tarjetas en pantalla era mas texto que datos. Lo que habia que saber (los
+ * limites, como funciona) esta en Ajustes; aqui solo estan las funciones.
+ */
 function renderSeguimiento(): string {
   if (state.follows.length === 0 && state.trackings.length === 0) {
     return `
-      <div class="screen-intro">
-        <h2>Seguir un autobús</h2>
-        <p>Mira por qué paradas viene tu autobús y recibe un aviso cuando esté cerca.</p>
-      </div>
       <section class="card"><div class="card-body">
         ${emptyState(
           'route',
-          'Sin seguimientos activos',
-          'Abre una parada guardada y elige “Avisos y seguimiento” para empezar.',
-          '<button class="btn btn-primary" type="button" data-action="tab" data-tab="paradas">Ir a mis paradas</button>',
+          'Sin seguimientos',
+          'Abre una parada guardada y elige “Avisos y seguimiento”.',
+          '<button class="btn btn-primary" type="button" data-action="tab" data-tab="inicio">Ir a mis paradas</button>',
         )}
       </div></section>
     `
   }
 
-  const active = activeJobCount()
-
   return `
-    <div class="screen-intro">
-      <h2>Seguir un autobús</h2>
-      <p>Las paradas por las que viene, con el tiempo que falta en cada una.</p>
-    </div>
-
-    <div class="notice${active >= MAX_ACTIVE_JOBS ? ' is-warn' : ''}">
-      ${icon('info')}
-      <span>${active} de ${MAX_ACTIVE_JOBS} funciones activas. Las que están en pausa
-      siguen guardadas y se reactivan de un toque.</span>
-    </div>
-
     ${renderJobGroup(
       'Avisos de próximo bus',
-      `${state.trackings.length} de ${MAX_TRACKING_JOBS} · notificación con los minutos que faltan`,
+      `${state.trackings.length} de ${MAX_TRACKING_JOBS}`,
       'bell',
       state.trackings.map((job) => renderTrackingBanner(job)).join(''),
       state.trackings.length === 0 ? 'Sin avisos creados.' : '',
@@ -913,7 +928,7 @@ function renderSeguimiento(): string {
 
     ${renderJobGroup(
       'Ver por dónde viene',
-      `${state.follows.length} de ${MAX_FOLLOW_JOBS} · recorrido parada a parada`,
+      `${state.follows.length} de ${MAX_FOLLOW_JOBS}`,
       'route',
       state.follows.map((follow) => renderFollowCard(follow.id)).join(''),
       state.follows.length === 0 ? 'Sin seguimientos creados.' : '',
@@ -921,11 +936,7 @@ function renderSeguimiento(): string {
   `
 }
 
-/**
- * Agrupa las funciones por modalidad. Es solo organización: mezcladas, con
- * cuatro tarjetas parecidas en pantalla, no había forma de ver de un vistazo
- * cuántas había de cada tipo ni cuánto margen quedaba.
- */
+/** Agrupa las funciones por modalidad, con el margen que queda en el titulo. */
 function renderJobGroup(
   title: string,
   subtitle: string,
@@ -939,8 +950,8 @@ function renderJobGroup(
         ${icon(iconName)}
         <div class="job-group-copy">
           <h3>${esc(title)}</h3>
-          <p>${esc(subtitle)}</p>
         </div>
+        <span class="job-group-count">${esc(subtitle)}</span>
       </header>
       ${emptyMessage ? `<p class="job-group-empty">${esc(emptyMessage)}</p>` : body}
     </section>
@@ -982,13 +993,18 @@ function renderFollowCard(followId: string): string {
           <p class="card-sub">${esc(direction ? directionLabel(direction) : `Línea ${follow.lineId}`)}</p>
         </div>
         <div class="card-actions">
+          ${renderJobToggle('follow', follow.id, follow.active)}
           <button class="mini-btn is-danger" type="button" data-action="remove-follow" data-follow="${esc(
             follow.id,
           )}" aria-label="Quitar seguimiento">${icon('trash')}</button>
         </div>
       </div>
       <div class="card-body">
-        <div class="btn-row">${renderJobToggle('follow', follow.id, follow.active)}</div>
+        ${
+          follow.active
+            ? ''
+            : '<p class="text-tiny">En pausa. Se detiene sola al salir de esta pestaña.</p>'
+        }
         ${
           windowStops.length === 0
             ? notice('warn', 'No se pudo reconstruir el recorrido de esta línea.')
@@ -1015,11 +1031,6 @@ function renderFollowCard(followId: string): string {
                 .join('')}</div>
               ${renderSyncLegend()}`
         }
-        <p class="text-tiny">
-          Se consulta una parada cada ${(MIN_REQUEST_SPACING_MS / 1000).toFixed(0)} s para no saturar la fuente oficial,
-          así que las paradas más lejanas tardan algo más en refrescarse. El punto de la derecha dice en qué punto
-          va cada una.
-        </p>
       </div>
     </section>
   `
@@ -1066,7 +1077,7 @@ function renderMonitor(): string {
           'chart',
           'Sin controles de puntualidad',
           'Elige una parada guardada, una línea y una franja horaria; la app irá anotando a qué hora pasa realmente.',
-          '<button class="btn btn-primary" type="button" data-action="tab" data-tab="paradas">Ir a mis paradas</button>',
+          '<button class="btn btn-primary" type="button" data-action="tab" data-tab="inicio">Ir a mis paradas</button>',
         )}
       </div></section>
     `
@@ -1259,7 +1270,7 @@ const TOUR: TourStep[] = [
   {
     iconName: 'home',
     title: 'Inicio',
-    body: 'El reloj, tus avisos en marcha y las próximas llegadas de todas tus paradas guardadas, en una sola pantalla.',
+    body: 'El reloj, tus avisos en marcha y tus paradas guardadas. Toca una parada para ver sus llegadas; los botones de la derecha la actualizan, la renombran o la quitan.',
   },
   {
     iconName: 'search',
@@ -1267,14 +1278,9 @@ const TOUR: TourStep[] = [
     body: 'Encuentra una parada por su nombre, recorriendo una línea o tocándola en el mapa.',
   },
   {
-    iconName: 'star',
-    title: 'Mis paradas',
-    body: 'Las paradas que guardes viven aquí con sus tiempos. Toca una para desplegarla y ponerle el nombre que quieras.',
-  },
-  {
     iconName: 'route',
     title: 'Seguir',
-    body: 'Dos avisos de próximo bus y dos seguimientos de recorrido, con dos activos a la vez como máximo.',
+    body: 'Avisos de próximo bus, que llegan aunque cierres la app, y el recorrido parada a parada de la línea que elijas.',
   },
   {
     iconName: 'chart',
@@ -1284,7 +1290,7 @@ const TOUR: TourStep[] = [
   {
     iconName: 'settings',
     title: 'Ajustes',
-    body: 'Permisos, vibración del aviso, origen de los datos, actualizaciones y el registro de lo que hace la app.',
+    body: 'Desde el engranaje de arriba: permisos, cuántos autobuses sigue cada aviso, actualizaciones y el registro.',
   },
   {
     iconName: 'bell',
@@ -1535,14 +1541,30 @@ function renderTrackingRulesCard(): string {
         <p class="card-sub">Cuántas funciones puedes tener y cuántas trabajan a la vez</p>
       </div></div>
       <div class="card-body">
+        <label class="field">
+          <span>Autobuses por aviso</span>
+          <select class="select" data-action="pick-bus-target">
+            ${Array.from({ length: TRACKING_BUS_TARGET_MAX }, (_, index) => index + 1)
+              .map(
+                (value) =>
+                  `<option value="${value}" ${value === trackingBusTarget() ? 'selected' : ''}>${
+                    value === 1 ? 'Solo el próximo' : `${value} autobuses seguidos`
+                  }</option>`,
+              )
+              .join('')}
+          </select>
+        </label>
+        <p class="text-tiny">
+          El aviso termina solo cuando ha visto pasar esa cantidad. Los avisos ya creados
+          siguen con el número que haya elegido aquí.
+        </p>
+
         <dl class="kv">
           <dt>Avisos de próximo bus</dt><dd>máximo ${MAX_TRACKING_JOBS} creados</dd>
           <dt>Ver por dónde viene</dt><dd>máximo ${MAX_FOLLOW_JOBS} creados</dd>
           <dt>Activas a la vez</dt><dd>${MAX_ACTIVE_JOBS} en total, de cualquier tipo</dd>
           <dt>Al crear una de más</dt><dd>se pide sustituir una de esa modalidad</dd>
-          <dt>Al pasar de ${MAX_ACTIVE_JOBS} activas</dt><dd>se pausa la más antigua</dd>
-          <dt>En pausa</dt><dd>se conserva, no consulta ni avisa</dd>
-          <dt>Fin de un aviso</dt><dd>tras ver pasar ${TRACKING_BUS_TARGET} autobuses</dd>
+          <dt>Al salir de la pestaña Seguir</dt><dd>los recorridos se pausan solos</dd>
         </dl>
 
         ${renderSettingRow(

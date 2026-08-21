@@ -42,7 +42,8 @@ import {
   persistTab,
   persistTrackings,
   state,
-  TRACKING_BUS_TARGET,
+  clampBusTarget,
+  trackingBusTarget,
   TRACKING_WARN_MINUTES,
   markTourSeen,
   MAX_ACTIVE_JOBS,
@@ -105,6 +106,8 @@ interface BusTrackingPlugin {
     jobs: TrackingJobPayload[]
     intervalSeconds: number
     vibrateOnApproach: boolean
+    /** Autobuses que hay que ver pasar antes de cerrar cada aviso (1 a 3). */
+    busTarget: number
   }): Promise<void>
   stop(): Promise<void>
   /** `stopped`: avisos que se detuvieron desde su notificacion, quiza sin la app abierta. */
@@ -233,6 +236,15 @@ async function bootstrap(): Promise<void> {
 
   window.setInterval(tick, TICK_MS)
   document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') {
+      // "Ver por donde viene" consulta OCHO paradas por ciclo contra una fuente
+      // que limita por IP. Con la app en segundo plano nadie mira ese recorrido,
+      // asi que se para: lo que se ahorra ahi es lo que hace que el aviso de
+      // proximo bus —que si tiene que seguir vivo— llegue a tiempo.
+      pauseFollows('la app pasó a segundo plano')
+      return
+    }
+
     if (document.visibilityState === 'visible') {
       void refreshVisible('manual')
       void syncPermissions()
@@ -494,16 +506,11 @@ function buildRefreshPlan(): Array<{ stopId: string, maxAgeMs: number, priority:
     add(state.search.selectedStopId, FRESHNESS.focused, 'high')
   }
 
-  if (state.tab === 'paradas') {
+  // Inicio ES la lista de paradas guardadas: la desplegada manda sobre el resto.
+  if (state.tab === 'inicio') {
     if (state.expandedStopId) {
       add(state.expandedStopId, FRESHNESS.focused, 'high')
     }
-    for (const favourite of state.favourites) {
-      add(favourite.stopId, FRESHNESS.visible)
-    }
-  }
-
-  if (state.tab === 'inicio') {
     for (const favourite of state.favourites) {
       add(favourite.stopId, FRESHNESS.visible)
     }
@@ -703,6 +710,7 @@ async function syncTrackingService(): Promise<void> {
       })),
       intervalSeconds: TRACKING_INTERVAL_SECONDS,
       vibrateOnApproach: state.settings.vibrateOnApproach,
+      busTarget: trackingBusTarget(),
     })
 
     trackingServiceActive = jobs.length > 0
@@ -756,7 +764,7 @@ async function createTracking(stopId: string, lineId: string): Promise<void> {
   log(
     'info',
     'aviso',
-    `Aviso creado: línea ${lineId} en ${job.stopName} (${TRACKING_BUS_TARGET} autobuses).`,
+    `Aviso creado: línea ${lineId} en ${job.stopName} (${trackingBusTarget()} autobús/es).`,
   )
 
   if (turnedOff.length > 0) {
@@ -923,7 +931,7 @@ async function restoreTrackingService(): Promise<void> {
     // Los avisos que ya vieron sus tres autobuses con la app cerrada se cierran
     // en lugar de revivirse.
     for (const job of activeTrackings()) {
-      if (job.busesSeen >= TRACKING_BUS_TARGET) {
+      if (job.busesSeen >= trackingBusTarget()) {
         await finishTracking(job.id)
       }
     }
@@ -1033,7 +1041,7 @@ function vibrateShort(): void {
 
 /**
  * Un autobús más ha pasado. El aviso solo termina cuando se han visto pasar
- * TRACKING_BUS_TARGET; hasta entonces se rearma y sigue con el siguiente.
+ * trackingBusTarget(); hasta entonces se rearma y sigue con el siguiente.
  */
 async function registerBusPassed(job: TrackingJob): Promise<void> {
   job.busesSeen += 1
@@ -1043,7 +1051,7 @@ async function registerBusPassed(job: TrackingJob): Promise<void> {
   job.warnedAt3 = false
   persistTrackings()
 
-  if (job.busesSeen >= TRACKING_BUS_TARGET) {
+  if (job.busesSeen >= trackingBusTarget()) {
     await finishTracking(job.id)
     return
   }
@@ -1051,35 +1059,35 @@ async function registerBusPassed(job: TrackingJob): Promise<void> {
   // Mismo id en todos los avisos intermedios: se sustituyen en vez de apilarse.
   await showArrivalAlert(notificationId(`${job.id}|done`), job.lineId, job.stopName, {
     seen: job.busesSeen,
-    target: TRACKING_BUS_TARGET,
+    target: trackingBusTarget(),
   })
   log(
     'info',
     'aviso',
-    `Autobús ${job.busesSeen} de ${TRACKING_BUS_TARGET} de la línea ${job.lineId} ha pasado por ${job.stopName}.`,
+    `Autobús ${job.busesSeen} de ${trackingBusTarget()} de la línea ${job.lineId} ha pasado por ${job.stopName}.`,
   )
-  showToast(`Autobús ${job.busesSeen} de ${TRACKING_BUS_TARGET} ya ha pasado`, 'info')
+  showToast(`Autobús ${job.busesSeen} de ${trackingBusTarget()} ya ha pasado`, 'info')
   render()
 }
 
-/** Cierra un aviso: ya han pasado los tres autobuses. */
+/** Cierra un aviso: ya han pasado todos los autobuses que se esperaban. */
 async function finishTracking(id: string): Promise<void> {
   const job = trackingById(id)
   if (!job) {
     return
   }
 
+  const target = trackingBusTarget()
+
   await showArrivalAlert(notificationId(`${job.id}|done`), job.lineId, job.stopName, {
-    seen: TRACKING_BUS_TARGET,
-    target: TRACKING_BUS_TARGET,
+    seen: target,
+    target,
   })
-  log(
-    'info',
-    'aviso',
-    `Aviso completado: han pasado ${TRACKING_BUS_TARGET} autobuses de la línea ${job.lineId} por ${job.stopName}.`,
-  )
+  const cuantos = target > 1 ? `${target} autobuses` : 'el autobús'
+
+  log('info', 'aviso', `Aviso completado: ha pasado ${cuantos} de la línea ${job.lineId} por ${job.stopName}.`)
   await removeTracking(id, false)
-  showToast(`Han pasado ${TRACKING_BUS_TARGET} autobuses de la línea ${job.lineId}`, 'success')
+  showToast(`Ya ha pasado ${cuantos} de la línea ${job.lineId}`, 'success')
   render()
 }
 
@@ -1297,6 +1305,14 @@ appRoot.addEventListener('change', (event) => {
     render()
   }
 
+  if (action === 'pick-bus-target') {
+    state.settings.trackingBusTarget = clampBusTarget(Number(target.value))
+    persistSettings()
+    // El servicio nativo cuenta los pasos por su cuenta: necesita el numero.
+    void syncTrackingService()
+    render()
+  }
+
   if (action === 'draft-line') {
     state.draft.lineId = target.value
     const stopId = target.dataset.stop ?? ''
@@ -1323,11 +1339,7 @@ async function handleAction(action: string, element: HTMLElement): Promise<void>
     case 'tab': {
       const tab = element.dataset.tab as TabId | undefined
       if (tab) {
-        state.tab = tab
-        state.sheet = null
-        persistTab()
-        render()
-        void refreshVisible('auto')
+        await goToTab(tab)
       }
       return
     }
@@ -1393,22 +1405,18 @@ async function handleAction(action: string, element: HTMLElement): Promise<void>
       render()
       return
 
-    // Desde el globo del mapa: cierra la pantalla completa y baja a la ficha.
+    // Desde el globo del mapa. El mapa se queda como esta: la ficha se abre
+    // por encima, asi que no hay que salir de la pantalla completa para verla.
     case 'map-select-stop':
+    case 'select-stop':
       state.search.selectedStopId = stopId
-      state.search.mapExpanded = false
-      // La ficha queda por debajo del mapa y de los dos desplegables: sin esto
-      // el toque parece no hacer nada, porque el resultado no entra en pantalla.
-      scrollPending = 'selected-stop'
       render()
       await refreshOneStop(stopId)
       return
 
-    case 'select-stop':
-      state.search.selectedStopId = stopId
-      scrollPending = 'selected-stop'
+    case 'close-stop':
+      state.search.selectedStopId = null
       render()
-      await refreshOneStop(stopId)
       return
 
     case 'expand-stop':
@@ -1606,6 +1614,59 @@ async function handleAction(action: string, element: HTMLElement): Promise<void>
     default:
       return
   }
+}
+
+/**
+ * Cambio de pestaña.
+ *
+ * Es el unico punto por el que se cambia de pantalla, y por eso es donde viven
+ * las dos limpiezas que dependen de ello: los recorridos se paran al salir de
+ * "Seguir", y el buscador vuelve a "Seleccionar" al entrar en "Buscar".
+ */
+async function goToTab(tab: TabId): Promise<void> {
+  const previous = state.tab
+
+  if (previous === 'seguimiento' && tab !== 'seguimiento') {
+    pauseFollows('se salió de la pestaña Seguir')
+  }
+
+  if (tab === 'buscar' && previous !== 'buscar') {
+    // Los desplegables arrancan siempre sin elegir: al volver al buscador, una
+    // linea y un sentido heredados de la visita anterior se leian como una
+    // busqueda en curso que nadie habia pedido.
+    state.search.lineId = ''
+    state.search.directionKey = ''
+    state.search.mapExpanded = false
+    state.search.selectedStopId = null
+  }
+
+  state.tab = tab
+  state.sheet = null
+  persistTab()
+  render()
+  void refreshVisible('auto')
+}
+
+/**
+ * Para todos los recorridos activos.
+ *
+ * No se reactivan solos al volver: un recorrido consumiendo consultas sin que
+ * nadie lo mire es justo lo que se quiere evitar, y volver a encenderlo es un
+ * toque. La tarjeta lo dice donde se ve.
+ */
+function pauseFollows(reason: string): void {
+  const running = state.follows.filter((follow) => follow.active)
+  if (running.length === 0) {
+    return
+  }
+
+  for (const follow of running) {
+    follow.active = false
+  }
+
+  persistFollows()
+  log('info', 'seguimiento', `${running.length} recorrido(s) en pausa: ${reason}.`)
+  render()
 }
 
 /** Abre la hoja de eleccion de linea con el borrador ya preparado. */

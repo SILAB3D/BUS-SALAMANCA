@@ -180,7 +180,6 @@ async function main() {
     const screens = [
       { tab: 'inicio', name: 'inicio' },
       { tab: 'buscar', name: 'buscar' },
-      { tab: 'paradas', name: 'paradas' },
       { tab: 'seguimiento', name: 'seguimiento' },
       { tab: 'monitor', name: 'puntualidad' },
       { tab: 'ajustes', name: 'ajustes' },
@@ -236,6 +235,14 @@ async function main() {
       await delay(600)
 
       await cdp.evaluate(`(() => {
+        const sel = document.querySelector('[data-action="pick-search-line"]');
+        sel.value = sel.options[1].value;
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+      })()`)
+      await delay(700)
+
+      await cdp.evaluate(`(() => {
         window.__sel = document.querySelector('select.select');
         window.__selValue = window.__sel ? window.__sel.value : null;
         window.__card = document.querySelector('.card');
@@ -282,6 +289,16 @@ async function main() {
       // El mapa lo pinta Leaflet dentro del DOM: el repintado no debe tocarlo.
       await cdp.evaluate(`document.querySelector('[data-action="search-mode"][data-mode="mapa"]')?.click(); true`)
       await delay(1500)
+
+      // Sin sentido elegido no hay recorrido: ni trazado ni chinchetas que mirar.
+      await cdp.evaluate(`(() => {
+        const select = document.querySelector('[data-action="pick-search-direction"]');
+        select.value = select.options[1].value;
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+      })()`)
+      await delay(1200)
+
       await cdp.evaluate(`(() => { window.__map = document.querySelector('#stop-map'); return true; })()`)
       await delay(4000)
 
@@ -307,6 +324,7 @@ async function main() {
       await cdp.evaluate(`(() => {
         window.__mapBefore = document.querySelector('#stop-map');
         const select = document.querySelector('[data-action="pick-search-direction"]');
+        select.value = select.options[1].value;
         select.dispatchEvent(new Event('change', { bubbles: true }));
         return true;
       })()`)

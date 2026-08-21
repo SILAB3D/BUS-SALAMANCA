@@ -10,7 +10,7 @@ export const APP_VERSION = `v${__APP_VERSION__}`
 /** versionCode de esta compilacion; se compara con el de la ultima release. */
 export const APP_VERSION_CODE = __APP_VERSION_CODE__
 
-export type TabId = 'inicio' | 'buscar' | 'paradas' | 'monitor' | 'seguimiento' | 'ajustes'
+export type TabId = 'inicio' | 'buscar' | 'monitor' | 'seguimiento' | 'ajustes'
 export type SearchMode = 'nombre' | 'linea' | 'mapa'
 export type PermissionState = 'granted' | 'denied' | 'unknown'
 
@@ -47,8 +47,23 @@ export interface TrackingJob {
   warnedAt3: boolean
 }
 
-/** Autobuses que hay que ver pasar antes de dar por terminado el aviso. */
-export const TRACKING_BUS_TARGET = 3
+/**
+ * Tope de autobuses que puede seguir un aviso. El numero real lo elige la
+ * persona usuaria en Ajustes; este es solo el maximo que admite el selector.
+ */
+export const TRACKING_BUS_TARGET_MAX = 3
+
+/** Autobuses que ve pasar un aviso antes de darse por terminado. */
+export function trackingBusTarget(): number {
+  return clampBusTarget(state.settings.trackingBusTarget)
+}
+
+export function clampBusTarget(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 1
+  }
+  return Math.min(TRACKING_BUS_TARGET_MAX, Math.max(1, Math.round(value)))
+}
 
 /**
  * Minutos restantes a los que el aviso da un toque corto de vibracion.
@@ -251,10 +266,20 @@ export interface AppSettings {
    * Una sola vez por autobus.
    */
   vibrateOnApproach: boolean
+
+  /**
+   * Autobuses que sigue un aviso antes de terminar (1 a TRACKING_BUS_TARGET_MAX).
+   *
+   * Por defecto uno: quien pone un aviso casi siempre espera EL proximo autobus,
+   * y encadenar tres dejaba la notificacion viva mucho despues de haberse
+   * subido al primero.
+   */
+  trackingBusTarget: number
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
   vibrateOnApproach: true,
+  trackingBusTarget: 1,
 }
 
 /* ------------------------------------------------------------------ *
@@ -267,7 +292,7 @@ export interface TourState {
 }
 
 /** Llegadas que se ven de una parada antes de pulsar "Ver mas". */
-export const ARRIVALS_PREVIEW = 6
+export const ARRIVALS_PREVIEW = 5
 
 const KEYS = {
   favourites: 'salbus.favourites',
@@ -390,7 +415,7 @@ export const state: AppState = {
     battery: 'unknown',
   },
 
-  settings: { ...DEFAULT_SETTINGS, ...readJson<Partial<AppSettings>>(KEYS.settings, {}) },
+  settings: readSettings(),
 
   // El tour se abre solo la primera vez que se arranca cada version nueva.
   tour: { open: readTourVersion() !== APP_VERSION, step: 0 },
@@ -759,11 +784,21 @@ function writeJson(key: string, value: unknown): void {
 }
 
 function readTab(): TabId {
-  const valid: TabId[] = ['inicio', 'buscar', 'paradas', 'monitor', 'seguimiento', 'ajustes']
+  const valid: TabId[] = ['inicio', 'buscar', 'monitor', 'seguimiento', 'ajustes']
   try {
+    // "paradas" existio hasta la v4.4 como pestaña propia; ahora vive dentro de
+    // Inicio, asi que quien la tuviera guardada aterriza justo donde estaba.
     const raw = window.localStorage.getItem(KEYS.tab) as TabId | null
     return raw && valid.includes(raw) ? raw : 'inicio'
   } catch {
     return 'inicio'
   }
+}
+
+function readSettings(): AppSettings {
+  const stored = readJson<Partial<AppSettings>>(KEYS.settings, {})
+  const settings = { ...DEFAULT_SETTINGS, ...stored }
+  // Guardado por una version anterior (o a mano): se acota antes de usarlo.
+  settings.trackingBusTarget = clampBusTarget(settings.trackingBusTarget)
+  return settings
 }

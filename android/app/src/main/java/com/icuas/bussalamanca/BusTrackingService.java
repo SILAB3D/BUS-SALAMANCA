@@ -26,6 +26,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
  * Servicio en primer plano que mantiene vivos los avisos de "proximo bus".
@@ -41,7 +42,7 @@ import java.util.Set;
  *
  * El seguimiento de un aviso no termina con el primer autobus: cuenta los pasos
  * reales de la linea y sigue avisando del siguiente hasta completar
- * {@link #TARGET_BUSES}, salvo que se detenga a mano antes.
+ * {@link #targetBuses}, salvo que se detenga a mano antes.
  */
 public class BusTrackingService extends Service {
 
@@ -58,6 +59,18 @@ public class BusTrackingService extends Service {
     public static final String EXTRA_JOB_ID = "jobId";
     public static final String EXTRA_INTERVAL = "intervalSeconds";
     public static final String EXTRA_VIBRATE = "vibrateOnApproach";
+    public static final String EXTRA_TARGET = "busTarget";
+
+    /**
+     * Separador de campos de cada aviso dentro del intent.
+     *
+     * NO puede ser "|": el id de un aviso ya ES `stopId|lineId`, asi que un "|"
+     * como separador partia el id en dos y corria TODOS los campos un puesto. La
+     * parada que se consultaba pasaba a ser el id de la linea, y la linea que se
+     * buscaba, el nombre de la parada: el aviso no encontraba nunca su autobus y
+     * repetia "sin paso previsto" en cada ciclo.
+     */
+    public static final String FIELD_SEPARATOR = "\u001F";
 
     private static final String CHANNEL_ID = "salbus-seguimiento";
 
@@ -74,8 +87,8 @@ public class BusTrackingService extends Service {
     /** Avisos simultaneos que admite el servicio. */
     public static final int MAX_JOBS = 2;
 
-    /** Autobuses que hay que ver pasar antes de dar por terminado un aviso. */
-    private static final int TARGET_BUSES = 3;
+    /** Tope de autobuses por aviso; el numero real lo elige la app. */
+    public static final int MAX_TARGET_BUSES = 3;
 
     /** Ciclos seguidos sin ver la linea, tras haberla tenido encima, para darla por pasada. */
     private static final int MISSING_STREAK_TO_PASS = 2;
@@ -114,6 +127,15 @@ public class BusTrackingService extends Service {
     private long intervalMs = 15_000L;
     private long backoffMs = BACKOFF_BASE_MS;
     private boolean vibrateOnApproach = true;
+
+    /**
+     * Autobuses que ve pasar cada aviso antes de cerrarse.
+     *
+     * Es un ajuste de la app, no una constante: quien pone un aviso casi siempre
+     * espera EL proximo autobus, y encadenar tres dejaba la notificacion viva
+     * mucho despues de haberse subido al primero.
+     */
+    private int targetBuses = 1;
 
     /** Un aviso: una parada, una linea y todo lo que hay que recordar de ella. */
     private static final class Job {
@@ -212,6 +234,7 @@ public class BusTrackingService extends Service {
         // objetivo y tambien el suelo que protege a la fuente oficial.
         intervalMs = Math.max(15, seconds) * 1000L;
         vibrateOnApproach = intent.getBooleanExtra(EXTRA_VIBRATE, true);
+        targetBuses = Math.min(MAX_TARGET_BUSES, Math.max(1, intent.getIntExtra(EXTRA_TARGET, 1)));
 
         applyJobs(incoming);
 
@@ -247,7 +270,7 @@ public class BusTrackingService extends Service {
                 break;
             }
 
-            String[] parts = raw.split("\\|", 6);
+            String[] parts = raw.split(Pattern.quote(FIELD_SEPARATOR), 6);
             if (parts.length < 5) {
                 continue;
             }
@@ -265,7 +288,7 @@ public class BusTrackingService extends Service {
                 // Se acota al ultimo autobus pendiente: crear el aviso significa
                 // que aun queda alguno por ver, y con la cuenta ya completa nunca
                 // llegaria a terminar.
-                job.busesSeen = Math.min(TARGET_BUSES - 1, Math.max(0, parseInt(parts, 5)));
+                job.busesSeen = Math.min(targetBuses - 1, Math.max(0, parseInt(parts, 5)));
             }
 
             next.add(job);
@@ -467,7 +490,7 @@ public class BusTrackingService extends Service {
     /**
      * Da por pasado un autobus y prepara el siguiente.
      *
-     * @return true si con este ya se han visto los {@link #TARGET_BUSES} y el
+     * @return true si con este ya se han visto los {@link #targetBuses} y el
      *     aviso se ha retirado de la lista.
      */
     private boolean registerBusPassed(Job job, int slot) {
@@ -477,7 +500,7 @@ public class BusTrackingService extends Service {
         job.missingStreak = 0;
         job.warnedAt3 = false;
 
-        if (job.busesSeen >= TARGET_BUSES) {
+        if (job.busesSeen >= targetBuses) {
             finish(job, slot);
             return true;
         }
@@ -493,7 +516,9 @@ public class BusTrackingService extends Service {
             Notification summary = new Notification.Builder(this, CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_stat_salbus)
                 .setContentTitle("Línea " + job.lineId + " · aviso completado")
-                .setContentText("Han pasado " + TARGET_BUSES + " autobuses por " + job.stopName + ".")
+                .setContentText(targetBuses > 1
+                    ? "Han pasado " + targetBuses + " autobuses por " + job.stopName + "."
+                    : "Tu autobús ha pasado por " + job.stopName + ".")
                 .setContentIntent(openAppIntent())
                 .setAutoCancel(true)
                 .setCategory(Notification.CATEGORY_TRANSPORT)
@@ -507,8 +532,12 @@ public class BusTrackingService extends Service {
         notifyUi(job, ArrivalsClient.STATUS_OK, -1, false, true);
     }
 
+    /** Con un solo autobus por aviso el contador no dice nada: se calla. */
     private String progress(Job job) {
-        return "Autobús " + Math.min(job.busesSeen + 1, TARGET_BUSES) + " de " + TARGET_BUSES;
+        if (targetBuses <= 1) {
+            return job.destination;
+        }
+        return "Autobús " + Math.min(job.busesSeen + 1, targetBuses) + " de " + targetBuses;
     }
 
     /** Vibracion corta: solo un toque, para que se note sin llegar a molestar. */
@@ -553,7 +582,7 @@ public class BusTrackingService extends Service {
     private void notifyPassed(Job job) {
         BusTrackingPlugin plugin = listener;
         if (plugin != null) {
-            plugin.emitBusPassed(job.id, job.stopId, job.lineId, job.busesSeen, TARGET_BUSES);
+            plugin.emitBusPassed(job.id, job.stopId, job.lineId, job.busesSeen, targetBuses);
         }
     }
 

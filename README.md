@@ -144,8 +144,8 @@ una fuente que limita por IP:
 
 | | Máximo creadas | Notas |
 | --- | --- | --- |
-| Aviso de próximo bus | 2 | notificación persistente; termina tras ver pasar 3 autobuses |
-| Ver por dónde viene | 2 | recorrido parada a parada |
+| Aviso de próximo bus | 2 | notificación persistente; termina tras ver pasar los autobuses que se elijan en Ajustes (1 a 3, uno por defecto) |
+| Ver por dónde viene | 2 | recorrido parada a parada; se **pausa solo** al salir de la pestaña Seguir o al irse la app a segundo plano |
 | **Activas a la vez** | **2 en total** | de cualquier modalidad |
 
 Al crear una por encima del tope de su modalidad se pregunta **cuál se
@@ -153,6 +153,11 @@ sustituye**, en vez de rechazar la acción. Al pasar de dos activas se **pausa l
 más antigua**: lo que se acaba de tocar es siempre lo que se quiere mirar ahora.
 Una función en pausa se conserva entera, no consulta ni avisa, y se reactiva con
 el botón de su tarjeta.
+
+Los avisos de próximo bus NO se pausan: un aviso creado está siempre en marcha,
+porque pausarlo no se distinguía de quitarlo. Los recorridos sí, y además solos:
+consultan ocho paradas por ciclo, así que fuera de su pestaña dejan de mirar y
+le ceden el sitio en la cola al aviso, que es lo que tiene que llegar a tiempo.
 
 ## Funcionamiento en segundo plano
 

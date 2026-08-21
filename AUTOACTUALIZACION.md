@@ -207,6 +207,14 @@ el código nativo, que no pasa por CORS.
 
 ## 6. El aviso
 
+Es una **ventana centrada** sobre el resto de la interfaz, no una tarjeta
+dentro del listado: se abre al arrancar la app y hay que decidirla. «Ahora no»
+sólo vale para esa sesión —`dismissed` no se guarda en disco a propósito—, así
+que mientras la actualización siga pendiente la ventana vuelve en cada arranque.
+Mientras se descarga o se instala no se deja cerrar, para no dejar el proceso a
+medias. Si el tour de bienvenida está abierto, manda el tour: dos ventanas
+apiladas no se leen.
+
 El aviso enseña lo mínimo: que hay versión nueva, cuál es, qué va a pasar al
 instalar, y los botones. Nada de notas de la versión ni tamaño del descargable:
 son datos que nadie lee en un modal y que sólo alargan la decisión.

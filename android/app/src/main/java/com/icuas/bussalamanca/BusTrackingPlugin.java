@@ -67,9 +67,10 @@ public class BusTrackingPlugin extends Plugin {
                         continue;
                     }
 
-                    // El separador es "|" y forma parte del id (stopId|lineId):
-                    // el resto de campos se sanean para no romper el formato.
-                    encoded.add(String.join("|",
+                    // El id ya lleva un "|" dentro (stopId|lineId), asi que los
+                    // campos se separan con un caracter de control que no puede
+                    // aparecer en ninguno de ellos.
+                    encoded.add(String.join(BusTrackingService.FIELD_SEPARATOR,
                         id,
                         stopId,
                         clean(job.optString("stopName", stopId)),
@@ -97,6 +98,7 @@ public class BusTrackingPlugin extends Plugin {
         intent.putExtra(BusTrackingService.EXTRA_INTERVAL, call.getInt("intervalSeconds", 15));
         intent.putExtra(BusTrackingService.EXTRA_VIBRATE,
             Boolean.TRUE.equals(call.getBoolean("vibrateOnApproach", true)));
+        intent.putExtra(BusTrackingService.EXTRA_TARGET, call.getInt("busTarget", 1));
 
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -191,9 +193,9 @@ public class BusTrackingPlugin extends Plugin {
         notifyListeners("jobStopped", payload);
     }
 
-    /** El "|" separa campos en el intent; en un nombre de parada seria un corte. */
+    /** El separador de campos del intent no puede colarse dentro de un campo. */
     private static String clean(String value) {
-        return value == null ? "" : value.replace('|', ' ');
+        return value == null ? "" : value.replace(BusTrackingService.FIELD_SEPARATOR, " ");
     }
 
     private static String statusName(int status) {
