@@ -1,5 +1,10 @@
 /**
- * Genera los recursos de icono a partir de `public/favicon.svg`.
+ * Genera los recursos de icono a partir de `public/icon-mark.svg`.
+ *
+ * La fuente es la MARCA SOLA, sin recuadro: el lanzador de Android recorta el
+ * icono con su propia forma, asi que un fondo redondeado propio aparecia como
+ * un segundo borde dentro del primero. El color de fondo lo pone siempre la
+ * capa `icon-background`, o el lienzo de `icon.png`.
  *
  *   resources/icon.png            -> fuente para `npx capacitor-assets generate`
  *   resources/splash.png          -> pantalla de arranque nativa (fondo + marca)
@@ -24,19 +29,27 @@ const BRAND_BACKGROUND = '#0d47c8'
 async function main() {
   await fs.mkdir(resourcesDir, { recursive: true })
 
-  const iconSvg = await fs.readFile(path.join(projectRoot, 'public', 'favicon.svg'))
+  const markSvg = await fs.readFile(path.join(projectRoot, 'public', 'icon-mark.svg'))
   const monoSvg = await fs.readFile(path.join(projectRoot, 'public', 'icon-mono.svg'))
 
-  // Icono principal 1024x1024.
-  await sharp(iconSvg, { density: 512 })
-    .resize(1024, 1024, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
+  // Icono principal 1024x1024: fondo de marca A SANGRE (sin esquinas propias,
+  // que las pone la mascara del lanzador) y la marca centrada.
+  const iconMark = await sharp(markSvg, { density: 512 })
+    .resize(660, 660, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
+    .png()
+    .toBuffer()
+
+  await sharp({
+    create: { width: 1024, height: 1024, channels: 4, background: BRAND_BACKGROUND },
+  })
+    .composite([{ input: iconMark, gravity: 'center' }])
     .png()
     .toFile(path.join(resourcesDir, 'icon.png'))
   console.log('[icons] resources/icon.png')
 
   // Capa de primer plano adaptativa: el sistema recorta hasta un 33 %, asi que la
   // marca solo puede ocupar el circulo seguro central (~66 % del lienzo).
-  const foregroundMark = await sharp(iconSvg, { density: 512 })
+  const foregroundMark = await sharp(markSvg, { density: 512 })
     .resize(660, 660, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
     .png()
     .toBuffer()
@@ -57,7 +70,7 @@ async function main() {
   console.log('[icons] resources/icon-background.png')
 
   // Splash nativo 2732x2732 con la marca centrada.
-  const splashMark = await sharp(iconSvg, { density: 512 })
+  const splashMark = await sharp(markSvg, { density: 512 })
     .resize(720, 720, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
     .png()
     .toBuffer()
@@ -78,9 +91,11 @@ async function main() {
     .toFile(path.join(resourcesDir, 'splash-dark.png'))
   console.log('[icons] resources/splash-dark.png')
 
-  // PWA / favicon rasterizado para navegadores que no aceptan SVG.
+  // PWA / favicon rasterizado para navegadores que no aceptan SVG. Aqui SI
+  // lleva fondo: un icono suelto sobre el escritorio necesita su propio lienzo.
+  const faviconSvg = await fs.readFile(path.join(projectRoot, 'public', 'favicon.svg'))
   for (const size of [192, 512]) {
-    await sharp(iconSvg, { density: 512 })
+    await sharp(faviconSvg, { density: 512 })
       .resize(size, size)
       .png()
       .toFile(path.join(projectRoot, 'public', `icon-${size}.png`))

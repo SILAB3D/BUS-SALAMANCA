@@ -52,6 +52,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- Vibracion corta cuando el aviso detecta que quedan 3 minutos. -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+
     <!--
         Actualizacion desde las releases de GitHub. Android no permite instalar
         en silencio: este permiso solo deja LANZAR el instalador del sistema, y

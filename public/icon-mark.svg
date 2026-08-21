@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="SALBUS">
+  <!--
+    LA MARCA SOLA, sin recuadro ni fondo.
+
+    Es la capa de primer plano del icono adaptativo de Android: el sistema ya
+    recorta el icono con SU forma (circulo, cuadrado redondeado, gota…), asi que
+    un fondo redondeado propio se veria como un segundo borde dentro del primero.
+    El color de fondo lo pone la capa `icon-background`.
+  -->
+  <defs>
+    <linearGradient id="salbus-glass" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#9fdfff"/>
+      <stop offset="1" stop-color="#35b2ef"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Estelas de movimiento -->
+  <g fill="#ffffff" opacity="0.4">
+    <rect x="1" y="22" width="10" height="3.6" rx="1.8"/>
+    <rect x="0" y="30.2" width="12" height="3.6" rx="1.8"/>
+    <rect x="2" y="38.4" width="9" height="3.6" rx="1.8"/>
+  </g>
+
+  <!-- Ruedas -->
+  <g fill="#062a86">
+    <rect x="22" y="52" width="8" height="9" rx="3.5"/>
+    <rect x="48" y="52" width="8" height="9" rx="3.5"/>
+  </g>
+
+  <!-- Carroceria -->
+  <rect x="15" y="4" width="48" height="50" rx="11" fill="#ffffff"/>
+
+  <!-- Parabrisas -->
+  <rect x="21" y="11" width="36" height="16" rx="5" fill="url(#salbus-glass)"/>
+
+  <!-- Faros -->
+  <circle cx="25.5" cy="41" r="4" fill="#ffcf3d"/>
+  <circle cx="52.5" cy="41" r="4" fill="#ffcf3d"/>
+
+  <!-- Parrilla -->
+  <rect x="32" y="38" width="14" height="5.5" rx="2.75" fill="#0d47c8"/>
+</svg>

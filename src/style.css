@@ -522,6 +522,21 @@ button.card-head {
   white-space: nowrap;
 }
 
+/* Con la tarjeta plegada el subtitulo son distintivos de linea, no texto: en
+   linea de texto se pegaban unos a otros y se leian como un solo cartel. */
+.card-sub.is-chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: 2px 0;
+}
+
+.card-sub.is-chips::-webkit-scrollbar {
+  display: none;
+}
+
 /* En la tarjeta de puntualidad el subtitulo lleva franja y sentido: cabe en dos lineas. */
 .card-sub.is-wrap {
   white-space: normal;
@@ -2098,4 +2113,215 @@ button.card-head {
 /* Sin Content-Length no hay porcentaje honesto: se anima en vez de mentir. */
 .update-bar span.is-indeterminate {
   animation: pulse 1.1s ease-in-out infinite;
+}
+
+/* ==================================================================
+   Seguimiento: grupos, pausa e interruptores
+   ================================================================== */
+
+.job-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.job-group-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 2px 2px 0;
+}
+
+.job-group-head svg {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  color: var(--brand-500);
+}
+
+.job-group-copy h3 {
+  font-size: 13px;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+
+.job-group-copy p {
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.job-group-empty {
+  padding: 12px 14px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--r-md);
+  font-size: 13px;
+  color: var(--text-3);
+}
+
+/* Una funcion en pausa sigue en la lista, pero no debe competir por la
+   atencion con las que estan trabajando. */
+.card.is-paused {
+  opacity: 0.62;
+}
+
+.btn.is-on {
+  border-color: color-mix(in srgb, var(--ok) 45%, transparent);
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+/* Interruptor de ajuste ------------------------------------------- */
+
+.switch {
+  width: 54px;
+  height: 30px;
+  flex: none;
+  padding: 3px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-full);
+  background: var(--surface-3);
+  cursor: pointer;
+  display: flex;
+  justify-content: flex-start;
+  transition: background 0.16s ease, border-color 0.16s ease;
+}
+
+.switch.is-on {
+  justify-content: flex-end;
+  background: var(--brand-600);
+  border-color: var(--brand-600);
+}
+
+.switch-knob {
+  width: 22px;
+  height: 22px;
+  border-radius: var(--r-full);
+  background: var(--surface);
+  color: var(--text-3);
+  display: grid;
+  place-items: center;
+  box-shadow: var(--shadow-1);
+}
+
+.switch.is-on .switch-knob {
+  color: var(--brand-600);
+}
+
+.switch-icon {
+  width: 14px;
+  height: 14px;
+}
+
+/* ==================================================================
+   Tour de bienvenida
+   ================================================================== */
+
+.tour-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 600;
+  background: rgba(6, 12, 26, 0.62);
+  backdrop-filter: blur(3px);
+  animation: fade-in 0.2s ease;
+}
+
+.tour {
+  position: fixed;
+  z-index: 601;
+  left: 16px;
+  right: 16px;
+  bottom: calc(var(--safe-bottom) + 16px);
+  max-height: 82dvh;
+  overflow-y: auto;
+  padding: 14px 16px 18px;
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-3);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  animation: sheet-in 0.24s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.tour-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.tour-badge {
+  padding: 3px 10px;
+  border-radius: var(--r-full);
+  background: var(--info-soft);
+  color: var(--brand-600);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.tour-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  text-align: center;
+  align-items: center;
+}
+
+.tour-icon {
+  width: 56px;
+  height: 56px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-md);
+  background: var(--info-soft);
+  color: var(--brand-600);
+}
+
+.tour-icon svg {
+  width: 28px;
+  height: 28px;
+}
+
+.tour-body h3 {
+  font-size: 18px;
+  font-weight: 750;
+}
+
+.tour-body p {
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--text-2);
+}
+
+.tour-perms {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tour-dots {
+  display: flex;
+  gap: 6px;
+  justify-content: center;
+}
+
+.tour-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--r-full);
+  background: var(--border-strong);
+  transition: background 0.16s ease, width 0.16s ease;
+}
+
+.tour-dot.is-current {
+  width: 20px;
+  background: var(--brand-600);
+}
+
+/* El boton de "Ampliar" del mapa sin recorrido elegido no hace nada: se ve
+   apagado en vez de responder con un aviso cada vez que se toca. */
+.map-expand:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }

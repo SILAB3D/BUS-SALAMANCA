@@ -10,6 +10,7 @@
  */
 
 import { spawn } from 'node:child_process'
+import { createRequire } from 'node:module'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -21,6 +22,10 @@ const CHROME_CANDIDATES = [
   '/usr/bin/google-chrome',
   '/usr/bin/chromium',
 ]
+
+const require = createRequire(import.meta.url)
+/** El tour se abre una vez por version: sin darlo por visto taparia cada captura. */
+const appVersion = `v${require('../package.json').version}`
 
 const args = process.argv.slice(2)
 const url = valueOf('--url') ?? 'http://localhost:5177/'
@@ -123,6 +128,7 @@ async function main() {
       // Paradas reales muy transitadas, para ver la interfaz con datos de verdad.
       await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
         source: `
+          localStorage.setItem('salbus.tourVersion', '${appVersion}');
           localStorage.setItem('salbus.favourites', JSON.stringify([
             { stopId: '222', alias: null, addedAt: Date.now() },
             { stopId: '301', alias: 'Casa', addedAt: Date.now() },

@@ -137,14 +137,44 @@ ha quedado atrás.
 `npm run test:punctuality -- --stop 222 --line 4 --minutes 90` graba la fuente
 real con el mismo parser y la misma lógica que la app, y escribe lo observado.
 
+## Funciones de seguimiento
+
+Hay dos modalidades y las dos tienen tope, porque cada una consulta por su cuenta
+una fuente que limita por IP:
+
+| | Máximo creadas | Notas |
+| --- | --- | --- |
+| Aviso de próximo bus | 2 | notificación persistente; termina tras ver pasar 3 autobuses |
+| Ver por dónde viene | 2 | recorrido parada a parada |
+| **Activas a la vez** | **2 en total** | de cualquier modalidad |
+
+Al crear una por encima del tope de su modalidad se pregunta **cuál se
+sustituye**, en vez de rechazar la acción. Al pasar de dos activas se **pausa la
+más antigua**: lo que se acaba de tocar es siempre lo que se quiere mirar ahora.
+Una función en pausa se conserva entera, no consulta ni avisa, y se reactiva con
+el botón de su tarjeta.
+
 ## Funcionamiento en segundo plano
 
-El aviso de «próximo bus» lo mantiene un **servicio en primer plano** nativo
+Los avisos de «próximo bus» los mantiene un **servicio en primer plano** nativo
 (`BusTrackingService`), no el WebView: Android congela los temporizadores de la
-página al pasar a segundo plano. El servicio consulta la parada cada 30 s (15 s
-cuando el autobús está a 2 minutos o menos), reescribe la misma notificación en
+página al pasar a segundo plano. El servicio lleva hasta dos avisos, cada uno con
+su notificación y su cuenta de autobuses, los consulta **en serie** dentro de
 cada ciclo y envía los datos a la interfaz mediante el plugin `BusTracking` para
-que pantalla y notificación digan siempre lo mismo.
+que pantalla y notificaciones digan siempre lo mismo.
+
+La web manda siempre la **lista completa** de avisos activos (`BusTracking.sync`),
+nunca altas y bajas sueltas: así las dos partes no pueden discrepar sobre cuántos
+avisos hay vivos.
+
+Un aviso detenido desde el botón «Detener» de su notificación queda anotado en
+las preferencias del servicio. Al volver a abrir la app se leen esas bajas y el
+aviso se retira: antes la app veía su aviso guardado, no encontraba el servicio
+vivo y lo revivía, con lo que reaparecía la notificación que se acababa de
+quitar.
+
+Cuando faltan 3 minutos el móvil da una **vibración corta**, una sola vez por
+autobús (se rearma cuando ese autobús pasa). Se desactiva desde Ajustes.
 
 El icono pequeño de la notificación (`res/drawable/ic_stat_salbus.xml`) es una
 silueta monocroma **sin fondo**: Android descarta el color y usa solo el canal

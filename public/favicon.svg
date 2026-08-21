@@ -1,4 +1,12 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="SALBUS">
+  <!--
+    Version WEB de la marca: fondo a sangre, SIN esquinas redondeadas propias.
+
+    El recuadro redondeado que llevaba antes se veia como un segundo borde
+    dentro de la forma que dibuja el lanzador de Android. Quien redondea es
+    siempre quien enmarca: el lanzador con su mascara, o `.topbar-mark` con su
+    `border-radius`. La marca sola, sin fondo, vive en `icon-mark.svg`.
+  -->
   <defs>
     <linearGradient id="salbus-bg" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#1d63ff"/>
@@ -11,31 +19,33 @@
     </linearGradient>
   </defs>
 
-  <rect width="64" height="64" rx="15" fill="url(#salbus-bg)"/>
+  <rect width="64" height="64" fill="url(#salbus-bg)"/>
 
-  <!-- Estelas de movimiento -->
-  <g fill="#ffffff" opacity="0.34">
-    <rect x="3" y="23" width="8" height="3" rx="1.5"/>
-    <rect x="1" y="30.5" width="10" height="3" rx="1.5"/>
-    <rect x="4" y="38" width="7" height="3" rx="1.5"/>
+  <g transform="translate(6.4 6.4) scale(0.8)">
+    <!-- Estelas de movimiento -->
+    <g fill="#ffffff" opacity="0.4">
+      <rect x="1" y="22" width="10" height="3.6" rx="1.8"/>
+      <rect x="0" y="30.2" width="12" height="3.6" rx="1.8"/>
+      <rect x="2" y="38.4" width="9" height="3.6" rx="1.8"/>
+    </g>
+
+    <!-- Ruedas -->
+    <g fill="#062a86">
+      <rect x="22" y="52" width="8" height="9" rx="3.5"/>
+      <rect x="48" y="52" width="8" height="9" rx="3.5"/>
+    </g>
+
+    <!-- Carroceria -->
+    <rect x="15" y="4" width="48" height="50" rx="11" fill="#ffffff"/>
+
+    <!-- Parabrisas -->
+    <rect x="21" y="11" width="36" height="16" rx="5" fill="url(#salbus-glass)"/>
+
+    <!-- Faros -->
+    <circle cx="25.5" cy="41" r="4" fill="#ffcf3d"/>
+    <circle cx="52.5" cy="41" r="4" fill="#ffcf3d"/>
+
+    <!-- Parrilla -->
+    <rect x="32" y="38" width="14" height="5.5" rx="2.75" fill="#0d47c8"/>
   </g>
-
-  <!-- Ruedas -->
-  <g fill="#062a86">
-    <rect x="21" y="47" width="7" height="8" rx="3"/>
-    <rect x="42" y="47" width="7" height="8" rx="3"/>
-  </g>
-
-  <!-- Carroceria -->
-  <rect x="16" y="10" width="38" height="40" rx="9" fill="#ffffff"/>
-
-  <!-- Parabrisas -->
-  <rect x="21" y="16" width="28" height="13" rx="4" fill="url(#salbus-glass)"/>
-
-  <!-- Faros -->
-  <circle cx="24.5" cy="40.5" r="3.2" fill="#ffcf3d"/>
-  <circle cx="45.5" cy="40.5" r="3.2" fill="#ffcf3d"/>
-
-  <!-- Parrilla -->
-  <rect x="29.5" y="38.3" width="11" height="4.4" rx="2.2" fill="#0d47c8"/>
 </svg>

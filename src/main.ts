@@ -25,6 +25,7 @@ import {
 import {
   addMonitorPass,
   clearLogs,
+  enforceActiveLimit,
   formatMinutesClock,
   isFavourite,
   isWithinWindow,
@@ -37,17 +38,24 @@ import {
   persistMonitorPasses,
   persistMonitorRuntime,
   persistMonitors,
+  persistSettings,
   persistTab,
-  persistTracking,
+  persistTrackings,
   state,
   TRACKING_BUS_TARGET,
+  TRACKING_WARN_MINUTES,
+  markTourSeen,
+  MAX_ACTIVE_JOBS,
+  MAX_FOLLOW_JOBS,
+  MAX_TRACKING_JOBS,
   type MonitorJob,
   type TabId,
+  type TrackingJob,
 } from './state'
 import type { StopFeed } from './types'
 import { patch } from './dom'
 import { esc, liveMinutes, readableTextColor } from './ui'
-import { describeArrival, renderApp, stopName } from './views'
+import { describeArrival, renderApp, stopName, TOUR_STEPS } from './views'
 
 /* ------------------------------------------------------------------ *
  * Plugins nativos                                                      *
@@ -59,6 +67,8 @@ interface BatteryOptimizationPlugin {
 }
 
 interface TrackingUpdate {
+  /** `${stopId}|${lineId}`: identifica a cuál de los avisos vivos pertenece. */
+  jobId: string
   stopId: string
   lineId: string
   minutes: number
@@ -66,12 +76,13 @@ interface TrackingUpdate {
   status: 'ok' | 'empty' | 'throttled' | 'error'
   /** Autobuses ya contados por el servicio, que es quien manda mientras esta vivo. */
   busesSeen: number
-  /** El servicio ha completado los tres autobuses y se esta deteniendo. */
+  /** El aviso ha completado los tres autobuses y se esta cerrando. */
   finished: boolean
   at: number
 }
 
 interface BusPassedUpdate {
+  jobId: string
   stopId: string
   lineId: string
   busesSeen: number
@@ -79,17 +90,26 @@ interface BusPassedUpdate {
   at: number
 }
 
+interface TrackingJobPayload {
+  id: string
+  stopId: string
+  stopName: string
+  lineId: string
+  destination: string
+  busesSeen: number
+}
+
 interface BusTrackingPlugin {
-  start(options: {
-    stopId: string
-    stopName: string
-    lineId: string
-    destination: string
+  /** Sustituye los avisos vivos por esta lista. Vacia = detener el servicio. */
+  sync(options: {
+    jobs: TrackingJobPayload[]
     intervalSeconds: number
-    busesSeen: number
+    vibrateOnApproach: boolean
   }): Promise<void>
   stop(): Promise<void>
-  isRunning(): Promise<{ running: boolean }>
+  /** `stopped`: avisos que se detuvieron desde su notificacion, quiza sin la app abierta. */
+  status(): Promise<{ running: boolean, stopped: string[] }>
+  clearStopped(): Promise<void>
   addListener(
     event: 'arrivalUpdate',
     handler: (update: TrackingUpdate) => void,
@@ -97,6 +117,10 @@ interface BusTrackingPlugin {
   addListener(
     event: 'busPassed',
     handler: (update: BusPassedUpdate) => void,
+  ): Promise<{ remove: () => Promise<void> }>
+  addListener(
+    event: 'jobStopped',
+    handler: (update: { jobId: string }) => void,
   ): Promise<{ remove: () => Promise<void> }>
 }
 
@@ -139,15 +163,23 @@ let renderQueued = false
 let lastAutoCycleAt = 0
 
 /**
- * El servicio nativo esta al mando del aviso.
+ * El servicio nativo esta al mando de los avisos.
  *
- * Mientras lo este, la parte web no publica su propia notificacion: serian dos
- * avisos distintos, y el de la web se congelaria en cuanto la app pasara a
+ * Mientras lo este, la parte web no publica sus propias notificaciones: serian
+ * avisos duplicados, y los de la web se congelarian en cuanto la app pasara a
  * segundo plano. Tampoco cuenta autobuses aqui, para no contar dos veces.
  */
 let trackingServiceActive = false
 let refreshInFlight = false
 let toastTimer: number | null = null
+
+/**
+ * Elemento al que hay que desplazarse en el proximo repintado.
+ *
+ * El desplazamiento no puede hacerse en el manejador: el nodo destino todavia
+ * no existe hasta que `patch` aplica el HTML nuevo.
+ */
+let scrollPending: string | null = null
 let map: L.Map | null = null
 let mapLayer: L.LayerGroup | null = null
 let mapSignature = ''
@@ -382,6 +414,7 @@ function dropStaleFavourites(): void {
   state.favourites = state.favourites.filter((favourite) => network.stopById.has(favourite.stopId))
   state.follows = state.follows.filter((follow) => network.stopById.has(follow.stopId))
   state.monitors = state.monitors.filter((monitor) => network.stopById.has(monitor.stopId))
+  state.trackings = state.trackings.filter((job) => network.stopById.has(job.stopId))
 
   if (state.favourites.length !== before) {
     persistFavourites()
@@ -440,9 +473,11 @@ function buildRefreshPlan(): Array<{ stopId: string, maxAgeMs: number, priority:
     }
   }
 
-  // 1. El aviso activo manda: siempre es lo primero.
-  if (state.tracking) {
-    add(state.tracking.stopId, FRESHNESS.focused, 'high')
+  // 1. Los avisos activos mandan: siempre son lo primero.
+  for (const job of state.trackings) {
+    if (job.active) {
+      add(job.stopId, FRESHNESS.focused, 'high')
+    }
   }
 
   // 2. Controles de puntualidad dentro de su franja horaria. Con un autobús ya
@@ -475,8 +510,9 @@ function buildRefreshPlan(): Array<{ stopId: string, maxAgeMs: number, priority:
   }
 
   // 4. Recorridos en seguimiento: la parada propia primero, luego hacia atras.
-  if (state.tab === 'seguimiento' || state.tracking) {
-    for (const follow of state.follows) {
+  // Solo los activos: uno en reposo no gasta consultas de una fuente limitada.
+  for (const follow of state.follows) {
+    if (follow.active) {
       const window = state.network?.getDirectionWindow(follow.directionKey, follow.stopId, 8) ?? []
       // Se recorre al reves para pedir antes las paradas mas cercanas al usuario.
       for (const stop of [...window].reverse()) {
@@ -628,91 +664,172 @@ function applyFeed(feed: StopFeed): void {
 }
 
 /* ------------------------------------------------------------------ *
- * Aviso de próximo bus                                                 *
+ * Avisos de próximo bus                                                *
  * ------------------------------------------------------------------ */
 
-async function startTracking(stopId: string, lineId: string): Promise<void> {
-  if (state.tracking) {
-    await stopTracking(false)
+/** Los avisos que consultan y publican notificación ahora mismo. */
+function activeTrackings(): TrackingJob[] {
+  return state.trackings.filter((job) => job.active)
+}
+
+function trackingById(id: string): TrackingJob | undefined {
+  return state.trackings.find((job) => job.id === id)
+}
+
+/**
+ * Pone el servicio nativo exactamente al día con los avisos activos.
+ *
+ * Se manda SIEMPRE la lista completa, nunca altas y bajas sueltas: es lo que
+ * garantiza que la barra de notificaciones enseñe justo lo que hay en pantalla,
+ * ni un aviso de más ni uno de menos.
+ */
+async function syncTrackingService(): Promise<void> {
+  const jobs = activeTrackings()
+
+  if (!isNative()) {
+    trackingServiceActive = false
+    return
   }
 
-  const job = {
-    id: `${stopId}|${lineId}`,
+  try {
+    await BusTracking.sync({
+      jobs: jobs.map((job) => ({
+        id: job.id,
+        stopId: job.stopId,
+        stopName: job.stopName,
+        lineId: job.lineId,
+        destination: describeArrival(job.stopId, job.lineId),
+        busesSeen: job.busesSeen,
+      })),
+      intervalSeconds: TRACKING_INTERVAL_SECONDS,
+      vibrateOnApproach: state.settings.vibrateOnApproach,
+    })
+
+    trackingServiceActive = jobs.length > 0
+
+    // El servicio publica sus propias notificaciones: cualquier resto de la web
+    // sobra, porque ya no se volvería a actualizar.
+    for (const job of state.trackings) {
+      await cancelNotification(notificationId(job.id))
+    }
+  } catch (error) {
+    trackingServiceActive = false
+    log('warn', 'aviso', `No se pudo sincronizar el servicio en segundo plano: ${errorMessage(error)}`)
+    if (jobs.length > 0) {
+      showToast('El aviso funcionará solo con la app abierta', 'error')
+    }
+  }
+}
+
+/** Crea un aviso nuevo. Los límites ya se han comprobado antes de llegar aquí. */
+async function createTracking(stopId: string, lineId: string): Promise<void> {
+  const id = `${stopId}|${lineId}`
+
+  if (trackingById(id)) {
+    showToast('Ya tienes ese aviso creado', 'error')
+    return
+  }
+
+  const job: TrackingJob = {
+    id,
     stopId,
     stopName: stopName(stopId),
     lineId,
+    active: true,
     startedAt: Date.now(),
     lastMinutes: null,
     lastNotifiedAt: 0,
     armed: false,
     missingStreak: 0,
     busesSeen: 0,
+    warnedAt3: false,
   }
 
-  state.tracking = job
-  persistTracking()
+  state.trackings = [...state.trackings, job]
+
+  // La recién creada es la que interesa: si con ella se pasa del límite de
+  // funciones activas, se apaga la más antigua.
+  const turnedOff = enforceActiveLimit(id)
+  persistTrackings()
+  persistFollows()
+
   log(
     'info',
     'aviso',
-    `Seguimiento iniciado: línea ${lineId} en ${job.stopName} (${TRACKING_BUS_TARGET} autobuses).`,
+    `Aviso creado: línea ${lineId} en ${job.stopName} (${TRACKING_BUS_TARGET} autobuses).`,
   )
 
-  // El servicio nativo mantiene vivo el aviso aunque la app pase a segundo plano.
-  if (isNative()) {
-    try {
-      await BusTracking.start({
-        stopId,
-        stopName: job.stopName,
-        lineId,
-        destination: describeArrival(stopId, lineId),
-        intervalSeconds: TRACKING_INTERVAL_SECONDS,
-        busesSeen: 0,
-      })
-      trackingServiceActive = true
-      // Si una version anterior dejo una notificacion web, aqui sobra: el servicio
-      // ya publica la suya y esa se quedaria fija para siempre.
-      await cancelNotification(notificationId(job.id))
-    } catch (error) {
-      trackingServiceActive = false
-      log('warn', 'aviso', `No se pudo iniciar el servicio en segundo plano: ${errorMessage(error)}`)
-      showToast('El aviso funcionará solo con la app abierta', 'error')
-    }
+  if (turnedOff.length > 0) {
+    showToast(`Se ha pausado otra función para no pasar de ${MAX_ACTIVE_JOBS} activas`, 'info')
   }
 
+  await syncTrackingService()
   await refreshOneStop(stopId)
 }
 
-async function stopTracking(notify = true): Promise<void> {
-  const job = state.tracking
+/** Quita un aviso por completo (ya no existe ni en reposo). */
+async function removeTracking(id: string, notify = true): Promise<void> {
+  const job = trackingById(id)
   if (!job) {
     return
   }
 
-  state.tracking = null
-  persistTracking()
+  state.trackings = state.trackings.filter((item) => item.id !== id)
+  persistTrackings()
 
-  await cancelNotification(notificationId(job.id))
+  await cancelNotification(notificationId(id))
+  await syncTrackingService()
 
-  if (isNative()) {
-    trackingServiceActive = false
-    try {
-      await BusTracking.stop()
-    } catch {
-      /* el servicio ya no estaba activo */
-    }
-  }
-
-  log('info', 'aviso', `Seguimiento detenido: línea ${job.lineId}.`)
+  log('info', 'aviso', `Aviso retirado: línea ${job.lineId} en ${job.stopName}.`)
 
   if (notify) {
     showToast('Aviso detenido', 'info')
-    render()
   }
+
+  render()
+}
+
+/**
+ * Enciende o apaga una función sin borrarla.
+ *
+ * Al encender se respeta el tope de funciones activas apagando la más antigua:
+ * es preferible a rechazar la acción, porque lo que se acaba de tocar es
+ * siempre lo que se quiere mirar ahora.
+ */
+async function toggleJobActive(kind: 'tracking' | 'follow', id: string): Promise<void> {
+  const job = kind === 'tracking'
+    ? trackingById(id)
+    : state.follows.find((item) => item.id === id)
+
+  if (!job) {
+    return
+  }
+
+  job.active = !job.active
+  const turnedOff = job.active ? enforceActiveLimit(id) : []
+
+  persistTrackings()
+  persistFollows()
+
+  if (!job.active && kind === 'tracking') {
+    await cancelNotification(notificationId(id))
+  }
+
+  await syncTrackingService()
+
+  if (turnedOff.length > 0) {
+    showToast(`Se ha pausado otra función para no pasar de ${MAX_ACTIVE_JOBS} activas`, 'info')
+  } else {
+    showToast(job.active ? 'Función activada' : 'Función en pausa', 'info')
+  }
+
+  render()
+  void refreshVisible('auto')
 }
 
 /**
  * Reconecta la interfaz con el servicio nativo tras reabrir la app, para que la
- * pantalla y la notificación no cuenten historias distintas.
+ * pantalla y las notificaciones no cuenten historias distintas.
  */
 async function restoreTrackingService(): Promise<void> {
   if (!isNative()) {
@@ -747,14 +864,14 @@ async function restoreTrackingService(): Promise<void> {
 
       // El servicio es quien cuenta los autobuses mientras vive: la web se limita
       // a copiar su cuenta para que la pantalla diga lo mismo que la notificación.
-      if (state.tracking && state.tracking.stopId === update.stopId) {
-        state.tracking.busesSeen = update.busesSeen
-        persistTracking()
+      const job = trackingById(update.jobId)
+      if (job) {
+        job.busesSeen = update.busesSeen
+        persistTrackings()
       }
 
       if (update.finished) {
-        trackingServiceActive = false
-        void finishTracking()
+        void finishTracking(update.jobId)
         return
       }
 
@@ -762,15 +879,17 @@ async function restoreTrackingService(): Promise<void> {
     })
 
     await BusTracking.addListener('busPassed', (update) => {
-      if (!state.tracking || state.tracking.stopId !== update.stopId) {
+      const job = trackingById(update.jobId)
+      if (!job) {
         return
       }
 
-      state.tracking.busesSeen = update.busesSeen
-      state.tracking.armed = false
-      state.tracking.lastMinutes = null
-      state.tracking.missingStreak = 0
-      persistTracking()
+      job.busesSeen = update.busesSeen
+      job.armed = false
+      job.lastMinutes = null
+      job.missingStreak = 0
+      job.warnedAt3 = false
+      persistTrackings()
 
       log(
         'info',
@@ -781,31 +900,35 @@ async function restoreTrackingService(): Promise<void> {
       render()
     })
 
-    const { running } = await BusTracking.isRunning()
-    trackingServiceActive = running && Boolean(state.tracking)
+    // "Detener" desde la notificación, posiblemente con la app cerrada.
+    await BusTracking.addListener('jobStopped', (update) => {
+      void removeTracking(update.jobId, false)
+    })
 
-    if (running && !state.tracking) {
-      // El servicio quedó vivo pero la app perdió el estado: se detiene para no
-      // dejar una notificación huérfana.
-      await BusTracking.stop()
-    } else if (!running && state.tracking && state.tracking.busesSeen >= TRACKING_BUS_TARGET) {
-      // El servicio completó los tres autobuses con la app cerrada: se cierra el
-      // aviso en lugar de revivirlo.
-      await finishTracking()
-    } else if (!running && state.tracking) {
-      await BusTracking.start({
-        stopId: state.tracking.stopId,
-        stopName: state.tracking.stopName,
-        lineId: state.tracking.lineId,
-        destination: describeArrival(state.tracking.stopId, state.tracking.lineId),
-        intervalSeconds: TRACKING_INTERVAL_SECONDS,
-        busesSeen: state.tracking.busesSeen,
-      })
-      trackingServiceActive = true
-      // El servicio publica su propia notificación: cualquier resto de la web
-      // sobra, porque ya no se volvería a actualizar.
-      await cancelNotification(notificationId(state.tracking.id))
+    const status = await BusTracking.status()
+
+    // Un aviso que se detuvo desde su notificación NO se revive: antes se
+    // reabría solo al entrar en la app, y la notificación que acababa de
+    // quitarse volvía a aparecer.
+    if (status.stopped.length > 0) {
+      const removed = state.trackings.filter((job) => status.stopped.includes(job.id))
+      if (removed.length > 0) {
+        state.trackings = state.trackings.filter((job) => !status.stopped.includes(job.id))
+        persistTrackings()
+        log('info', 'aviso', `${removed.length} aviso(s) detenidos desde la notificación.`)
+      }
+      await BusTracking.clearStopped()
     }
+
+    // Los avisos que ya vieron sus tres autobuses con la app cerrada se cierran
+    // en lugar de revivirse.
+    for (const job of activeTrackings()) {
+      if (job.busesSeen >= TRACKING_BUS_TARGET) {
+        await finishTracking(job.id)
+      }
+    }
+
+    await syncTrackingService()
   } catch (error) {
     trackingServiceActive = false
     log('warn', 'aviso', `Servicio en segundo plano no disponible: ${errorMessage(error)}`)
@@ -813,11 +936,14 @@ async function restoreTrackingService(): Promise<void> {
 }
 
 function evaluateTracking(feed: StopFeed): void {
-  const job = state.tracking
-  if (!job || job.stopId !== feed.stopId) {
-    return
+  for (const job of activeTrackings()) {
+    if (job.stopId === feed.stopId) {
+      evaluateTrackingJob(job, feed)
+    }
   }
+}
 
+function evaluateTrackingJob(job: TrackingJob, feed: StopFeed): void {
   const arrival = feed.arrivals
     .filter((item) => item.lineId === job.lineId)
     .sort((left, right) => liveMinutes(left) - liveMinutes(right))[0]
@@ -837,7 +963,7 @@ function evaluateTracking(feed: StopFeed): void {
 
     // Dos ciclos sin ver la línea después de haberla tenido encima: ha pasado.
     if (countsPasses && job.armed && job.missingStreak >= 2) {
-      void registerBusPassed()
+      void registerBusPassed(job)
     }
 
     return
@@ -852,13 +978,23 @@ function evaluateTracking(feed: StopFeed): void {
 
   // Se alejó tras haber estado encima: el bus ya pasó.
   if (countsPasses && job.armed && job.lastMinutes !== null && job.lastMinutes <= 2 && minutes >= 6) {
-    void registerBusPassed()
+    void registerBusPassed(job)
     return
+  }
+
+  // Vibración de los 3 minutos. Con el servicio nativo vivo la da él, que
+  // también funciona con la app en segundo plano; esto es el respaldo para
+  // cuando no lo hay (navegador, o servicio no disponible).
+  if (!job.warnedAt3 && minutes <= TRACKING_WARN_MINUTES) {
+    job.warnedAt3 = true
+    if (!trackingServiceActive) {
+      vibrateShort()
+    }
   }
 
   job.lastMinutes = minutes
   job.lastNotifiedAt = Date.now()
-  persistTracking()
+  persistTrackings()
 
   // Con el servicio nativo vivo, la notificación es suya y solo suya: publicar
   // otra desde aquí dejaría un segundo aviso que se congela al irse a segundo
@@ -878,23 +1014,37 @@ function evaluateTracking(feed: StopFeed): void {
 }
 
 /**
- * Un autobús más ha pasado. El aviso solo termina cuando se han visto pasar
- * TRACKING_BUS_TARGET; hasta entonces se rearma y sigue con el siguiente.
+ * Vibración corta de "quedan 3 minutos".
+ *
+ * Una sola por autobús: el indicador `warnedAt3` se reinicia cuando el autobús
+ * pasa, no en cada consulta, que serían cuatro zumbidos por minuto.
  */
-async function registerBusPassed(): Promise<void> {
-  const job = state.tracking
-  if (!job) {
+function vibrateShort(): void {
+  if (!state.settings.vibrateOnApproach) {
     return
   }
 
+  try {
+    navigator.vibrate?.(220)
+  } catch {
+    /* el navegador o el sistema pueden tenerlo bloqueado */
+  }
+}
+
+/**
+ * Un autobús más ha pasado. El aviso solo termina cuando se han visto pasar
+ * TRACKING_BUS_TARGET; hasta entonces se rearma y sigue con el siguiente.
+ */
+async function registerBusPassed(job: TrackingJob): Promise<void> {
   job.busesSeen += 1
   job.armed = false
   job.lastMinutes = null
   job.missingStreak = 0
-  persistTracking()
+  job.warnedAt3 = false
+  persistTrackings()
 
   if (job.busesSeen >= TRACKING_BUS_TARGET) {
-    await finishTracking()
+    await finishTracking(job.id)
     return
   }
 
@@ -912,9 +1062,9 @@ async function registerBusPassed(): Promise<void> {
   render()
 }
 
-/** Cierra el aviso: ya han pasado los tres autobuses. */
-async function finishTracking(): Promise<void> {
-  const job = state.tracking
+/** Cierra un aviso: ya han pasado los tres autobuses. */
+async function finishTracking(id: string): Promise<void> {
+  const job = trackingById(id)
   if (!job) {
     return
   }
@@ -928,7 +1078,7 @@ async function finishTracking(): Promise<void> {
     'aviso',
     `Aviso completado: han pasado ${TRACKING_BUS_TARGET} autobuses de la línea ${job.lineId} por ${job.stopName}.`,
   )
-  await stopTracking(false)
+  await removeTracking(id, false)
   showToast(`Han pasado ${TRACKING_BUS_TARGET} autobuses de la línea ${job.lineId}`, 'success')
   render()
 }
@@ -1058,6 +1208,31 @@ function paint(): void {
   // existir), además de perder foco, cursor y desplazamiento.
   patch(appRoot, renderApp())
   syncMap()
+  applyPendingScroll()
+}
+
+/**
+ * Lleva la vista hasta la franja recien abierta (la ficha de la parada tras
+ * pulsar "Ver tiempos"). Se hace despues de pintar, que es cuando el nodo
+ * destino existe ya en el documento.
+ */
+function applyPendingScroll(): void {
+  if (!scrollPending) {
+    return
+  }
+
+  const target = document.getElementById(scrollPending)
+  scrollPending = null
+
+  if (!target) {
+    return
+  }
+
+  // Un fotograma de margen: con el mapa saliendo de pantalla completa, la
+  // posicion final del documento aun no esta asentada.
+  requestAnimationFrame(() => {
+    target.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  })
 }
 
 appRoot.addEventListener('click', (event) => {
@@ -1103,19 +1278,21 @@ appRoot.addEventListener('change', (event) => {
 
   if (action === 'pick-search-line') {
     state.search.lineId = target.value
-    state.search.directionKey = state.network?.lineById.get(target.value)?.directions[0]?.key ?? ''
-    // Ya hay linea y sentido: el recorrido es lo unico que interesa mirar ahora,
-    // asi que el mapa ocupa toda la pantalla en lugar de una franja de 46 dvh.
-    if (state.search.mode === 'mapa' && state.search.directionKey) {
-      state.search.mapExpanded = true
-    }
+    // El sentido NO se rellena solo: mientras siga en "Seleccionar" no hay
+    // recorrido elegido, y el mapa no tiene por que ocupar la pantalla entera.
+    state.search.directionKey = ''
+    state.search.mapExpanded = false
     render()
   }
 
   if (action === 'pick-search-direction') {
     state.search.directionKey = target.value
-    if (state.search.mode === 'mapa' && state.search.directionKey) {
+    // Solo con linea Y sentido elegidos a mano: el recorrido es entonces lo
+    // unico que interesa mirar, asi que el mapa pasa a pantalla completa.
+    if (state.search.mode === 'mapa' && state.search.lineId && state.search.directionKey) {
       state.search.mapExpanded = true
+    } else {
+      state.search.mapExpanded = false
     }
     render()
   }
@@ -1193,12 +1370,8 @@ async function handleAction(action: string, element: HTMLElement): Promise<void>
       const mode = element.dataset.mode as 'nombre' | 'linea' | 'mapa' | undefined
       if (mode) {
         state.search.mode = mode
-        if (mode !== 'nombre' && !state.search.lineId) {
-          const firstLine = state.network?.lines[0]
-          state.search.lineId = firstLine?.lineId ?? ''
-          state.search.directionKey = firstLine?.directions[0]?.key ?? ''
-        }
-        if (mode !== 'mapa') {
+        // Linea y sentido se quedan en "Seleccionar" hasta que se elijan a mano.
+        if (mode !== 'mapa' || !state.search.lineId || !state.search.directionKey) {
           state.search.mapExpanded = false
         }
         render()
@@ -1207,6 +1380,10 @@ async function handleAction(action: string, element: HTMLElement): Promise<void>
     }
 
     case 'expand-map':
+      if (!state.search.lineId || !state.search.directionKey) {
+        showToast('Elige primero línea y sentido', 'info')
+        return
+      }
       state.search.mapExpanded = true
       render()
       return
@@ -1220,12 +1397,16 @@ async function handleAction(action: string, element: HTMLElement): Promise<void>
     case 'map-select-stop':
       state.search.selectedStopId = stopId
       state.search.mapExpanded = false
+      // La ficha queda por debajo del mapa y de los dos desplegables: sin esto
+      // el toque parece no hacer nada, porque el resultado no entra en pantalla.
+      scrollPending = 'selected-stop'
       render()
       await refreshOneStop(stopId)
       return
 
     case 'select-stop':
       state.search.selectedStopId = stopId
+      scrollPending = 'selected-stop'
       render()
       await refreshOneStop(stopId)
       return
@@ -1286,12 +1467,19 @@ async function handleAction(action: string, element: HTMLElement): Promise<void>
         return
       }
 
-      const lines = state.network?.getLinesForStop(stopId) ?? []
-      state.draft.lineId = lines[0]?.lineId ?? ''
-      state.draft.directionKey =
-        state.network?.getDirectionsThroughStop(stopId, state.draft.lineId)[0]?.key ?? ''
-      state.sheet = { kind: 'pick-line', stopId, purpose }
-      render()
+      // Cada modalidad tiene su tope de funciones creadas. Al alcanzarlo no se
+      // bloquea la accion: se pregunta cual de las existentes se sustituye.
+      const atLimit = purpose === 'tracking'
+        ? state.trackings.length >= MAX_TRACKING_JOBS
+        : purpose === 'follow' && state.follows.length >= MAX_FOLLOW_JOBS
+
+      if (atLimit && purpose !== 'monitor') {
+        state.sheet = { kind: 'replace-job', stopId, purpose }
+        render()
+        return
+      }
+
+      openPickLine(stopId, purpose)
       return
     }
 
@@ -1307,12 +1495,83 @@ async function handleAction(action: string, element: HTMLElement): Promise<void>
       return
 
     case 'stop-tracking':
-      await stopTracking()
+      await removeTracking(element.dataset.tracking ?? '')
+      return
+
+    // Enciende o apaga una funcion sin borrarla.
+    case 'toggle-job':
+      await toggleJobActive(
+        element.dataset.kind === 'follow' ? 'follow' : 'tracking',
+        element.dataset.job ?? '',
+      )
       return
 
     case 'remove-follow':
       state.follows = state.follows.filter((item) => item.id !== element.dataset.follow)
       persistFollows()
+      showToast('Seguimiento quitado', 'info')
+      render()
+      return
+
+    // Se ha alcanzado el limite de la modalidad: esta es la que se sustituye.
+    case 'replace-job': {
+      const purpose = element.dataset.purpose === 'follow' ? 'follow' : 'tracking'
+      const jobId = element.dataset.job ?? ''
+
+      if (purpose === 'tracking') {
+        await removeTracking(jobId, false)
+      } else {
+        state.follows = state.follows.filter((item) => item.id !== jobId)
+        persistFollows()
+      }
+
+      openPickLine(stopId, purpose)
+      return
+    }
+
+    // Lista de llegadas: las que pasan de ARRIVALS_PREVIEW se piden a mano.
+    case 'expand-arrivals':
+      state.arrivalsExpanded[stopId] = true
+      render()
+      return
+
+    case 'collapse-arrivals':
+      delete state.arrivalsExpanded[stopId]
+      render()
+      return
+
+    case 'toggle-vibration':
+      state.settings.vibrateOnApproach = !state.settings.vibrateOnApproach
+      persistSettings()
+      // El servicio nativo lleva su propia copia del ajuste.
+      await syncTrackingService()
+      showToast(
+        state.settings.vibrateOnApproach ? 'Vibración activada' : 'Vibración desactivada',
+        'info',
+      )
+      render()
+      return
+
+    case 'tour-next':
+      if (state.tour.step >= TOUR_STEPS - 1) {
+        closeTour()
+        return
+      }
+      state.tour.step += 1
+      render()
+      return
+
+    case 'tour-back':
+      state.tour.step = Math.max(0, state.tour.step - 1)
+      render()
+      return
+
+    case 'tour-close':
+      closeTour()
+      return
+
+    case 'tour-open':
+      state.tour = { open: true, step: 0 }
       render()
       return
 
@@ -1349,6 +1608,26 @@ async function handleAction(action: string, element: HTMLElement): Promise<void>
   }
 }
 
+/** Abre la hoja de eleccion de linea con el borrador ya preparado. */
+function openPickLine(stopId: string, purpose: 'tracking' | 'monitor' | 'follow'): void {
+  const lines = state.network?.getLinesForStop(stopId) ?? []
+  state.draft.lineId = lines[0]?.lineId ?? ''
+  state.draft.directionKey =
+    state.network?.getDirectionsThroughStop(stopId, state.draft.lineId)[0]?.key ?? ''
+  state.sheet = { kind: 'pick-line', stopId, purpose }
+  render()
+}
+
+/**
+ * Cierra el tour y lo da por visto para ESTA version. Volvera a aparecer solo
+ * cuando la app se actualice, que es cuando hay algo nuevo que contar.
+ */
+function closeTour(): void {
+  state.tour = { open: false, step: 0 }
+  markTourSeen()
+  render()
+}
+
 async function confirmSheet(
   stopId: string,
   purpose: 'tracking' | 'monitor' | 'follow' | undefined,
@@ -1362,7 +1641,7 @@ async function confirmSheet(
   if (purpose === 'tracking') {
     state.sheet = null
     render()
-    await startTracking(stopId, lineId)
+    await createTracking(stopId, lineId)
     state.tab = 'seguimiento'
     persistTab()
     showToast('Te avisaremos cuando se acerque', 'success')
@@ -1383,9 +1662,27 @@ async function confirmSheet(
     if (!state.follows.some((item) => item.id === id)) {
       state.follows = [
         ...state.follows,
-        { id, stopId, stopName: stopName(stopId), lineId, directionKey, createdAt: Date.now() },
+        {
+          id,
+          stopId,
+          stopName: stopName(stopId),
+          lineId,
+          directionKey,
+          active: true,
+          createdAt: Date.now(),
+        },
       ]
+
+      // El recien creado es el que interesa: si con el se pasa del tope de
+      // funciones activas, se apaga la mas antigua.
+      const turnedOff = enforceActiveLimit(id)
       persistFollows()
+      persistTrackings()
+
+      if (turnedOff.length > 0) {
+        await syncTrackingService()
+        showToast(`Se ha pausado otra función para no pasar de ${MAX_ACTIVE_JOBS} activas`, 'info')
+      }
     }
 
     state.sheet = null

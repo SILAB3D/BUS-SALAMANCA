@@ -26,6 +26,11 @@ export interface TrackingJob {
   stopId: string
   stopName: string
   lineId: string
+  /**
+   * Un aviso creado puede estar en reposo: sigue existiendo y se puede reactivar
+   * de un toque, pero no consulta la fuente ni publica notificacion.
+   */
+  active: boolean
   startedAt: number
   lastMinutes: number | null
   lastNotifiedAt: number
@@ -34,10 +39,24 @@ export interface TrackingJob {
   missingStreak: number
   /** Autobuses ya vistos pasar; el aviso termina al llegar a TRACKING_BUS_TARGET. */
   busesSeen: number
+  /**
+   * El aviso corto (vibracion) de "quedan 3 minutos" ya se ha dado para el
+   * autobus que se espera ahora. Se reinicia con cada autobus que pasa, de modo
+   * que vibra una vez por autobus y no una vez por consulta.
+   */
+  warnedAt3: boolean
 }
 
 /** Autobuses que hay que ver pasar antes de dar por terminado el aviso. */
 export const TRACKING_BUS_TARGET = 3
+
+/**
+ * Minutos restantes a los que el aviso da un toque corto de vibracion.
+ *
+ * El servicio nativo (BusTrackingService) lleva su propia copia de este numero:
+ * tiene que poder avisar con la app cerrada, cuando esta parte ni se ejecuta.
+ */
+export const TRACKING_WARN_MINUTES = 3
 
 /** Monitorizacion: registra pasos reales en una franja para calcular medias. */
 export interface MonitorJob {
@@ -81,8 +100,27 @@ export interface FollowJob {
   stopName: string
   lineId: string
   directionKey: string
+  /** Igual que en los avisos: creado pero en reposo mientras no este activo. */
+  active: boolean
   createdAt: number
 }
+
+/* ------------------------------------------------------------------ *
+ * Limites de las funciones de seguimiento                              *
+ * ------------------------------------------------------------------ */
+
+/** Avisos de "proximo bus" que se pueden tener creados a la vez. */
+export const MAX_TRACKING_JOBS = 2
+
+/** Seguimientos de "ver por donde viene" que se pueden tener creados a la vez. */
+export const MAX_FOLLOW_JOBS = 2
+
+/**
+ * Funciones que pueden estar ACTIVAS a la vez, sumando las dos modalidades.
+ * Cada una consulta la fuente oficial por su cuenta y esta limita por IP: por
+ * encima de dos, todas empiezan a refrescarse tarde.
+ */
+export const MAX_ACTIVE_JOBS = 2
 
 /**
  * Fase de refresco de una parada concreta. Las consultas van SIEMPRE en serie
@@ -161,8 +199,10 @@ export interface AppState {
 
   favourites: FavouriteStop[]
   expandedStopId: string | null
+  /** Paradas cuya lista de llegadas se ha desplegado mas alla de ARRIVALS_PREVIEW. */
+  arrivalsExpanded: Record<string, boolean>
 
-  tracking: TrackingJob | null
+  trackings: TrackingJob[]
   monitors: MonitorJob[]
   monitorPasses: MonitorPasses
   monitorRuntime: Record<string, MonitorRuntime>
@@ -175,6 +215,8 @@ export interface AppState {
     | { kind: 'stop-actions', stopId: string }
     | { kind: 'pick-line', stopId: string, purpose: 'tracking' | 'monitor' | 'follow' }
     | { kind: 'rename', stopId: string }
+    /** Se ha alcanzado el limite de esa modalidad: hay que sustituir una. */
+    | { kind: 'replace-job', stopId: string, purpose: 'tracking' | 'follow' }
     | null
 
   draft: {
@@ -190,14 +232,50 @@ export interface AppState {
     battery: PermissionState
   }
 
+  settings: AppSettings
+
+  tour: TourState
+
   update: UpdateState
 
   logs: LogEntry[]
 }
 
+/* ------------------------------------------------------------------ *
+ * Ajustes de la persona usuaria                                        *
+ * ------------------------------------------------------------------ */
+
+export interface AppSettings {
+  /**
+   * Vibracion corta cuando el aviso de proximo bus detecta que quedan 3 minutos.
+   * Una sola vez por autobus.
+   */
+  vibrateOnApproach: boolean
+}
+
+const DEFAULT_SETTINGS: AppSettings = {
+  vibrateOnApproach: true,
+}
+
+/* ------------------------------------------------------------------ *
+ * Tour de bienvenida                                                   *
+ * ------------------------------------------------------------------ */
+
+export interface TourState {
+  open: boolean
+  step: number
+}
+
+/** Llegadas que se ven de una parada antes de pulsar "Ver mas". */
+export const ARRIVALS_PREVIEW = 6
+
 const KEYS = {
   favourites: 'salbus.favourites',
+  /** Formato antiguo: un unico aviso guardado como objeto suelto. */
   tracking: 'salbus.tracking',
+  trackings: 'salbus.trackings',
+  settings: 'salbus.settings',
+  tourVersion: 'salbus.tourVersion',
   monitors: 'salbus.monitors',
   monitorStats: 'salbus.monitorStats',
   monitorPasses: 'salbus.monitorPasses',
@@ -207,12 +285,36 @@ const KEYS = {
   tab: 'salbus.tab',
 }
 
-function normalizeTracking(job: TrackingJob | null): TrackingJob | null {
-  if (!job || typeof job.id !== 'string') {
-    return null
-  }
+/**
+ * Avisos de proximo bus guardados.
+ *
+ * Hasta la v4.3 solo podia haber uno y se guardaba como objeto suelto en
+ * `salbus.tracking`. Ese formato se migra a la lista actual para no perder el
+ * aviso en curso al actualizar.
+ */
+function readTrackings(): TrackingJob[] {
+  const stored = readJson<TrackingJob[]>(KEYS.trackings, [])
+  const list = Array.isArray(stored) && stored.length > 0
+    ? stored
+    : [readJson<TrackingJob | null>(KEYS.tracking, null)].filter(
+        (item): item is TrackingJob => item !== null,
+      )
 
-  return { ...job, busesSeen: typeof job.busesSeen === 'number' ? job.busesSeen : 0 }
+  return list
+    .filter((job) => job && typeof job.id === 'string')
+    .slice(0, MAX_TRACKING_JOBS)
+    .map((job) => ({
+      ...job,
+      busesSeen: typeof job.busesSeen === 'number' ? job.busesSeen : 0,
+      warnedAt3: job.warnedAt3 === true,
+      // Un aviso guardado con el formato antiguo estaba activo por definicion.
+      active: job.active !== false,
+    }))
+}
+
+/** Un trabajo guardado sin `active` (formato antiguo) se considera activo. */
+function normalizeFollow(job: FollowJob): FollowJob {
+  return { ...job, active: job.active !== false }
 }
 
 export const state: AppState = {
@@ -246,9 +348,10 @@ export const state: AppState = {
     (item) => typeof item?.stopId === 'string',
   ),
   expandedStopId: null,
+  arrivalsExpanded: {},
 
   // busesSeen no existia en versiones anteriores: un aviso guardado sin el empieza a contar de cero.
-  tracking: normalizeTracking(readJson<TrackingJob | null>(KEYS.tracking, null)),
+  trackings: readTrackings(),
   monitors: readJson<MonitorJob[]>(KEYS.monitors, [])
     .filter((item) => typeof item?.id === 'string')
     .map((item) => ({ ...item, directionKey: item.directionKey ?? null })),
@@ -256,7 +359,9 @@ export const state: AppState = {
   monitorRuntime: readJson<Record<string, MonitorRuntime>>(KEYS.monitorRuntime, {}),
   monitorDayView: {},
   monitorSeenAt: {},
-  follows: readJson<FollowJob[]>(KEYS.follows, []).filter((item) => typeof item?.id === 'string'),
+  follows: readJson<FollowJob[]>(KEYS.follows, [])
+    .filter((item) => typeof item?.id === 'string')
+    .map(normalizeFollow),
 
   sheet: null,
 
@@ -285,6 +390,11 @@ export const state: AppState = {
     battery: 'unknown',
   },
 
+  settings: { ...DEFAULT_SETTINGS, ...readJson<Partial<AppSettings>>(KEYS.settings, {}) },
+
+  // El tour se abre solo la primera vez que se arranca cada version nueva.
+  tour: { open: readTourVersion() !== APP_VERSION, step: 0 },
+
   logs: readJson<LogEntry[]>(KEYS.logs, []),
 }
 
@@ -296,8 +406,35 @@ export function persistFavourites(): void {
   writeJson(KEYS.favourites, state.favourites)
 }
 
-export function persistTracking(): void {
-  writeJson(KEYS.tracking, state.tracking)
+export function persistTrackings(): void {
+  writeJson(KEYS.trackings, state.trackings)
+  // El formato antiguo se retira: dejarlo escrito revivria avisos ya borrados.
+  try {
+    window.localStorage.removeItem(KEYS.tracking)
+  } catch {
+    /* almacenamiento no disponible */
+  }
+}
+
+export function persistSettings(): void {
+  writeJson(KEYS.settings, state.settings)
+}
+
+function readTourVersion(): string | null {
+  try {
+    return window.localStorage.getItem(KEYS.tourVersion)
+  } catch {
+    return null
+  }
+}
+
+/** Marca el tour de ESTA version como visto; volvera con la siguiente. */
+export function markTourSeen(): void {
+  try {
+    window.localStorage.setItem(KEYS.tourVersion, APP_VERSION)
+  } catch {
+    /* almacenamiento no disponible */
+  }
 }
 
 export function persistMonitors(): void {
@@ -411,6 +548,83 @@ export function clearLogs(): void {
 /* ------------------------------------------------------------------ *
  * Utilidades de estado                                                 *
  * ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ *
+ * Funciones de seguimiento activas                                     *
+ * ------------------------------------------------------------------ */
+
+/** Una funcion de seguimiento, vista sin importar de que modalidad sea. */
+export interface JobRef {
+  kind: 'tracking' | 'follow'
+  id: string
+  active: boolean
+  createdAt: number
+}
+
+/** Todas las funciones creadas, de la mas antigua a la mas reciente. */
+export function allJobs(): JobRef[] {
+  return [
+    ...state.trackings.map((job) => ({
+      kind: 'tracking' as const,
+      id: job.id,
+      active: job.active,
+      createdAt: job.startedAt,
+    })),
+    ...state.follows.map((job) => ({
+      kind: 'follow' as const,
+      id: job.id,
+      active: job.active,
+      createdAt: job.createdAt,
+    })),
+  ].sort((left, right) => left.createdAt - right.createdAt)
+}
+
+export function activeJobCount(): number {
+  return state.trackings.filter((job) => job.active).length
+    + state.follows.filter((job) => job.active).length
+}
+
+/** Apaga una funcion concreta, sea de la modalidad que sea. */
+export function deactivateJob(ref: JobRef): void {
+  if (ref.kind === 'tracking') {
+    const job = state.trackings.find((item) => item.id === ref.id)
+    if (job) {
+      job.active = false
+    }
+    return
+  }
+
+  const job = state.follows.find((item) => item.id === ref.id)
+  if (job) {
+    job.active = false
+  }
+}
+
+/**
+ * Deja como mucho MAX_ACTIVE_JOBS funciones activas, apagando siempre las mas
+ * antiguas: al crear o activar una, la ultima en llegar es la que interesa.
+ *
+ * @param keepId Funcion que nunca se apaga (la que se acaba de crear o activar).
+ * @returns Las funciones que se han apagado, para poder avisar de ello.
+ */
+export function enforceActiveLimit(keepId?: string): JobRef[] {
+  const turnedOff: JobRef[] = []
+  const active = allJobs().filter((job) => job.active && job.id !== keepId)
+
+  // El excedente se cuenta sobre el total, incluida la funcion protegida.
+  let excess = activeJobCount() - MAX_ACTIVE_JOBS
+
+  for (const job of active) {
+    if (excess <= 0) {
+      break
+    }
+    deactivateJob(job)
+    turnedOff.push(job)
+    excess -= 1
+  }
+
+  return turnedOff
+}
 
 export function isFavourite(stopId: string): boolean {
   return state.favourites.some((item) => item.stopId === stopId)

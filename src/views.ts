@@ -1,18 +1,25 @@
 import { getClientHealth, MIN_REQUEST_SPACING_MS } from './services/arrivals'
 import { currentDayType } from './services/schedule'
 import {
+  activeJobCount,
   APP_VERSION,
   APP_VERSION_CODE,
+  ARRIVALS_PREVIEW,
   favouriteLabel,
   formatMinutesClock,
   isFavourite,
   isWithinWindow,
+  MAX_ACTIVE_JOBS,
+  MAX_FOLLOW_JOBS,
+  MAX_TRACKING_JOBS,
   state,
   summariseMonitor,
   TRACKING_BUS_TARGET,
+  TRACKING_WARN_MINUTES,
   type MonitorJob,
   type MonitorRow,
   type TabId,
+  type TrackingJob,
 } from './state'
 import type { Arrival, LineDirection, NetworkStop, StopFeed, TransitLine } from './types'
 import {
@@ -105,6 +112,7 @@ export function renderApp(): string {
       ${renderTabbar()}
     </div>
     ${renderSheet()}
+    ${renderTour()}
     ${renderToast()}
   `
 }
@@ -138,7 +146,7 @@ function renderTopbar(): string {
 }
 
 function renderTabbar(): string {
-  const trackingActive = Boolean(state.tracking)
+  const trackingActive = state.trackings.some((job) => job.active)
 
   return `
     <nav class="tabbar" aria-label="Secciones">
@@ -323,7 +331,10 @@ function renderInicio(): string {
       </div>
     </section>
 
-    ${state.tracking ? renderTrackingBanner() : ''}
+    ${state.trackings
+      .filter((job) => job.active)
+      .map((job) => renderTrackingBanner(job))
+      .join('')}
 
     <section class="card">
       <div class="card-head">
@@ -369,17 +380,12 @@ function renderQuickTile(tab: TabId, iconName: string, title: string, descriptio
   `
 }
 
-function renderTrackingBanner(): string {
-  const tracking = state.tracking
-  if (!tracking) {
-    return ''
-  }
-
+function renderTrackingBanner(tracking: TrackingJob): string {
   const feed = feedOf(tracking.stopId)
   const arrival = feed?.arrivals.find((item) => item.lineId === tracking.lineId) ?? null
 
   return `
-    <section class="card">
+    <section class="card${tracking.active ? '' : ' is-paused'}" data-key="tracking-${esc(tracking.id)}">
       <div class="card-head">
         ${lineChip(tracking.lineId, lineColor(tracking.lineId), 'lg')}
         <div class="card-head-copy">
@@ -393,11 +399,38 @@ function renderTrackingBanner(): string {
         </div>
       </div>
       <div class="card-body">
-        <button class="btn btn-danger btn-block" type="button" data-action="stop-tracking">
-          ${icon('bellOff')} Detener aviso
-        </button>
+        <div class="btn-row">
+          ${renderJobToggle('tracking', tracking.id, tracking.active)}
+          <button class="btn btn-danger" type="button" data-action="stop-tracking" data-tracking="${esc(
+            tracking.id,
+          )}">
+            ${icon('bellOff')} Detener
+          </button>
+        </div>
       </div>
     </section>
+  `
+}
+
+/**
+ * Interruptor de una función de seguimiento.
+ *
+ * Una función en reposo no se borra: sigue creada y con su configuración, pero
+ * no consulta ni publica notificación. Es lo que permite alternar entre las
+ * cuatro que se pueden crear sin volver a montarlas cada vez.
+ */
+function renderJobToggle(kind: 'tracking' | 'follow', id: string, active: boolean): string {
+  const full = !active && activeJobCount() >= MAX_ACTIVE_JOBS
+
+  return `
+    <button
+      class="btn ${active ? 'btn-secondary is-on' : 'btn-secondary'}"
+      type="button"
+      data-action="toggle-job"
+      data-kind="${kind}"
+      data-job="${esc(id)}"
+      title="${full ? `Se pausará la más antigua: solo ${MAX_ACTIVE_JOBS} pueden estar activas` : ''}"
+    >${icon(active ? 'pause' : 'play')} ${active ? 'Activa' : 'En pausa'}</button>
   `
 }
 
@@ -482,46 +515,74 @@ function renderSearchByLine(): string {
     return ''
   }
 
-  const selectedLine = network.lineById.get(state.search.lineId) ?? network.lines[0]
-  if (!selectedLine) {
+  const selectedLine = network.lineById.get(state.search.lineId) ?? null
+  const direction = selectedLine?.directions.find((item) => item.key === state.search.directionKey) ?? null
+
+  return `
+    ${renderLineSelect()}
+    ${renderDirectionSelect()}
+
+    ${
+      direction
+        ? `<div class="result-list">
+            ${direction.stops.map((stop, index) => renderStopResult(stop, index + 1)).join('')}
+          </div>`
+        : emptyState(
+            'route',
+            'Elige línea y sentido',
+            'Los dos campos empiezan en “Seleccionar”: al completarlos aparecerán aquí las paradas en el orden del recorrido.',
+          )
+    }
+  `
+}
+
+/**
+ * Desplegable de línea. Arranca SIEMPRE en "Seleccionar": preseleccionar la
+ * primera línea del listado hacía creer que ya se había elegido algo, y en el
+ * mapa disparaba la pantalla completa sin que nadie la hubiera pedido.
+ */
+function renderLineSelect(): string {
+  const network = state.network
+  if (!network) {
     return ''
   }
-
-  const direction =
-    selectedLine.directions.find((item) => item.key === state.search.directionKey) ?? selectedLine.directions[0]
 
   return `
     <label class="field">
       <span>Línea</span>
       <select class="select" data-action="pick-search-line">
+        <option value="" ${state.search.lineId ? '' : 'selected'}>Seleccionar</option>
         ${network.lines
           .map(
             (line) =>
-              `<option value="${esc(line.lineId)}" ${line.lineId === selectedLine.lineId ? 'selected' : ''}>${esc(
-                line.name,
-              )}</option>`,
+              `<option value="${esc(line.lineId)}" ${
+                line.lineId === state.search.lineId ? 'selected' : ''
+              }>${esc(line.name)}</option>`,
           )
           .join('')}
       </select>
     </label>
+  `
+}
 
+function renderDirectionSelect(): string {
+  const line = state.network?.lineById.get(state.search.lineId) ?? null
+
+  return `
     <label class="field">
       <span>Sentido</span>
-      <select class="select" data-action="pick-search-direction">
-        ${selectedLine.directions
+      <select class="select" data-action="pick-search-direction" ${line ? '' : 'disabled'}>
+        <option value="" ${state.search.directionKey ? '' : 'selected'}>Seleccionar</option>
+        ${(line?.directions ?? [])
           .map(
             (item) =>
-              `<option value="${esc(item.key)}" ${item.key === direction?.key ? 'selected' : ''}>${esc(
-                directionLabel(item),
-              )}</option>`,
+              `<option value="${esc(item.key)}" ${
+                item.key === state.search.directionKey ? 'selected' : ''
+              }>${esc(directionLabel(item))}</option>`,
           )
           .join('')}
       </select>
     </label>
-
-    <div class="result-list">
-      ${(direction?.stops ?? []).map((stop, index) => renderStopResult(stop, index + 1)).join('')}
-    </div>
   `
 }
 
@@ -531,46 +592,22 @@ function renderSearchByMap(): string {
     return ''
   }
 
-  const selectedLine = network.lineById.get(state.search.lineId) ?? network.lines[0]
-  const direction =
-    selectedLine?.directions.find((item) => item.key === state.search.directionKey) ?? selectedLine?.directions[0]
+  const direction = network.directionByKey.get(state.search.directionKey) ?? null
+  const ready = Boolean(state.search.lineId && state.search.directionKey && direction)
   const expanded = state.search.mapExpanded
 
   return `
-    <label class="field">
-      <span>Línea a mostrar</span>
-      <select class="select" data-action="pick-search-line">
-        ${network.lines
-          .map(
-            (line) =>
-              `<option value="${esc(line.lineId)}" ${line.lineId === selectedLine?.lineId ? 'selected' : ''}>${esc(
-                line.name,
-              )}</option>`,
-          )
-          .join('')}
-      </select>
-    </label>
-
-    <label class="field">
-      <span>Sentido</span>
-      <select class="select" data-action="pick-search-direction">
-        ${(selectedLine?.directions ?? [])
-          .map(
-            (item) =>
-              `<option value="${esc(item.key)}" ${item.key === direction?.key ? 'selected' : ''}>${esc(
-                directionLabel(item),
-              )}</option>`,
-          )
-          .join('')}
-      </select>
-    </label>
+    ${renderLineSelect()}
+    ${renderDirectionSelect()}
 
     ${renderMapShell(direction ? directionLabel(direction) : '')}
     <p class="text-tiny">
       ${
-        expanded
-          ? 'Toca una parada para ver su ficha; cierra el mapa con la ✕ para volver al buscador.'
-          : 'Toca una parada del mapa para ver su ficha. Vuelve a elegir sentido para abrirlo a pantalla completa.'
+        !ready
+          ? 'Elige la línea y después el sentido: al completar los dos campos el mapa se abre a pantalla completa con el recorrido.'
+          : expanded
+            ? 'Toca una parada para ver su ficha; cierra el mapa con la ✕ para volver al buscador.'
+            : 'Toca una parada del mapa para ver su ficha, o pulsa “Ampliar” para verlo a pantalla completa.'
       }
     </p>
   `
@@ -595,9 +632,9 @@ function renderMapShell(caption: string): string {
           ${icon('close')}
         </button>
       `
-          : `<button class="map-expand" type="button" data-action="expand-map">${icon(
-              'map',
-            )} Ampliar</button>`
+          : `<button class="map-expand" type="button" data-action="expand-map" ${
+              state.search.lineId && state.search.directionKey ? '' : 'disabled'
+            }>${icon('map')} Ampliar</button>`
       }
     </div>
   `
@@ -645,7 +682,7 @@ function renderSelectedStop(stopId: string): string {
   const saved = isFavourite(stopId)
 
   return `
-    <section class="card">
+    <section class="card" id="selected-stop">
       <div class="card-head">
         <span class="stop-code">${esc(stopId)}</span>
         <div class="card-head-copy">
@@ -715,7 +752,7 @@ function renderFavouriteCard(stopId: string): string {
         <span class="stop-code">${esc(stopId)}</span>
         <span class="card-head-copy">
           <span class="card-title">${esc(label)}</span>
-          <span class="card-sub">${
+          <span class="card-sub${expanded ? '' : ' is-chips'}">${
             expanded
               ? esc(stopName(stopId))
               : lines
@@ -787,10 +824,27 @@ function renderArrivals(stopId: string, feed: StopFeed | undefined): string {
 
   const staleClass = feed.status === 'throttled' ? ' stale' : ''
 
+  // Solo las primeras seis. Una parada con doce líneas llenaba la pantalla
+  // entera y empujaba fuera de la vista los botones de la tarjeta.
+  const expanded = state.arrivalsExpanded[stopId] === true
+  const hidden = feed.arrivals.length - ARRIVALS_PREVIEW
+  const visible = expanded ? feed.arrivals : feed.arrivals.slice(0, ARRIVALS_PREVIEW)
+
   return `
     <div class="arrivals${staleClass}">
-      ${feed.arrivals.map((arrival) => renderArrivalRow(arrival, stopId, false)).join('')}
+      ${visible.map((arrival) => renderArrivalRow(arrival, stopId, false)).join('')}
     </div>
+    ${
+      hidden > 0
+        ? `<button class="btn btn-secondary btn-block btn-sm" type="button" data-action="${
+            expanded ? 'collapse-arrivals' : 'expand-arrivals'
+          }" data-stop="${esc(stopId)}">
+             ${icon(expanded ? 'up' : 'down')} ${
+              expanded ? 'Ver menos' : `Ver más (${hidden})`
+            }
+           </button>`
+        : ''
+    }
   `
 }
 
@@ -818,7 +872,7 @@ function renderArrivalRow(arrival: Arrival, stopId: string, showStop: boolean): 
  * ================================================================== */
 
 function renderSeguimiento(): string {
-  if (state.follows.length === 0 && !state.tracking) {
+  if (state.follows.length === 0 && state.trackings.length === 0) {
     return `
       <div class="screen-intro">
         <h2>Seguir un autobús</h2>
@@ -835,13 +889,61 @@ function renderSeguimiento(): string {
     `
   }
 
+  const active = activeJobCount()
+
   return `
     <div class="screen-intro">
       <h2>Seguir un autobús</h2>
       <p>Las paradas por las que viene, con el tiempo que falta en cada una.</p>
     </div>
-    ${state.tracking ? renderTrackingBanner() : ''}
-    ${state.follows.map((follow) => renderFollowCard(follow.id)).join('')}
+
+    <div class="notice${active >= MAX_ACTIVE_JOBS ? ' is-warn' : ''}">
+      ${icon('info')}
+      <span>${active} de ${MAX_ACTIVE_JOBS} funciones activas. Las que están en pausa
+      siguen guardadas y se reactivan de un toque.</span>
+    </div>
+
+    ${renderJobGroup(
+      'Avisos de próximo bus',
+      `${state.trackings.length} de ${MAX_TRACKING_JOBS} · notificación con los minutos que faltan`,
+      'bell',
+      state.trackings.map((job) => renderTrackingBanner(job)).join(''),
+      state.trackings.length === 0 ? 'Sin avisos creados.' : '',
+    )}
+
+    ${renderJobGroup(
+      'Ver por dónde viene',
+      `${state.follows.length} de ${MAX_FOLLOW_JOBS} · recorrido parada a parada`,
+      'route',
+      state.follows.map((follow) => renderFollowCard(follow.id)).join(''),
+      state.follows.length === 0 ? 'Sin seguimientos creados.' : '',
+    )}
+  `
+}
+
+/**
+ * Agrupa las funciones por modalidad. Es solo organización: mezcladas, con
+ * cuatro tarjetas parecidas en pantalla, no había forma de ver de un vistazo
+ * cuántas había de cada tipo ni cuánto margen quedaba.
+ */
+function renderJobGroup(
+  title: string,
+  subtitle: string,
+  iconName: string,
+  body: string,
+  emptyMessage: string,
+): string {
+  return `
+    <section class="job-group">
+      <header class="job-group-head">
+        ${icon(iconName)}
+        <div class="job-group-copy">
+          <h3>${esc(title)}</h3>
+          <p>${esc(subtitle)}</p>
+        </div>
+      </header>
+      ${emptyMessage ? `<p class="job-group-empty">${esc(emptyMessage)}</p>` : body}
+    </section>
   `
 }
 
@@ -872,7 +974,7 @@ function renderFollowCard(followId: string): string {
   })
 
   return `
-    <section class="card">
+    <section class="card${follow.active ? '' : ' is-paused'}" data-key="follow-${esc(follow.id)}">
       <div class="card-head">
         ${lineChip(follow.lineId, lineColor(follow.lineId), 'lg')}
         <div class="card-head-copy">
@@ -886,6 +988,7 @@ function renderFollowCard(followId: string): string {
         </div>
       </div>
       <div class="card-body">
+        <div class="btn-row">${renderJobToggle('follow', follow.id, follow.active)}</div>
         ${
           windowStops.length === 0
             ? notice('warn', 'No se pudo reconstruir el recorrido de esta línea.')
@@ -1136,6 +1239,127 @@ function renderMonitorPasses(passes: Array<{ at: number, minutes: number }>): st
 }
 
 /* ================================================================== *
+ * Tour de bienvenida                                                  *
+ * ================================================================== */
+
+interface TourStep {
+  iconName: string
+  title: string
+  body: string
+}
+
+/**
+ * Recorrido mínimo por las pestañas inferiores.
+ *
+ * Se abre solo la primera vez que se arranca cada versión: es el único momento
+ * en que hay algo nuevo que contar, y termina en los permisos porque sin ellos
+ * los avisos no funcionan y nada en la pantalla principal lo delata.
+ */
+const TOUR: TourStep[] = [
+  {
+    iconName: 'home',
+    title: 'Inicio',
+    body: 'El reloj, tus avisos en marcha y las próximas llegadas de todas tus paradas guardadas, en una sola pantalla.',
+  },
+  {
+    iconName: 'search',
+    title: 'Buscar',
+    body: 'Encuentra una parada por su nombre, recorriendo una línea o tocándola en el mapa.',
+  },
+  {
+    iconName: 'star',
+    title: 'Mis paradas',
+    body: 'Las paradas que guardes viven aquí con sus tiempos. Toca una para desplegarla y ponerle el nombre que quieras.',
+  },
+  {
+    iconName: 'route',
+    title: 'Seguir',
+    body: 'Dos avisos de próximo bus y dos seguimientos de recorrido, con dos activos a la vez como máximo.',
+  },
+  {
+    iconName: 'chart',
+    title: 'Puntualidad',
+    body: 'Elige una parada, una línea y una franja: la app anota a qué hora pasa de verdad y la compara con el horario.',
+  },
+  {
+    iconName: 'settings',
+    title: 'Ajustes',
+    body: 'Permisos, vibración del aviso, origen de los datos, actualizaciones y el registro de lo que hace la app.',
+  },
+  {
+    iconName: 'bell',
+    title: 'Permisos que hay que conceder',
+    body: 'Notificaciones, para que el aviso pueda mostrarse; y sin optimización de batería, para que siga actualizándose con la pantalla apagada.',
+  },
+]
+
+/** Pasos del tour; `main.ts` lo necesita para saber cuándo se ha acabado. */
+export const TOUR_STEPS = TOUR.length
+
+function renderTour(): string {
+  if (!state.tour.open || !state.ready) {
+    return ''
+  }
+
+  const index = Math.min(state.tour.step, TOUR.length - 1)
+  const step = TOUR[index]
+  const last = index === TOUR.length - 1
+
+  return `
+    <div class="tour-backdrop"></div>
+    <section class="tour" role="dialog" aria-modal="true" aria-label="Novedades de SALBUS">
+      <header class="tour-head">
+        <span class="tour-badge">${esc(APP_VERSION)}</span>
+        <button class="mini-btn" type="button" data-action="tour-close" aria-label="Cerrar el tour">
+          ${icon('close')}
+        </button>
+      </header>
+
+      <div class="tour-body">
+        <div class="tour-icon">${icon(step.iconName)}</div>
+        <h3>${esc(step.title)}</h3>
+        <p>${esc(step.body)}</p>
+      </div>
+
+      ${
+        last
+          ? `<div class="tour-perms">
+              ${renderPermissionRow(
+                'Notificaciones',
+                'Permite mostrar el aviso con los minutos que faltan.',
+                state.permissions.notifications,
+                'request-notifications',
+              )}
+              ${renderPermissionRow(
+                'Sin optimización de batería',
+                'Evita que Android detenga las actualizaciones.',
+                state.permissions.battery,
+                'request-battery',
+              )}
+            </div>`
+          : ''
+      }
+
+      <div class="tour-dots">
+        ${TOUR.map(
+          (_, position) =>
+            `<span class="tour-dot${position === index ? ' is-current' : ''}"></span>`,
+        ).join('')}
+      </div>
+
+      <div class="btn-row">
+        <button class="btn btn-secondary" type="button" data-action="tour-back" ${
+          index === 0 ? 'disabled' : ''
+        }>Atrás</button>
+        <button class="btn btn-primary" type="button" data-action="tour-next">
+          ${last ? 'Empezar' : 'Siguiente'}
+        </button>
+      </div>
+    </section>
+  `
+}
+
+/* ================================================================== *
  * 6 · AJUSTES                                                         *
  * ================================================================== */
 
@@ -1169,6 +1393,8 @@ function renderAjustes(): string {
         )}
       </div>
     </section>
+
+    ${renderTrackingRulesCard()}
 
     ${renderUpdateCard()}
 
@@ -1294,6 +1520,72 @@ function renderUpdateCard(): string {
   `
 }
 
+/**
+ * Cómo funcionan las funciones de seguimiento, en esquema.
+ *
+ * Los límites (dos por modalidad, dos activas) se notan al chocar con ellos, y
+ * sin explicarlos en alguna parte la ventana que pide sustituir una función
+ * parece un fallo en vez de una regla.
+ */
+function renderTrackingRulesCard(): string {
+  return `
+    <section class="card">
+      <div class="card-head"><div class="card-head-copy">
+        <h3 class="card-title">Seguimiento</h3>
+        <p class="card-sub">Cuántas funciones puedes tener y cuántas trabajan a la vez</p>
+      </div></div>
+      <div class="card-body">
+        <dl class="kv">
+          <dt>Avisos de próximo bus</dt><dd>máximo ${MAX_TRACKING_JOBS} creados</dd>
+          <dt>Ver por dónde viene</dt><dd>máximo ${MAX_FOLLOW_JOBS} creados</dd>
+          <dt>Activas a la vez</dt><dd>${MAX_ACTIVE_JOBS} en total, de cualquier tipo</dd>
+          <dt>Al crear una de más</dt><dd>se pide sustituir una de esa modalidad</dd>
+          <dt>Al pasar de ${MAX_ACTIVE_JOBS} activas</dt><dd>se pausa la más antigua</dd>
+          <dt>En pausa</dt><dd>se conserva, no consulta ni avisa</dd>
+          <dt>Fin de un aviso</dt><dd>tras ver pasar ${TRACKING_BUS_TARGET} autobuses</dd>
+        </dl>
+
+        ${renderSettingRow(
+          'vibrate',
+          'Vibración al acercarse',
+          `Un toque corto cuando faltan ${TRACKING_WARN_MINUTES} minutos, una sola vez por autobús.`,
+          state.settings.vibrateOnApproach,
+          'toggle-vibration',
+        )}
+
+        <button class="btn btn-secondary btn-block" type="button" data-action="tour-open">
+          ${icon('info')} Ver el tour de la aplicación
+        </button>
+      </div>
+    </section>
+  `
+}
+
+function renderSettingRow(
+  iconName: string,
+  title: string,
+  description: string,
+  enabled: boolean,
+  action: string,
+): string {
+  return `
+    <div class="perm-row">
+      <div class="perm-copy">
+        <strong>${esc(title)}</strong>
+        <span>${esc(description)}</span>
+      </div>
+      <button
+        class="switch${enabled ? ' is-on' : ''}"
+        type="button"
+        role="switch"
+        aria-checked="${enabled}"
+        data-action="${action}"
+        aria-label="${esc(title)}"
+      ><span class="switch-knob">${icon(iconName, 'switch-icon')}</span></button>
+    </div>
+  `
+}
+
 function renderPermissionRow(title: string, description: string, granted: string, action: string): string {
   const pill =
     granted === 'granted'
@@ -1332,7 +1624,9 @@ function renderSheet(): string {
       ? renderStopActionsSheet(sheet.stopId)
       : sheet.kind === 'pick-line'
         ? renderPickLineSheet(sheet.stopId, sheet.purpose)
-        : renderRenameSheet(sheet.stopId)
+        : sheet.kind === 'replace-job'
+          ? renderReplaceJobSheet(sheet.stopId, sheet.purpose)
+          : renderRenameSheet(sheet.stopId)
 
   return `
     <button class="sheet-backdrop" type="button" data-action="close-sheet" aria-label="Cerrar"></button>
@@ -1356,7 +1650,7 @@ function renderStopActionsSheet(stopId: string): string {
         ${icon('bell')}
         <span class="sheet-option-copy">
           <strong>Avisarme del próximo bus</strong>
-          <span>Notificación fija que se actualiza sola con los minutos que faltan.</span>
+          <span>Notificación fija con los minutos que faltan · ${state.trackings.length} de ${MAX_TRACKING_JOBS} creados.</span>
         </span>
       </button>
       <button class="sheet-option" type="button" data-action="pick-line" data-stop="${esc(
@@ -1365,7 +1659,7 @@ function renderStopActionsSheet(stopId: string): string {
         ${icon('route')}
         <span class="sheet-option-copy">
           <strong>Ver por dónde viene</strong>
-          <span>Muestra las paradas anteriores y en cuál está el autobús.</span>
+          <span>Las paradas anteriores y en cuál está el autobús · ${state.follows.length} de ${MAX_FOLLOW_JOBS} creados.</span>
         </span>
       </button>
       <button class="sheet-option" type="button" data-action="pick-line" data-stop="${esc(
@@ -1378,6 +1672,69 @@ function renderStopActionsSheet(stopId: string): string {
         </span>
       </button>
     </div>
+  `
+}
+
+/**
+ * Se ha alcanzado el tope de esa modalidad.
+ *
+ * En vez de rechazar la acción con un error, se enseña lo que ya hay y se pide
+ * cuál se sustituye: la persona ya ha decidido que quiere esta función nueva, y
+ * lo único que falta por saber es a costa de cuál.
+ */
+function renderReplaceJobSheet(stopId: string, purpose: 'tracking' | 'follow'): string {
+  const isTracking = purpose === 'tracking'
+  const limit = isTracking ? MAX_TRACKING_JOBS : MAX_FOLLOW_JOBS
+  const title = isTracking ? 'Avisarme del próximo bus' : 'Ver por dónde viene'
+
+  const jobs: Array<{ id: string, lineId: string, stopName: string, meta: string, active: boolean }> =
+    isTracking
+      ? state.trackings.map((job) => ({
+          id: job.id,
+          lineId: job.lineId,
+          stopName: job.stopName,
+          meta: describeArrival(job.stopId, job.lineId),
+          active: job.active,
+        }))
+      : state.follows.map((job) => ({
+          id: job.id,
+          lineId: job.lineId,
+          stopName: job.stopName,
+          meta: (() => {
+            const direction = state.network?.directionByKey.get(job.directionKey)
+            return direction ? directionLabel(direction) : `Línea ${job.lineId}`
+          })(),
+          active: job.active,
+        }))
+
+  return `
+    <div class="sheet-head">
+      <h3>${esc(title)}</h3>
+      <p>Ya tienes ${limit} de ${limit}. Elige cuál se sustituye por la de ${esc(stopName(stopId))}.</p>
+    </div>
+
+    <div class="sheet-options">
+      ${jobs
+        .map(
+          (job) => `
+        <button class="sheet-option" type="button" data-action="replace-job" data-stop="${esc(
+          stopId,
+        )}" data-purpose="${purpose}" data-job="${esc(job.id)}">
+          ${lineChip(job.lineId, lineColor(job.lineId))}
+          <span class="sheet-option-copy">
+            <strong>${esc(job.stopName)}</strong>
+            <span>${esc(job.meta)} · ${job.active ? 'activa' : 'en pausa'}</span>
+          </span>
+          ${icon('chevron')}
+        </button>
+      `,
+        )
+        .join('')}
+    </div>
+
+    <button class="btn btn-secondary btn-block" type="button" data-action="close-sheet">
+      Dejarlo como está
+    </button>
   `
 }
 
