@@ -131,8 +131,11 @@ y del sentido elegido** (±15 min). Los pasos sin salida cercana también se
 guardan y se muestran aparte: son la señal más clara de que el horario oficial se
 ha quedado atrás.
 
-> La medición necesita la app abierta durante la franja: la fuente no ofrece
-> histórico y el servicio en primer plano solo cubre el aviso de próximo bus.
+La medición **no necesita la app abierta**: dentro de la franja la lleva el mismo
+servicio nativo que los avisos (ver [Funcionamiento en segundo plano](#funcionamiento-en-segundo-plano)).
+La detección está portada a mano en `BusTrackingService.Monitor` con las mismas
+constantes que `punctuality.ts`; `npm test` comprueba que no se separen, porque
+si lo hicieran la misma parada mediría distinto según quién la estuviera mirando.
 
 `npm run test:punctuality -- --stop 222 --line 4 --minutes 90` graba la fuente
 real con el mismo parser y la misma lógica que la app, y escribe lo observado.
@@ -180,6 +183,36 @@ quitar.
 
 Cuando faltan 3 minutos el móvil da una **vibración corta**, una sola vez por
 autobús (se rearma cuando ese autobús pasa). Se desactiva desde Ajustes.
+
+La notificación del aviso enseña **cuatro datos y ninguno repetido**: la línea y
+el tiempo que falta en el título, la dirección y la hora de la última
+actualización en el cuerpo. El aviso de «ya ha pasado» lo publica **solo** el
+servicio; la web se lo salta cuando el cierre viene de él (`finishTracking(id,
+true)`), porque publicando los dos salían dos notificaciones idénticas.
+
+### Puntualidad con la app cerrada
+
+Los controles de puntualidad viajan en el mismo `BusTracking.sync`. Dentro de su
+franja el servicio los consulta cada 30 s (cada 15 s con un autobús ya entrando)
+y sostiene un **WakeLock parcial**: sin él el móvil se duerme entre consulta y
+consulta y se pierde justo el paso que se quería medir.
+
+Entre franja y franja el servicio **se apaga del todo**. Quedarse esperando en
+primer plano agotaría el tope diario de horas que Android 15 le pone a un
+servicio de tipo `dataSync`, y lo agotaría sin haber medido nada. Quien lo trae
+de vuelta es una alarma (`setAndAllowWhileIdle`, sin permiso de alarma exacta)
+que despierta a `BusTrackingReceiver`; ese receptor arranca el servicio dentro de
+los segundos de permiso que el sistema concede al entregar la alarma, y si el
+sistema se niega reprograma en lugar de tumbar la app. El mismo receptor atiende
+al arranque del móvil, que se lleva por delante servicio y alarmas.
+
+Las franjas se guardan en las preferencias del servicio, así que se siguen
+midiendo aunque la app lleve días sin abrirse. Los pasos detectados se anotan
+también en disco y la app los recoge con `takePasses`, que los **entrega y los
+borra a la vez**: leerlos sin borrarlos los contaría otra vez en el siguiente
+arranque. El emparejado con el horario programado se hace en la web, que es donde
+vive el GTFS. Mientras el servicio lleva un control, la web no detecta pasos de
+ese control: hacerlo en los dos sitios apuntaría el mismo autobús dos veces.
 
 El icono pequeño de la notificación (`res/drawable/ic_stat_salbus.xml`) es una
 silueta monocroma **sin fondo**: Android descarta el color y usa solo el canal

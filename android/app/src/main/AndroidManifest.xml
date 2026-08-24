@@ -30,8 +30,10 @@
         </provider>
 
         <!--
-            Servicio en primer plano del aviso de proximo bus. Es lo que permite
-            que la notificacion se siga actualizando con la app en segundo plano.
+            Servicio en primer plano del aviso de proximo bus y de los controles
+            de puntualidad. Es lo que permite que la notificacion se siga
+            actualizando —y que se sigan midiendo los pasos— con la app en
+            segundo plano o cerrada.
         -->
         <service
             android:name=".BusTrackingService"
@@ -39,6 +41,21 @@
             android:exported="false"
             android:foregroundServiceType="dataSync"
         />
+
+        <!--
+            Despertador de las franjas de puntualidad. Entre franja y franja el
+            servicio se apaga; esta alarma lo trae de vuelta a su hora, y el
+            arranque del movil vuelve a programarla.
+        -->
+        <receiver
+            android:name=".BusTrackingReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.icuas.bussalamanca.TRACKING_WAKE" />
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
     </application>
 
     <!-- Permissions -->

@@ -70,7 +70,6 @@ async function ensureChannel(): Promise<void> {
 
 export interface TrackingNotification {
   id: number
-  stopName: string
   lineId: string
   destination: string
   minutes: number | null
@@ -97,13 +96,16 @@ export async function showTrackingNotification(payload: TrackingNotification): P
   const suffix = payload.stale ? ' · dato no confirmado' : ''
   const clock = payload.updatedAt.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })
 
+  // Cuatro datos y ninguno repetido: linea y tiempo en el titulo, direccion y
+  // hora de la ultima actualizacion en el cuerpo. El nombre de la parada sobra,
+  // porque ya se eligio al crear el aviso.
   try {
     await LocalNotifications.schedule({
       notifications: [
         {
           id: payload.id,
           title: `Línea ${payload.lineId} · ${eta}`,
-          body: `${payload.stopName} → ${payload.destination}\nActualizado a las ${clock}${suffix}`,
+          body: `${payload.destination}\nActualizado a las ${clock}${suffix}`,
           channelId: CHANNEL_ID,
           smallIcon: SMALL_ICON,
           ongoing: true,

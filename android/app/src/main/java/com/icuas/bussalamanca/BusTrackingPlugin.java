@@ -10,6 +10,7 @@ import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.util.ArrayList;
@@ -23,9 +24,13 @@ import java.util.Set;
  * congela los temporizadores del WebView), asi que delega los avisos de "proximo
  * bus" en un servicio en primer plano y se limita a reflejar sus resultados.
  *
- * La web manda SIEMPRE la lista completa de avisos activos ({@code sync}), no
- * altas y bajas sueltas: asi no hay forma de que las dos partes discrepen sobre
- * cuantos avisos hay vivos.
+ * La web manda SIEMPRE las listas completas ({@code sync}), no altas y bajas
+ * sueltas: asi no hay forma de que las dos partes discrepen sobre que hay vivo.
+ *
+ * Ademas de los avisos, {@code sync} lleva los controles de puntualidad. Sus
+ * pasos detectados se quedan en disco y la web los recoge con {@code takePasses}
+ * cuando vuelve a abrirse: emparejarlos con el horario oficial necesita el GTFS,
+ * que solo existe en la parte web.
  */
 @CapacitorPlugin(name = "BusTracking")
 public class BusTrackingPlugin extends Plugin {
@@ -84,10 +89,47 @@ public class BusTrackingPlugin extends Plugin {
             }
         }
 
-        Intent intent = new Intent(getContext(), BusTrackingService.class);
+        List<String> encodedMonitors = new ArrayList<>();
+        JSArray incomingMonitors = call.getArray("monitors");
 
-        if (encoded.isEmpty()) {
-            intent.setAction(BusTrackingService.ACTION_STOP);
+        if (incomingMonitors != null) {
+            try {
+                for (Object item : incomingMonitors.toList()) {
+                    JSONObject monitor = item instanceof JSONObject
+                        ? (JSONObject) item
+                        : new JSONObject(String.valueOf(item));
+
+                    String id = monitor.optString("id", "");
+                    String stopId = monitor.optString("stopId", "");
+                    String lineId = monitor.optString("lineId", "");
+
+                    if (id.isEmpty() || stopId.isEmpty() || lineId.isEmpty()) {
+                        continue;
+                    }
+
+                    encodedMonitors.add(String.join(BusTrackingService.FIELD_SEPARATOR,
+                        id,
+                        stopId,
+                        clean(monitor.optString("stopName", stopId)),
+                        lineId,
+                        String.valueOf(monitor.optInt("startMinutes", 0)),
+                        String.valueOf(monitor.optInt("endMinutes", 0))));
+                }
+            } catch (Exception error) {
+                call.reject("Lista de controles no valida: " + error.getMessage());
+                return;
+            }
+        }
+
+        Intent intent = new Intent(getContext(), BusTrackingService.class);
+        String[] monitorArray = encodedMonitors.toArray(new String[0]);
+
+        // Sin avisos y con todas las franjas cerradas no hay nada que consultar
+        // ahora mismo: se deja anotado que hay que medir y se programa el
+        // despertar. Arrancar el servicio para pararlo acto seguido haria
+        // parpadear una notificacion cada vez que se abriera la app.
+        if (encoded.isEmpty() && !BusTrackingService.anyWindowActive(monitorArray)) {
+            BusTrackingService.planBackgroundWork(getContext(), monitorArray);
             getContext().stopService(intent);
             call.resolve();
             return;
@@ -95,6 +137,7 @@ public class BusTrackingPlugin extends Plugin {
 
         intent.setAction(BusTrackingService.ACTION_SYNC);
         intent.putExtra(BusTrackingService.EXTRA_JOBS, encoded.toArray(new String[0]));
+        intent.putExtra(BusTrackingService.EXTRA_MONITORS, monitorArray);
         intent.putExtra(BusTrackingService.EXTRA_INTERVAL, call.getInt("intervalSeconds", 15));
         intent.putExtra(BusTrackingService.EXTRA_VIBRATE,
             Boolean.TRUE.equals(call.getBoolean("vibrateOnApproach", true)));
@@ -140,6 +183,35 @@ public class BusTrackingPlugin extends Plugin {
         JSObject result = new JSObject();
         result.put("running", BusTrackingService.isRunning());
         result.put("stopped", ids);
+        call.resolve(result);
+    }
+
+    /**
+     * Pasos de puntualidad detectados en segundo plano.
+     *
+     * Se entregan y se borran de una vez: si se leyeran ahora y se borraran
+     * despues, un cierre a destiempo de la app los contaria dos veces.
+     */
+    @PluginMethod
+    public void takePasses(PluginCall call) {
+        JSONArray stored = BusTrackingService.takePasses(getContext());
+
+        JSArray passes = new JSArray();
+        for (int index = 0; index < stored.length(); index += 1) {
+            JSONObject item = stored.optJSONObject(index);
+            if (item == null) {
+                continue;
+            }
+
+            JSObject pass = new JSObject();
+            pass.put("monitorId", item.optString("monitorId", ""));
+            pass.put("at", item.optLong("at", 0L));
+            pass.put("reason", item.optString("reason", "gone"));
+            passes.put(pass);
+        }
+
+        JSObject result = new JSObject();
+        result.put("passes", passes);
         call.resolve(result);
     }
 

@@ -100,10 +100,32 @@ interface TrackingJobPayload {
   busesSeen: number
 }
 
+/** Un control de puntualidad tal y como lo entiende el servicio nativo. */
+interface MonitorJobPayload {
+  id: string
+  stopId: string
+  stopName: string
+  lineId: string
+  startMinutes: number
+  endMinutes: number
+}
+
+/** Un paso detectado en segundo plano, todavía sin emparejar con el horario. */
+interface NativePass {
+  monitorId: string
+  at: number
+  reason: 'jump' | 'gone'
+}
+
 interface BusTrackingPlugin {
-  /** Sustituye los avisos vivos por esta lista. Vacia = detener el servicio. */
+  /**
+   * Sustituye lo que el servicio tiene vivo por estas listas. Las dos vacías
+   * detienen el servicio.
+   */
   sync(options: {
     jobs: TrackingJobPayload[]
+    /** Controles de puntualidad: se miden dentro de su franja, con la app cerrada. */
+    monitors: MonitorJobPayload[]
     intervalSeconds: number
     vibrateOnApproach: boolean
     /** Autobuses que hay que ver pasar antes de cerrar cada aviso (1 a 3). */
@@ -113,6 +135,8 @@ interface BusTrackingPlugin {
   /** `stopped`: avisos que se detuvieron desde su notificacion, quiza sin la app abierta. */
   status(): Promise<{ running: boolean, stopped: string[] }>
   clearStopped(): Promise<void>
+  /** Entrega los pasos medidos en segundo plano Y los borra: solo se leen una vez. */
+  takePasses(): Promise<{ passes: NativePass[] }>
   addListener(
     event: 'arrivalUpdate',
     handler: (update: TrackingUpdate) => void,
@@ -155,6 +179,15 @@ const AUTO_CYCLE_MS = 20_000
 /** Cuatro actualizaciones por minuto del aviso de proximo bus. */
 const TRACKING_INTERVAL_SECONDS = 15
 
+/**
+ * Controles de puntualidad que el servicio nativo mide a la vez.
+ *
+ * Coincide con `MAX_MONITORS` de BusTrackingService: por encima de ese numero el
+ * servicio se queda con los primeros, asi que conviene decirlo en el registro en
+ * lugar de dejar controles callados que no miden nada.
+ */
+const MAX_BACKGROUND_MONITORS = 6
+
 const root = document.querySelector<HTMLDivElement>('#app')
 if (!root) {
   throw new Error('No se encontró el contenedor #app.')
@@ -165,6 +198,9 @@ const appRoot = root
 let renderQueued = false
 let lastAutoCycleAt = 0
 
+/** Última vez que se recogieron los pasos medidos por el servicio nativo. */
+let lastDrainAt = 0
+
 /**
  * El servicio nativo esta al mando de los avisos.
  *
@@ -173,6 +209,17 @@ let lastAutoCycleAt = 0
  * segundo plano. Tampoco cuenta autobuses aqui, para no contar dos veces.
  */
 let trackingServiceActive = false
+
+/**
+ * Controles de puntualidad que mide el servicio nativo.
+ *
+ * De los que estan aqui NO se detectan pasos en la web: el servicio consulta
+ * también con la app cerrada y ya lleva su propia deteccion, asi que hacerlo en
+ * los dos sitios apuntaria el mismo autobus dos veces. Es un conjunto y no un
+ * simple interruptor porque el servicio solo admite un numero de controles: los
+ * que se queden fuera siguen midiendose aqui, con la app abierta.
+ */
+let nativeMonitorIds = new Set<string>()
 let refreshInFlight = false
 let toastTimer: number | null = null
 
@@ -247,6 +294,8 @@ async function bootstrap(): Promise<void> {
 
     if (document.visibilityState === 'visible') {
       void refreshVisible('manual')
+      // Mientras la app no estaba delante, quien medía era el servicio nativo.
+      void drainNativePasses()
       void syncPermissions()
       // El permiso de instalacion se concede en una pantalla de ajustes DEL
       // SISTEMA, y nada dentro de la app avisa de que ha cambiado. Sin releerlo
@@ -549,6 +598,13 @@ function tick(): void {
   // justo el paso que se quería medir.
   const measuring = state.monitors.some((monitor) => isWithinWindow(monitor))
 
+  // Con el servicio nativo midiendo, los pasos aparecen en la pantalla de
+  // puntualidad al ritmo al que él los detecta, no solo al reabrir la app.
+  if (measuring && nativeMonitorIds.size > 0 && Date.now() - lastDrainAt >= AUTO_CYCLE_MS) {
+    lastDrainAt = Date.now()
+    void drainNativePasses()
+  }
+
   if (refreshInFlight || (document.visibilityState !== 'visible' && !measuring)) {
     return
   }
@@ -684,17 +740,32 @@ function trackingById(id: string): TrackingJob | undefined {
 }
 
 /**
- * Pone el servicio nativo exactamente al día con los avisos activos.
+ * Pone el servicio nativo exactamente al día: avisos activos y controles de
+ * puntualidad.
  *
- * Se manda SIEMPRE la lista completa, nunca altas y bajas sueltas: es lo que
+ * Se mandan SIEMPRE las listas completas, nunca altas y bajas sueltas: es lo que
  * garantiza que la barra de notificaciones enseñe justo lo que hay en pantalla,
  * ni un aviso de más ni uno de menos.
+ *
+ * Los controles van aquí porque medir a qué hora pasa de verdad un autobús
+ * exige consultar durante toda la franja, y con la app en segundo plano el
+ * navegador se congela: se perdía justo el paso que se quería medir.
  */
 async function syncTrackingService(): Promise<void> {
   const jobs = activeTrackings()
+  const monitors = state.monitors.slice(0, MAX_BACKGROUND_MONITORS)
+
+  if (state.monitors.length > monitors.length) {
+    log(
+      'warn',
+      'puntualidad',
+      `Solo los ${MAX_BACKGROUND_MONITORS} primeros controles se miden en segundo plano; los demás necesitan la app abierta.`,
+    )
+  }
 
   if (!isNative()) {
     trackingServiceActive = false
+    nativeMonitorIds = new Set()
     return
   }
 
@@ -708,12 +779,21 @@ async function syncTrackingService(): Promise<void> {
         destination: describeArrival(job.stopId, job.lineId),
         busesSeen: job.busesSeen,
       })),
+      monitors: monitors.map((monitor) => ({
+        id: monitor.id,
+        stopId: monitor.stopId,
+        stopName: monitor.stopName,
+        lineId: monitor.lineId,
+        startMinutes: monitor.startMinutes,
+        endMinutes: monitor.endMinutes,
+      })),
       intervalSeconds: TRACKING_INTERVAL_SECONDS,
       vibrateOnApproach: state.settings.vibrateOnApproach,
       busTarget: trackingBusTarget(),
     })
 
     trackingServiceActive = jobs.length > 0
+    nativeMonitorIds = new Set(monitors.map((monitor) => monitor.id))
 
     // El servicio publica sus propias notificaciones: cualquier resto de la web
     // sobra, porque ya no se volvería a actualizar.
@@ -722,10 +802,45 @@ async function syncTrackingService(): Promise<void> {
     }
   } catch (error) {
     trackingServiceActive = false
+    nativeMonitorIds = new Set()
     log('warn', 'aviso', `No se pudo sincronizar el servicio en segundo plano: ${errorMessage(error)}`)
     if (jobs.length > 0) {
       showToast('El aviso funcionará solo con la app abierta', 'error')
+    } else if (monitors.length > 0) {
+      showToast('La puntualidad se medirá solo con la app abierta', 'error')
     }
+  }
+}
+
+/**
+ * Recoge los pasos que el servicio midió mientras la app no estaba delante.
+ *
+ * Llegan en bruto (control e instante): el emparejado con el horario oficial se
+ * hace aquí, que es donde vive el GTFS. El servicio los borra al entregarlos,
+ * así que esta función nunca puede contar dos veces el mismo autobús.
+ */
+async function drainNativePasses(): Promise<void> {
+  if (!isNative()) {
+    return
+  }
+
+  try {
+    const { passes } = await BusTracking.takePasses()
+
+    if (passes.length === 0) {
+      return
+    }
+
+    for (const pass of passes) {
+      const monitor = state.monitors.find((item) => item.id === pass.monitorId)
+      if (monitor) {
+        recordPass(monitor, pass.at, pass.reason === 'jump' ? 'jump' : 'gone')
+      }
+    }
+
+    log('info', 'puntualidad', `${passes.length} paso(s) medidos en segundo plano.`)
+  } catch (error) {
+    log('warn', 'puntualidad', `No se pudieron recoger las medidas: ${errorMessage(error)}`)
   }
 }
 
@@ -879,7 +994,7 @@ async function restoreTrackingService(): Promise<void> {
       }
 
       if (update.finished) {
-        void finishTracking(update.jobId)
+        void finishTracking(update.jobId, true)
         return
       }
 
@@ -932,13 +1047,18 @@ async function restoreTrackingService(): Promise<void> {
     // en lugar de revivirse.
     for (const job of activeTrackings()) {
       if (job.busesSeen >= trackingBusTarget()) {
-        await finishTracking(job.id)
+        await finishTracking(job.id, true)
       }
     }
 
     await syncTrackingService()
+
+    // Lo medido con la app cerrada se incorpora antes de pintar nada: es lo que
+    // hace que la pantalla de puntualidad ya esté completa al abrirla.
+    await drainNativePasses()
   } catch (error) {
     trackingServiceActive = false
+    nativeMonitorIds = new Set()
     log('warn', 'aviso', `Servicio en segundo plano no disponible: ${errorMessage(error)}`)
   }
 }
@@ -1010,7 +1130,6 @@ function evaluateTrackingJob(job: TrackingJob, feed: StopFeed): void {
   if (isNative() && !trackingServiceActive && !document.hidden) {
     void showTrackingNotification({
       id: notificationId(job.id),
-      stopName: job.stopName,
       lineId: job.lineId,
       destination: describeArrival(job.stopId, job.lineId),
       minutes,
@@ -1070,8 +1189,14 @@ async function registerBusPassed(job: TrackingJob): Promise<void> {
   render()
 }
 
-/** Cierra un aviso: ya han pasado todos los autobuses que se esperaban. */
-async function finishTracking(id: string): Promise<void> {
+/**
+ * Cierra un aviso: ya han pasado todos los autobuses que se esperaban.
+ *
+ * `alreadyNotified` lo ponen los cierres que vienen del servicio nativo, que ya
+ * ha publicado él su aviso de "completado". Sin eso salían DOS notificaciones
+ * iguales cada vez que pasaba el autobús: la del servicio y la de aquí.
+ */
+async function finishTracking(id: string, alreadyNotified = false): Promise<void> {
   const job = trackingById(id)
   if (!job) {
     return
@@ -1079,10 +1204,13 @@ async function finishTracking(id: string): Promise<void> {
 
   const target = trackingBusTarget()
 
-  await showArrivalAlert(notificationId(`${job.id}|done`), job.lineId, job.stopName, {
-    seen: target,
-    target,
-  })
+  if (!alreadyNotified) {
+    await showArrivalAlert(notificationId(`${job.id}|done`), job.lineId, job.stopName, {
+      seen: target,
+      target,
+    })
+  }
+
   const cuantos = target > 1 ? `${target} autobuses` : 'el autobús'
 
   log('info', 'aviso', `Aviso completado: ha pasado ${cuantos} de la línea ${job.lineId} por ${job.stopName}.`)
@@ -1122,6 +1250,18 @@ function evaluateMonitors(feed: StopFeed): void {
     }
 
     state.monitorSeenAt[monitor.id] = at
+
+    // Con el servicio nativo al mando, la detección es suya: repetirla aquí
+    // apuntaría dos veces el mismo autobús mientras la app estuviera abierta.
+    // Su estado de detección tampoco se puede reflejar aquí, así que se descarta
+    // el de la web para no dejar colgado un "autobús entrando" que ya no avanza.
+    if (nativeMonitorIds.has(monitor.id)) {
+      if (state.monitorRuntime[monitor.id]) {
+        delete state.monitorRuntime[monitor.id]
+        touched = true
+      }
+      continue
+    }
 
     const arrival = feed.arrivals
       .filter((item) => item.lineId === monitor.lineId)
@@ -1592,6 +1732,9 @@ async function handleAction(action: string, element: HTMLElement): Promise<void>
       persistMonitors()
       persistMonitorPasses()
       persistMonitorRuntime()
+      // El servicio deja de medirlo en el acto: si no, seguiría despertando el
+      // móvil por una franja que ya no le importa a nadie.
+      await syncTrackingService()
       render()
       return
     }
@@ -1789,6 +1932,10 @@ async function confirmSheet(
     },
   ]
   persistMonitors()
+
+  // El servicio nativo es quien mide dentro de la franja, también con la app
+  // cerrada: se entera del control nuevo ahora, no en el próximo arranque.
+  await syncTrackingService()
 
   state.sheet = null
   state.tab = 'monitor'

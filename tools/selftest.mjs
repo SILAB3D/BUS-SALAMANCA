@@ -515,6 +515,104 @@ async function main() {
   check('la clave de firma esta excluida de git',
     ignored.includes('*.jks') && ignored.includes('android/keystore.properties'))
 
+  /* ---------------------------------------------------------------- *
+   * 8 · Segundo plano y notificaciones                                 *
+   * ---------------------------------------------------------------- */
+
+  section('8 · Segundo plano y notificaciones')
+
+  const style = await fs.readFile(path.join(projectRoot, 'src', 'style.css'), 'utf8')
+  const zIndexOf = (selector) => {
+    const block = new RegExp(`\\${selector}\\s*\\{[^}]*\\}`).exec(style)?.[0] ?? ''
+    return Number(/z-index:\s*(\d+)/.exec(block)?.[1] ?? 0)
+  }
+
+  // La hoja de "Avisos" se abre DESDE la ficha de la parada (la que sale al
+  // tocar una parada en el mapa): por debajo de ella no se ve.
+  check('la hoja de avisos se dibuja por encima de la ficha de parada',
+    zIndexOf('.sheet') > zIndexOf('.modal') && zIndexOf('.sheet-backdrop') > zIndexOf('.modal-backdrop'),
+    `hoja ${zIndexOf('.sheet')} · ficha ${zIndexOf('.modal')}`)
+
+  const service = await fs.readFile(
+    path.join(projectRoot, 'android', 'app', 'src', 'main', 'java', 'com', 'icuas',
+      'bussalamanca', 'BusTrackingService.java'),
+    'utf8',
+  )
+
+  // El aviso se queda en linea + tiempo (titulo) y direccion + hora (cuerpo).
+  // Repetir la parada o el contador "Autobús 1 de 1" solo alargaba el texto.
+  check('el aviso de proximo bus no repite datos en el cuerpo',
+    !service.includes('private String progress(Job job)')
+      && service.includes('private String body(Job job)'))
+  check('el aviso lleva la hora de actualizacion en hh:mm',
+    service.includes('new SimpleDateFormat("HH:mm"'))
+
+  const mainSource = await fs.readFile(path.join(projectRoot, 'src', 'main.ts'), 'utf8')
+
+  // El servicio ya publica su aviso de "completado": publicar otro desde la web
+  // dejaba dos notificaciones identicas cada vez que pasaba el autobus.
+  check('el cierre de un aviso no duplica la notificacion del servicio',
+    /async function finishTracking\(id: string, alreadyNotified = false\)/.test(mainSource)
+      && mainSource.includes('finishTracking(update.jobId, true)'))
+
+  // Puntualidad en segundo plano: sin esto, medir exigia dejar la app delante
+  // durante toda la franja.
+  check('el servicio recibe tambien los controles de puntualidad',
+    service.includes('EXTRA_MONITORS') && service.includes('private void applyMonitors('))
+  check('la app manda los controles al servicio',
+    /monitors: monitors\.map\(/.test(mainSource))
+  check('el servicio mantiene el movil despierto dentro de la franja',
+    service.includes('PowerManager.PARTIAL_WAKE_LOCK') && service.includes('acquireWakeLock()'))
+  check('el servicio despierta solo al empezar la siguiente franja',
+    service.includes('setAndAllowWhileIdle') && service.includes('ACTION_TICK'))
+  check('el manifiesto concede el permiso de WakeLock',
+    manifest.includes('android.permission.WAKE_LOCK'))
+
+  // La deteccion nativa es un porte a mano de src/services/punctuality.ts: si
+  // los numeros dejan de coincidir, la misma parada mediria distinto segun
+  // quien la estuviera observando.
+  const punctuality = await fs.readFile(
+    path.join(projectRoot, 'src', 'services', 'punctuality.ts'), 'utf8')
+  const constantOf = (source, name, pattern) => Number(pattern.exec(source)?.[1] ?? -1)
+
+  check('el servicio se arma con los mismos minutos que la web',
+    constantOf(service, 'ARM', /ARM_MINUTES = (\d+)/)
+      === constantOf(punctuality, 'ARM', /ARM_MINUTES = (\d+)/))
+  check('el salto que delata el paso es el mismo en las dos partes',
+    constantOf(service, 'JUMP', /JUMP_MINUTES = (\d+)/)
+      === constantOf(punctuality, 'JUMP', /JUMP_MINUTES = (\d+)/))
+  check('las consultas seguidas sin ver la linea son las mismas',
+    constantOf(service, 'MISS', /MISSING_STREAK_TO_PASS = (\d+)/)
+      === constantOf(punctuality, 'MISS', /MISSING_STREAK = (\d+)/))
+
+  // Los pasos se entregan y se borran de una vez: leerlos sin borrarlos los
+  // contaria otra vez en el siguiente arranque.
+  check('los pasos medidos se recogen una sola vez',
+    service.includes('static JSONArray takePasses(Context context)')
+      && mainSource.includes('await BusTracking.takePasses()'))
+  check('con el servicio midiendo, la web no detecta pasos por su cuenta',
+    mainSource.includes('if (nativeMonitorIds.has(monitor.id)) {'))
+
+  // Entre franja y franja el servicio se apaga: un servicio dataSync tiene un
+  // tope diario de horas en Android 15, y esperar despierto lo agotaria.
+  const receiver = await fs.readFile(
+    path.join(projectRoot, 'android', 'app', 'src', 'main', 'java', 'com', 'icuas',
+      'bussalamanca', 'BusTrackingReceiver.java'),
+    'utf8',
+  )
+  check('el servicio se apaga entre franjas en lugar de esperar despierto',
+    service.includes('stopForeground(Service.STOP_FOREGROUND_REMOVE)')
+      && service.includes('private void goIdle()'))
+  check('el despertador esta declarado en el manifiesto',
+    manifest.includes('.BusTrackingReceiver')
+      && manifest.includes('com.icuas.bussalamanca.TRACKING_WAKE'))
+  check('el despertador vuelve a programarse tras reiniciar el movil',
+    receiver.includes('Intent.ACTION_BOOT_COMPLETED')
+      && manifest.includes('android.intent.action.BOOT_COMPLETED'))
+  check('las franjas sobreviven a que la app se cierre',
+    service.includes('static String[] readStoredMonitors(Context context)')
+      && service.includes('storeMonitors(this, incoming)'))
+
   console.log(`\n${passed} correctas · ${failed} fallidas`)
   process.exitCode = failed > 0 ? 1 : 0
 }
