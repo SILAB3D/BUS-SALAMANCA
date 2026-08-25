@@ -392,6 +392,8 @@ const KEYS = {
   follows: 'salbus.follows',
   logs: 'salbus.logs',
   tab: 'salbus.tab',
+  /** Compilacion que se mando instalar la ultima vez (ver readInstallAttempt). */
+  updateAttempt: 'salbus.updateAttempt',
 }
 
 /**
@@ -628,6 +630,35 @@ function readPasses(): MonitorPasses {
 
 export function persistFollows(): void {
   writeJson(KEYS.follows, state.follows)
+}
+
+/**
+ * Compilacion que se lanzo a instalar y todavia no se ha confirmado.
+ *
+ * Android no avisa de si una instalacion salio bien: la app se va al instalador
+ * del sistema y, cuando vuelve, lo unico que puede hacer es MIRAR que version
+ * hay. Dejando anotado que se intento la 1014, al arrancar se sabe si de verdad
+ * se instalo o si aquello se quedo a medias, en vez de volver a ofrecer lo mismo
+ * en silencio, que es como se llega a un bucle sin explicacion.
+ */
+export function readInstallAttempt(): number {
+  try {
+    return Number.parseInt(window.localStorage.getItem(KEYS.updateAttempt) ?? '0', 10) || 0
+  } catch {
+    return 0
+  }
+}
+
+export function writeInstallAttempt(versionCode: number): void {
+  try {
+    if (versionCode > 0) {
+      window.localStorage.setItem(KEYS.updateAttempt, String(versionCode))
+    } else {
+      window.localStorage.removeItem(KEYS.updateAttempt)
+    }
+  } catch {
+    /* almacenamiento no disponible */
+  }
 }
 
 export function persistTab(): void {

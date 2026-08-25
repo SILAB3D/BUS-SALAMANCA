@@ -49,6 +49,8 @@ import {
   persistSettings,
   persistTab,
   persistTrackings,
+  readInstallAttempt,
+  writeInstallAttempt,
   emptyMapsState,
   state,
   clampBusTarget,
@@ -339,6 +341,8 @@ async function setupUpdates(): Promise<void> {
   }
   render()
 
+  reviewInstallAttempt()
+
   await Updater.addListener('downloadProgress', (payload) => {
     state.update.percent = payload.percent
     render()
@@ -407,6 +411,44 @@ async function adoptPendingDownload(versionCode: number | null): Promise<string 
   return null
 }
 
+/**
+ * ¿Se completó la instalación que se lanzó la última vez?
+ *
+ * Si no, se dice y se tira la descarga guardada para bajarla de nuevo. Callarlo
+ * y limitarse a volver a ofrecer la misma versión es justo lo que convierte un
+ * fallo puntual en un bucle: la ventana reaparece una y otra vez sin que nada
+ * explique por qué sigues en la versión de siempre.
+ */
+function reviewInstallAttempt(): void {
+  const attempted = readInstallAttempt()
+  if (attempted <= 0) {
+    return
+  }
+
+  // Se limpia siempre: este aviso es de un intento concreto y no debe repetirse
+  // en cada arranque.
+  writeInstallAttempt(0)
+
+  if (state.installed.versionCode >= attempted) {
+    log('info', 'actualización', `Instalada la compilación ${state.installed.versionCode}.`)
+    return
+  }
+
+  state.update.error =
+    `La instalación anterior no llegó a completarse: sigues en la compilación ${state.installed.versionCode}. `
+    + 'Se descargará de nuevo desde cero.'
+
+  log(
+    'warn',
+    'actualización',
+    `Se mandó instalar la compilación ${attempted} y el sistema sigue con la ${state.installed.versionCode}.`,
+  )
+
+  // La APK guardada no vale: puede ser justo la que no se pudo instalar.
+  void Updater.clearPending().catch(() => undefined)
+  state.update.downloadedPath = null
+}
+
 async function syncInstallPermission(): Promise<void> {
   if (!isNativeAndroid()) {
     return
@@ -455,6 +497,10 @@ async function runUpdate(): Promise<void> {
 
     update.phase = 'installing'
     render()
+    // Queda anotado ANTES de lanzar el instalador: a partir de aquí la app puede
+    // morir en cualquier momento, y al volver hay que poder distinguir "se
+    // instaló" de "no llegó a instalarse".
+    writeInstallAttempt(update.release.versionCode)
     await Updater.install({ path: update.downloadedPath })
   } catch (error) {
     const message = errorMessage(error)

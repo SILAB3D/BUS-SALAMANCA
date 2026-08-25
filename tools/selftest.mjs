@@ -519,6 +519,22 @@ async function main() {
       && mainSourceForUpdates.includes('pending.versionCode === versionCode')
       && mainSourceForUpdates.includes('await Updater.clearPending()'))
 
+  // Android no dice si una instalacion salio bien: la app se va al instalador y,
+  // al volver, solo puede mirar que version hay. Sin dejar anotado que se
+  // intento, una instalacion que no cuaja vuelve a ofrecerse en silencio, una y
+  // otra vez: es asi como se llega a un bucle sin explicacion.
+  const stateSourceForUpdates = await fs.readFile(
+    path.join(projectRoot, 'src', 'state.ts'), 'utf8')
+
+  check('queda anotado que compilacion se mando instalar',
+    stateSourceForUpdates.includes('export function writeInstallAttempt(')
+      && mainSourceForUpdates.includes('writeInstallAttempt(update.release.versionCode)'))
+  check('una instalacion que no se completa se avisa, no se repite en silencio',
+    mainSourceForUpdates.includes('function reviewInstallAttempt()')
+      && mainSourceForUpdates.includes('La instalación anterior no llegó a completarse'))
+  check('tras un intento fallido la descarga se rehace desde cero',
+    /reviewInstallAttempt\(\)[\s\S]*?Updater\.clearPending\(\)/.test(mainSourceForUpdates))
+
   // El runner tiene que cumplir el requisito de Node del CLI de Capacitor. Con
   // una version por debajo, `cap sync` aborta antes de copiar nada y el build
   // falla sin haber llegado a Gradle.
