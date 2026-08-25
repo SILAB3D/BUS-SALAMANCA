@@ -4,10 +4,10 @@ import type { MonitorRuntime } from './services/punctuality'
 import type { ReleaseInfo } from './services/release-parser'
 import type { ScheduleDataset, ServiceDayType, StopFeed } from './types'
 
-/** Version que se muestra en pantalla. Sale de package.json via Vite. */
+/** Version con la que se COMPILO este bundle. Sale de package.json via Vite. */
 export const APP_VERSION = `v${__APP_VERSION__}`
 
-/** versionCode de esta compilacion; se compara con el de la ultima release. */
+/** versionCode de esta compilacion, segun el bundle. */
 export const APP_VERSION_CODE = __APP_VERSION_CODE__
 
 export type TabId = 'inicio' | 'buscar' | 'monitor' | 'seguimiento' | 'ajustes'
@@ -251,6 +251,16 @@ export interface AppState {
 
   tour: TourState
 
+  /**
+   * Version realmente instalada, la que dice el sistema.
+   *
+   * Arranca con la del bundle y se corrige nada mas abrir la app. No son
+   * siempre lo mismo: si la WebView sirviera una copia vieja de la pagina, el
+   * numero del bundle se quedaria congelado y la app se ofreceria a si misma la
+   * actualizacion que acaba de instalar.
+   */
+  installed: { versionName: string, versionCode: number }
+
   update: UpdateState
 
   logs: LogEntry[]
@@ -419,6 +429,8 @@ export const state: AppState = {
 
   // El tour se abre solo la primera vez que se arranca cada version nueva.
   tour: { open: readTourVersion() !== APP_VERSION, step: 0 },
+
+  installed: { versionName: __APP_VERSION__, versionCode: APP_VERSION_CODE },
 
   logs: readJson<LogEntry[]>(KEYS.logs, []),
 }

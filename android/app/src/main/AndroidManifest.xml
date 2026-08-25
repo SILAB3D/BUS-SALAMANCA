@@ -52,7 +52,7 @@
             android:enabled="true"
             android:exported="false">
             <intent-filter>
-                <action android:name="com.icuas.bussalamanca.TRACKING_WAKE" />
+                <action android:name="com.icuas.salbus.TRACKING_WAKE" />
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
             </intent-filter>
         </receiver>

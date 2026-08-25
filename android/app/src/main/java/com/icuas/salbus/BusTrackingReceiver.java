@@ -1,4 +1,4 @@
-package com.icuas.bussalamanca;
+package com.icuas.salbus;
 
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -22,7 +22,7 @@ import android.os.Build;
 public class BusTrackingReceiver extends BroadcastReceiver {
 
     /** Ha llegado la hora de mirar si toca medir. */
-    public static final String ACTION_WAKE = "com.icuas.bussalamanca.TRACKING_WAKE";
+    public static final String ACTION_WAKE = "com.icuas.salbus.TRACKING_WAKE";
 
     @Override
     public void onReceive(Context context, Intent intent) {

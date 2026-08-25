@@ -66,8 +66,20 @@ def releaseKeyAlias = resolveSigning('keyAlias', 'SALBUS_KEY_ALIAS')
 def releaseKeyPassword = resolveSigning('keyPassword', 'SALBUS_KEY_PASSWORD')
 def hasReleaseSigning = releaseStoreFile != null && file(releaseStoreFile).exists()
 
+/*
+ * NOMBRE DEL PAQUETE: dos cosas distintas que NO se pueden igualar.
+ *
+ *  - namespace es donde vive el codigo (com.icuas.salbus, como el proyecto y la
+ *    app). Es interno: cambiarlo no lo nota nadie de fuera.
+ *
+ *  - applicationId es la IDENTIDAD de la app para Android, y tiene que seguir
+ *    siendo com.icuas.bussalamanca para siempre. Con otro identificador el
+ *    sistema ve una app diferente: la instalada no se actualizaria, quedarian
+ *    dos iconos y las paradas, avisos e historial guardados —que viven en el
+ *    almacenamiento de ESE identificador— se quedarian en la vieja.
+ */
 android {
-    namespace = "com.icuas.bussalamanca"
+    namespace = "com.icuas.salbus"
     compileSdk = rootProject.ext.compileSdkVersion
     defaultConfig {
         applicationId "com.icuas.bussalamanca"

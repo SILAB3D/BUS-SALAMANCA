@@ -11,7 +11,7 @@ import {
   MIN_REQUEST_SPACING_MS,
 } from './services/arrivals'
 import { loadNetwork } from './services/network'
-import { checkForUpdate, isNativeAndroid, Updater } from './services/updates'
+import { checkForUpdate, isNativeAndroid, readInstalledVersion, Updater } from './services/updates'
 import { matchSlot, observe } from './services/punctuality'
 import { currentDayType, loadSchedule } from './services/schedule'
 import {
@@ -24,6 +24,7 @@ import {
 } from './services/notifications'
 import {
   addMonitorPass,
+  APP_VERSION_CODE,
   clearLogs,
   enforceActiveLimit,
   formatMinutesClock,
@@ -317,6 +318,18 @@ async function setupUpdates(): Promise<void> {
     return
   }
 
+  // Lo primero: qué versión hay instalada DE VERDAD. Todo lo demás (ofrecer o
+  // no una actualización, y lo que se enseña en Ajustes) cuelga de este número.
+  state.installed = await readInstalledVersion()
+  if (state.installed.versionCode !== APP_VERSION_CODE) {
+    log(
+      'warn',
+      'actualización',
+      `El sistema dice que hay instalada la compilación ${state.installed.versionCode}, y este bundle es el de la ${APP_VERSION_CODE}.`,
+    )
+  }
+  render()
+
   await Updater.addListener('downloadProgress', (payload) => {
     state.update.percent = payload.percent
     render()
@@ -324,30 +337,65 @@ async function setupUpdates(): Promise<void> {
 
   await syncInstallPermission()
 
-  // Una descarga anterior que se quedo sin instalar (permiso denegado, o la
-  // persona salio del dialogo) no se repite: se retoma en «Instalar».
-  try {
-    const pending = await Updater.pendingUpdate()
-    if (pending.ready && pending.path) {
-      state.update.downloadedPath = pending.path
-    }
-  } catch {
-    /* sin descarga previa */
-  }
-
   // Comprobacion del arranque: CALLA sus errores. Sin cobertura, o con GitHub
   // limitando por peticiones, la app tiene que seguir funcionando sin molestar.
   // El precio es que un fallo real se ve igual que «no hay novedades»; para eso
   // esta la comprobacion manual de Ajustes.
   const outcome = await checkForUpdate()
+
   if (outcome.status === 'update') {
     state.update.release = outcome.release
+    // Una descarga anterior solo vale si es EXACTAMENTE la versión que se está
+    // ofreciendo. Antes valía cualquiera: quien había descargado una release y
+    // no la había instalado se encontraba con que «Instalar» le reinstalaba la
+    // vieja, y al abrir la app volvía a ofrecerse la misma actualización.
+    state.update.downloadedPath = await adoptPendingDownload(outcome.release.versionCode)
     state.update.phase = state.update.downloadedPath ? 'ready' : 'available'
-    log('info', 'actualización', `Disponible la versión ${outcome.release.versionName}.`)
+    log(
+      'info',
+      'actualización',
+      `Disponible la versión ${outcome.release.versionName} (compilación ${outcome.release.versionCode}).`,
+    )
     render()
-  } else if (outcome.status === 'error') {
+    return
+  }
+
+  // Sin novedades: cualquier APK guardada ya está instalada o se ha quedado
+  // atrás, y son diez megas de caché que no van a usarse nunca.
+  state.update.downloadedPath = await adoptPendingDownload(null)
+
+  if (outcome.status === 'error') {
     log('warn', 'actualización', outcome.message)
   }
+}
+
+/**
+ * Recupera la descarga guardada si sirve, y la tira si no.
+ *
+ * @param versionCode compilación que se está ofreciendo, o `null` si no hay
+ *   ninguna: entonces no hay descarga que valga.
+ */
+async function adoptPendingDownload(versionCode: number | null): Promise<string | null> {
+  try {
+    const pending = await Updater.pendingUpdate()
+
+    if (pending.ready && pending.path && versionCode !== null && pending.versionCode === versionCode) {
+      return pending.path
+    }
+
+    if (pending.ready) {
+      await Updater.clearPending()
+      log(
+        'info',
+        'actualización',
+        `Se descarta una descarga anterior (compilación ${pending.versionCode}) que ya no corresponde.`,
+      )
+    }
+  } catch {
+    /* sin descarga previa, o el plugin no está disponible */
+  }
+
+  return null
 }
 
 async function syncInstallPermission(): Promise<void> {
@@ -431,13 +479,19 @@ async function checkUpdateManually(): Promise<void> {
 
   if (outcome.status === 'update') {
     state.update.release = outcome.release
+    state.update.downloadedPath = await adoptPendingDownload(outcome.release.versionCode)
     state.update.phase = state.update.downloadedPath ? 'ready' : 'available'
     state.update.dismissed = false
     state.update.manualMessage = {
-      text: `Disponible SALBUS v${outcome.release.versionName}.`,
+      text: `Disponible SALBUS v${outcome.release.versionName} (compilación ${outcome.release.versionCode}).`,
       tone: 'info',
     }
   } else if (outcome.status === 'current') {
+    // La comprobación devuelve el versionCode REAL del sistema; si una
+    // instalación se quedó a medias, aquí se ve el número de siempre.
+    state.update.release = null
+    state.update.phase = 'idle'
+    state.update.downloadedPath = await adoptPendingDownload(null)
     state.update.manualMessage = {
       text: `Ya tienes la última versión (compilación ${outcome.versionCode}).`,
       tone: 'info',

@@ -34,7 +34,8 @@ GitHub Release   tag: v<versionName>-b<versionCode>
       ▼
 La app, al arrancar
       │  1. GET api.github.com/.../releases/latest      (JavaScript, con CORS)
-      │  2. compara versionCode con el suyo
+      │  2. compara el versionCode publicado con el INSTALADO
+      │     (PackageManager, no el número del bundle: ver más abajo)
       │  3. descarga la APK                              (Java, sin CORS)
       │  4. lanza el instalador del sistema
       ▼
@@ -183,6 +184,24 @@ Conviene exponer además `canRequestPackageInstalls()` y un atajo a
 «instalar apps desconocidas» se concede por app y el usuario tiene que darlo una
 vez.
 
+**Qué versión hay instalada: pregúntaselo al sistema.** Lo natural es incrustar
+el `versionCode` en el bundle web y comparar contra él. Es una trampa: ese número
+se queda congelado en cuanto la WebView sirve una copia vieja de la página, y
+entonces la app se ofrece a sí misma, una y otra vez, la actualización que acaba
+de instalar. También da por buena una instalación que el usuario canceló. El
+plugin expone `currentVersion()`, que lee `PackageManager.getPackageInfo()`: eso
+es lo que hay instalado de verdad, pase lo que pase con el bundle.
+
+**La descarga guardada tiene que decir a qué versión pertenece.** Guardar el APK
+en `getCacheDir()` para no repetir la descarga si el usuario aún no ha dado el
+permiso es buena idea, pero un `existe el archivo → está listo` es un error:
+cuando se publica una release nueva, ese archivo es de la anterior. El usuario
+pulsa «Instalar», reinstala lo viejo, y al abrir la app vuelve a ofrecerse la
+misma actualización; parece un bucle sin causa. `getPackageArchiveInfo()` lee el
+`versionCode` del propio APK: si no coincide con el que se está ofreciendo, se
+borra y se descarga otra vez. De paso, un archivo que no se puede leer como APK
+(descarga cortada) se detecta ahí mismo.
+
 ## 5. La trampa del CORS
 
 Este es el error que costó una versión entera de depuración, y el que más
@@ -291,6 +310,8 @@ Ninguno de estos es teórico; todos ocurrieron.
 | `no suitable method found for reject(String,Throwable)` | `PluginCall.reject` de Capacitor acepta `Exception`, no `Throwable` |
 | El `versionCode` sale 1 en CI | Falta `fetch-depth: 0` en el checkout |
 | El aviso sigue pidiendo el permiso ya concedido | El permiso se da fuera de la app; hay que releerlo al volver al primer plano |
+| Tras actualizar, la app ofrece la MISMA actualización | Se comparaba contra el `versionCode` del bundle (congelado si la WebView cachea la página), o se reinstalaba un APK viejo guardado en caché |
+| Dos releases seguidas se llaman igual | El `versionName` sale de `package.json` y nadie lo subió; sólo cambia el `-b<versionCode>`. Enseña la compilación en la interfaz |
 
 Y una recomendación de método: **los logs de Actions exigen autenticación, pero
 las anotaciones de un repositorio público se leen por la API sin credenciales.**

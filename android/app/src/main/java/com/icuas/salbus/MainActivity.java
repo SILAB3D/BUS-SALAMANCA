@@ -1,4 +1,4 @@
-package com.icuas.bussalamanca;
+package com.icuas.salbus;
 
 import android.os.Bundle;
 import com.getcapacitor.BridgeActivity;

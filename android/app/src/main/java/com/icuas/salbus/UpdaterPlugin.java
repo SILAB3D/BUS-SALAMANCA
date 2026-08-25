@@ -1,7 +1,9 @@
-package com.icuas.bussalamanca;
+package com.icuas.salbus;
 
 import android.content.Intent;
+import android.content.pm.PackageInfo;
 import android.net.Uri;
+import android.os.Build;
 import android.provider.Settings;
 
 import androidx.core.content.FileProvider;
@@ -36,6 +38,11 @@ import java.net.URL;
  *
  * Lo que NO puede hacer: instalar en silencio. Eso exige ser device owner o app
  * de sistema. El ultimo paso es siempre un dialogo que la persona confirma.
+ *
+ * Quien manda sobre "que version tengo instalada" es el PackageManager, no un
+ * numero incrustado en el bundle web: ese numero se queda congelado si la
+ * WebView sirve una copia vieja de la pagina, y con el la app se ofrecia a si
+ * misma la actualizacion que acababa de instalar, una y otra vez.
  */
 @CapacitorPlugin(name = "Updater")
 public class UpdaterPlugin extends Plugin {
@@ -62,6 +69,33 @@ public class UpdaterPlugin extends Plugin {
         call.resolve(ret);
     }
 
+    /**
+     * Version realmente instalada, leida del sistema.
+     *
+     * Es la unica fuente fiable: sobrevive a un bundle web cacheado y, si una
+     * instalacion se queda a medias, sigue diciendo la verdad, con lo que la
+     * actualizacion se vuelve a ofrecer en lugar de darse por hecha.
+     */
+    @PluginMethod
+    public void currentVersion(PluginCall call) {
+        JSObject ret = new JSObject();
+
+        try {
+            PackageInfo info = getContext().getPackageManager()
+                .getPackageInfo(getContext().getPackageName(), 0);
+
+            ret.put("versionCode", versionCodeOf(info));
+            ret.put("versionName", info.versionName == null ? "" : info.versionName);
+        } catch (Exception error) {
+            // Imposible en la practica: es su propio paquete. Con 0, la app se
+            // ofreceria cualquier release, que es preferible a no ofrecer nada.
+            ret.put("versionCode", 0L);
+            ret.put("versionName", "");
+        }
+
+        call.resolve(ret);
+    }
+
     @PluginMethod
     public void openInstallSettings(PluginCall call) {
         try {
@@ -75,14 +109,67 @@ public class UpdaterPlugin extends Plugin {
         }
     }
 
-    /** Ruta de una descarga anterior, para no repetirla al recuperar el permiso. */
+    /**
+     * Descarga anterior que quedo sin instalar, para no repetirla al recuperar
+     * el permiso.
+     *
+     * Dice ademas QUE version es ese archivo, leyendola del propio APK. Sin ese
+     * dato, una descarga vieja se daba por buena para cualquier release nueva:
+     * se pulsaba "Instalar", se reinstalaba la version anterior y al abrir la
+     * app volvia a ofrecerse la misma actualizacion. Un archivo que no se puede
+     * leer como APK (una descarga cortada) se borra aqui mismo.
+     */
     @PluginMethod
     public void pendingUpdate(PluginCall call) {
         File apk = new File(getContext().getCacheDir(), APK_NAME);
         JSObject ret = new JSObject();
-        ret.put("ready", apk.exists() && apk.length() > 0);
-        ret.put("path", apk.exists() ? apk.getAbsolutePath() : null);
+
+        if (!apk.exists() || apk.length() == 0) {
+            ret.put("ready", false);
+            ret.put("path", null);
+            ret.put("versionCode", 0L);
+            ret.put("versionName", "");
+            call.resolve(ret);
+            return;
+        }
+
+        PackageInfo info = getContext().getPackageManager()
+            .getPackageArchiveInfo(apk.getAbsolutePath(), 0);
+
+        if (info == null) {
+            // Descarga truncada o corrupta: no sirve para nada y ocupa sitio.
+            apk.delete();
+            ret.put("ready", false);
+            ret.put("path", null);
+            ret.put("versionCode", 0L);
+            ret.put("versionName", "");
+            call.resolve(ret);
+            return;
+        }
+
+        ret.put("ready", true);
+        ret.put("path", apk.getAbsolutePath());
+        ret.put("versionCode", versionCodeOf(info));
+        ret.put("versionName", info.versionName == null ? "" : info.versionName);
         call.resolve(ret);
+    }
+
+    /** Tira la descarga guardada: ya no vale para la version que toca ahora. */
+    @PluginMethod
+    public void clearPending(PluginCall call) {
+        File apk = new File(getContext().getCacheDir(), APK_NAME);
+        if (apk.exists()) {
+            apk.delete();
+        }
+        call.resolve();
+    }
+
+    @SuppressWarnings("deprecation")
+    private static long versionCodeOf(PackageInfo info) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            return info.getLongVersionCode();
+        }
+        return info.versionCode;
     }
 
     @PluginMethod

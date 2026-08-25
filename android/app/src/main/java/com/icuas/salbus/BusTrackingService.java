@@ -1,4 +1,4 @@
-package com.icuas.bussalamanca;
+package com.icuas.salbus;
 
 import android.app.AlarmManager;
 import android.app.Notification;
@@ -67,13 +67,13 @@ import java.util.regex.Pattern;
 public class BusTrackingService extends Service {
 
     /** Sustituye la lista de avisos vivos por la que llega en el intent. */
-    public static final String ACTION_SYNC = "com.icuas.bussalamanca.TRACKING_SYNC";
+    public static final String ACTION_SYNC = "com.icuas.salbus.TRACKING_SYNC";
 
     /** Detiene el servicio entero (lo pide la app, no la persona usuaria). */
-    public static final String ACTION_STOP = "com.icuas.bussalamanca.TRACKING_STOP";
+    public static final String ACTION_STOP = "com.icuas.salbus.TRACKING_STOP";
 
     /** Detiene UN aviso desde el boton de su notificacion. */
-    public static final String ACTION_STOP_JOB = "com.icuas.bussalamanca.TRACKING_STOP_JOB";
+    public static final String ACTION_STOP_JOB = "com.icuas.salbus.TRACKING_STOP_JOB";
 
     /**
      * Despertar programado.
@@ -81,7 +81,7 @@ public class BusTrackingService extends Service {
      * Lo dispara la alarma del sistema cuando toca empezar una franja de
      * puntualidad. NO trae lista de avisos: reanuda con la que ya hay.
      */
-    public static final String ACTION_TICK = "com.icuas.bussalamanca.TRACKING_TICK";
+    public static final String ACTION_TICK = "com.icuas.salbus.TRACKING_TICK";
 
     public static final String EXTRA_JOBS = "jobs";
     public static final String EXTRA_MONITORS = "monitors";

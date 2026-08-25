@@ -25,8 +25,22 @@ public/data/
   network.json             Red oficial generada (27 líneas · 80 sentidos)
   gtfs.zip                 GTFS estático (solo horario teórico)
 android/                   Proyecto nativo, servicio en primer plano incluido
+  app/src/main/java/com/icuas/salbus/
 tools/                     Generadores y comprobaciones
 ```
+
+### El nombre
+
+Todo se llama **SALBUS**: la app, la carpeta del proyecto, `package.json`, el
+paquete de código Java (`com.icuas.salbus`) y el `namespace` de Gradle.
+
+Con **una excepción deliberada**: el `applicationId` de Android sigue siendo
+`com.icuas.bussalamanca` y no puede cambiar nunca. Ese identificador *es* la
+identidad de la app instalada; con otro, el sistema ve una aplicación distinta,
+la instalada deja de tener ruta de actualización, quedan dos iconos y las
+paradas, avisos e historial —que viven en el almacenamiento de ese
+identificador— se quedan en la vieja. Por eso `appId` en `capacitor.config.ts`
+tampoco se toca: Capacitor lo copia tal cual al `applicationId`.
 
 ## Fuentes de información
 
@@ -219,6 +233,23 @@ silueta monocroma **sin fondo**: Android descarta el color y usa solo el canal
 alfa, así que un icono con fondo se vería como un cuadrado blanco.
 
 ## Actualización automática
+
+> **Qué versión tengo instalada lo dice el sistema**, no el número que Vite
+> incrusta en el bundle. Ese número se queda congelado si la WebView sirve una
+> copia vieja de la página, y con él la app se ofrecía a sí misma la
+> actualización que acababa de instalar, en bucle. `Updater.currentVersion()`
+> lee el `PackageManager`, que además delata una instalación que no llegó a
+> completarse en vez de darla por buena.
+>
+> Y una descarga guardada **sólo vale para su versión**: el plugin lee el
+> `versionCode` del propio APK con `getPackageArchiveInfo()`. Antes servía para
+> cualquier release, así que quien tenía un APK a medio instalar de una versión
+> anterior pulsaba «Instalar», reinstalaba la vieja, y volvía a ver el mismo
+> aviso al abrir.
+>
+> El `versionName` sale de `package.json` y no cambia solo: dos releases seguidas
+> pueden llamarse igual. Lo que las distingue siempre es la **compilación**
+> (`-b1012`), y por eso la ventana de aviso y la pantalla de Ajustes la enseñan.
 
 Un `git push` a `main` acaba convertido en una actualización instalada en el
 móvil. El workflow `.github/workflows/release.yml` compila y **firma** la APK,

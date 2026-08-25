@@ -1,4 +1,4 @@
-package com.icuas.bussalamanca;
+package com.icuas.salbus;
 
 import android.content.Context;
 import android.content.Intent;

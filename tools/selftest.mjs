@@ -463,6 +463,9 @@ async function main() {
   check('un versionCode igual no se ofrece', isNewer(parsed, 1010) === false)
   check('un versionCode menor no se ofrece', isNewer(parsed, 1011) === false)
 
+  const mainSourceForUpdates = await fs.readFile(
+    path.join(projectRoot, 'src', 'main.ts'), 'utf8')
+
   // El plugin nativo y el permiso son la otra mitad: sin ellos la app
   // detectaria la actualizacion pero no podria instalarla.
   const manifest = await fs.readFile(
@@ -483,11 +486,37 @@ async function main() {
 
   const mainActivity = await fs.readFile(
     path.join(projectRoot, 'android', 'app', 'src', 'main', 'java', 'com', 'icuas',
-      'bussalamanca', 'MainActivity.java'),
+      'salbus', 'MainActivity.java'),
     'utf8',
   )
   check('UpdaterPlugin esta registrado en MainActivity',
     mainActivity.includes('registerPlugin(UpdaterPlugin.class)'))
+
+  // La version instalada la dice el SISTEMA, no el numero incrustado en el
+  // bundle: ese numero se congela si la WebView sirve una copia vieja de la
+  // pagina, y con el la app se ofrecia a si misma lo que acababa de instalar.
+  const updater = await fs.readFile(
+    path.join(projectRoot, 'android', 'app', 'src', 'main', 'java', 'com', 'icuas',
+      'salbus', 'UpdaterPlugin.java'),
+    'utf8',
+  )
+  const updatesSource = await fs.readFile(
+    path.join(projectRoot, 'src', 'services', 'updates.ts'), 'utf8')
+
+  check('la version instalada se lee del sistema, no del bundle',
+    updater.includes('public void currentVersion(PluginCall call)')
+      && updatesSource.includes('await Updater.currentVersion()')
+      && /const installed = await readInstalledVersion\(\)/.test(updatesSource))
+
+  // Una descarga guardada solo vale para SU version: reutilizarla para otra
+  // reinstalaba la anterior, y al abrir la app volvia a ofrecerse lo mismo.
+  check('la descarga guardada dice a que compilacion pertenece',
+    updater.includes('getPackageArchiveInfo')
+      && updatesSource.includes('pendingUpdate(): Promise<{ ready: boolean, path: string | null } & VersionInfo>'))
+  check('una descarga que no corresponde se tira en vez de instalarse',
+    updater.includes('public void clearPending(PluginCall call)')
+      && mainSourceForUpdates.includes('pending.versionCode === versionCode')
+      && mainSourceForUpdates.includes('await Updater.clearPending()'))
 
   // El runner tiene que cumplir el requisito de Node del CLI de Capacitor. Con
   // una version por debajo, `cap sync` aborta antes de copiar nada y el build
@@ -509,6 +538,33 @@ async function main() {
     `workflow ${workflowNode} · Capacitor exige ${capacitorCli.engines?.node}`)
   check('el workflow clona la historia entera para poder contar los commits',
     workflow.includes('fetch-depth: 0'))
+
+  /* ---------------------------------------------------------------- *
+   * El nombre                                                          *
+   * ---------------------------------------------------------------- */
+
+  // build.gradle ya se leyo arriba, para las comprobaciones del versionCode.
+  const capacitorConfig = await fs.readFile(
+    path.join(projectRoot, 'capacitor.config.ts'), 'utf8')
+  const pkg = JSON.parse(await fs.readFile(path.join(projectRoot, 'package.json'), 'utf8'))
+
+  // El applicationId ES la identidad de la app instalada. Cambiarlo por
+  // com.icuas.salbus dejaria a quien ya la tiene sin ruta de actualizacion y sin
+  // sus paradas guardadas: se veria como una app distinta.
+  check('el applicationId sigue siendo el de la app ya instalada',
+    /applicationId "com\.icuas\.bussalamanca"/.test(gradle)
+      && capacitorConfig.includes("appId: 'com.icuas.bussalamanca'"),
+    'cambiarlo rompe la actualizacion de todo el mundo')
+
+  // El resto del proyecto si se llama SALBUS.
+  check('el codigo nativo vive en el paquete com.icuas.salbus',
+    /namespace = "com\.icuas\.salbus"/.test(gradle)
+      && mainActivity.includes('package com.icuas.salbus;'))
+  check('el nombre de la app es SALBUS en todas partes',
+    pkg.name === 'salbus'
+      && capacitorConfig.includes("appName: 'SALBUS'")
+      && (await fs.readFile(path.join(projectRoot, 'android', 'app', 'src', 'main', 'res',
+        'values', 'strings.xml'), 'utf8')).includes('<string name="app_name">SALBUS</string>'))
 
   // Perder la clave de firma rompe el canal para siempre; publicarla es peor.
   const ignored = await fs.readFile(path.join(projectRoot, '.gitignore'), 'utf8')
@@ -535,7 +591,7 @@ async function main() {
 
   const service = await fs.readFile(
     path.join(projectRoot, 'android', 'app', 'src', 'main', 'java', 'com', 'icuas',
-      'bussalamanca', 'BusTrackingService.java'),
+      'salbus', 'BusTrackingService.java'),
     'utf8',
   )
 
@@ -597,7 +653,7 @@ async function main() {
   // tope diario de horas en Android 15, y esperar despierto lo agotaria.
   const receiver = await fs.readFile(
     path.join(projectRoot, 'android', 'app', 'src', 'main', 'java', 'com', 'icuas',
-      'bussalamanca', 'BusTrackingReceiver.java'),
+      'salbus', 'BusTrackingReceiver.java'),
     'utf8',
   )
   check('el servicio se apaga entre franjas en lugar de esperar despierto',
@@ -605,7 +661,7 @@ async function main() {
       && service.includes('private void goIdle()'))
   check('el despertador esta declarado en el manifiesto',
     manifest.includes('.BusTrackingReceiver')
-      && manifest.includes('com.icuas.bussalamanca.TRACKING_WAKE'))
+      && manifest.includes('com.icuas.salbus.TRACKING_WAKE'))
   check('el despertador vuelve a programarse tras reiniciar el movil',
     receiver.includes('Intent.ACTION_BOOT_COMPLETED')
       && manifest.includes('android.intent.action.BOOT_COMPLETED'))

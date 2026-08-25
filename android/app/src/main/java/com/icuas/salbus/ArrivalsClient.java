@@ -1,4 +1,4 @@
-package com.icuas.bussalamanca;
+package com.icuas.salbus;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;

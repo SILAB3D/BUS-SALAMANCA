@@ -3,7 +3,6 @@ import { currentDayType } from './services/schedule'
 import {
   activeJobCount,
   APP_VERSION,
-  APP_VERSION_CODE,
   ARRIVALS_PREVIEW,
   favouriteLabel,
   formatMinutesClock,
@@ -253,7 +252,8 @@ function renderUpdateDialog(): string {
         ${icon('refresh')}
         <div class="update-copy">
           <strong>Hay una versión nueva</strong>
-          <span>SALBUS v${esc(update.release.versionName)} · tienes la ${esc(APP_VERSION)}</span>
+          <span>SALBUS v${esc(update.release.versionName)} · compilación ${update.release.versionCode}</span>
+          <span>Tienes la v${esc(state.installed.versionName)} · compilación ${state.installed.versionCode}</span>
         </div>
         <button class="mini-btn" type="button" data-action="dismiss-update" aria-label="Ahora no" ${
           busy ? 'disabled' : ''
@@ -1499,7 +1499,7 @@ function renderUpdateCard(): string {
       </div></div>
       <div class="card-body">
         <dl class="kv">
-          <dt>Versión instalada</dt><dd>${esc(APP_VERSION)} · compilación ${APP_VERSION_CODE}</dd>
+          <dt>Versión instalada</dt><dd>v${esc(state.installed.versionName)} · compilación ${state.installed.versionCode}</dd>
           <dt>Instalar apps desconocidas</dt><dd>${update.canInstall ? 'concedido' : 'sin conceder'}</dd>
         </dl>
         ${message ? notice(message.tone, message.text) : ''}

@@ -26,10 +26,21 @@ const RELEASES_URL = `https://api.github.com/repos/${REPO}/releases/latest`
 /** Sin cobertura, la consulta se queda colgada y el arranque no debe esperarla. */
 const CHECK_TIMEOUT_MS = 12_000
 
+/** Version de la app: la instalada, o la del archivo que espera para instalarse. */
+export interface VersionInfo {
+  versionName: string
+  versionCode: number
+}
+
 export interface UpdaterPlugin {
   canInstall(): Promise<{ granted: boolean }>
   openInstallSettings(): Promise<void>
-  pendingUpdate(): Promise<{ ready: boolean, path: string | null }>
+  /** Lo que dice el sistema que hay instalado, no lo que crea el bundle web. */
+  currentVersion(): Promise<VersionInfo>
+  /** `versionCode` es el del APK descargado, leído del propio archivo. */
+  pendingUpdate(): Promise<{ ready: boolean, path: string | null } & VersionInfo>
+  /** Tira la descarga guardada cuando ya no sirve. */
+  clearPending(): Promise<void>
   download(options: { url: string }): Promise<{ path: string, bytes: number }>
   install(options: { path: string }): Promise<void>
   addListener(
@@ -51,12 +62,39 @@ export function isNativeAndroid(): boolean {
 }
 
 /**
- * versionCode de esta compilacion. Se lee de forma perezosa del global que
- * inyecta Vite para que el modulo tambien se pueda importar fuera del bundle,
- * donde ese global no existe.
+ * Version de esta compilacion segun el bundle. Se lee de forma perezosa del
+ * global que inyecta Vite para que el modulo tambien se pueda importar fuera del
+ * bundle, donde ese global no existe.
  */
-function installedVersionCode(): number {
-  return typeof __APP_VERSION_CODE__ === 'number' ? __APP_VERSION_CODE__ : 0
+function bundledVersion(): VersionInfo {
+  return {
+    versionName: typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '0.0.0',
+    versionCode: typeof __APP_VERSION_CODE__ === 'number' ? __APP_VERSION_CODE__ : 0,
+  }
+}
+
+/**
+ * Que version hay instalada DE VERDAD.
+ *
+ * En Android lo dice el sistema, no el numero incrustado en el bundle: ese
+ * numero se queda congelado si la WebView sirve una copia vieja de la pagina, y
+ * con el la app se ofrecia a si misma la actualizacion que acababa de instalar.
+ * Tambien delata una instalacion que no llego a completarse, en vez de darla por
+ * buena.
+ */
+export async function readInstalledVersion(): Promise<VersionInfo> {
+  if (!isNativeAndroid()) {
+    return bundledVersion()
+  }
+
+  try {
+    const current = await Updater.currentVersion()
+    // Un 0 solo puede venir de un fallo al consultar al sistema; el numero del
+    // bundle es entonces la mejor aproximacion disponible.
+    return current.versionCode > 0 ? current : bundledVersion()
+  } catch {
+    return bundledVersion()
+  }
 }
 
 /**
@@ -104,8 +142,10 @@ export async function checkForUpdate(): Promise<CheckOutcome> {
       return { status: 'error', message: 'La última publicación no trae ninguna APK utilizable' }
     }
 
-    if (!isNewer(release, installedVersionCode())) {
-      return { status: 'current', versionCode: installedVersionCode() }
+    const installed = await readInstalledVersion()
+
+    if (!isNewer(release, installed.versionCode)) {
+      return { status: 'current', versionCode: installed.versionCode }
     }
 
     return { status: 'update', release }
