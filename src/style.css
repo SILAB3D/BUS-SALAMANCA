@@ -413,9 +413,13 @@ p {
 
 /* Navegación inferior --------------------------------------------- */
 
+/* Las columnas se reparten entre las pestanas que haya: con la pestana
+   experimental encendida son cinco, y fijarlas en cuatro tiraba la quinta a una
+   segunda fila que tapaba media pantalla. */
 .tabbar {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
   gap: 2px;
   padding: 6px 4px calc(var(--safe-bottom) + 6px);
   background: var(--surface);
@@ -510,13 +514,19 @@ button.card-head {
   gap: 2px;
 }
 
+/* Cuando el titulo de una tarjeta es el nombre de una parada (guardadas,
+   avisos, seguimiento, puntualidad), ese nombre NO se recorta: un tercio de las paradas de Salamanca pasa de 24 caracteres, y
+   "C/ Licenciado Vidriera, s/n (Frente residencia)" y "…(Junto Residencia)" se
+   quedaban en el mismo "C/ Licenciado Vidriera, s/n (Fr…". Son dos paradas
+   distintas, en aceras distintas. Vale mas una tarjeta de tres lineas que
+   plantarse en la parada equivocada. */
 .card-title {
   font-size: 16px;
   font-weight: 700;
   line-height: 1.25;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  /* Un nombre sin espacios mas ancho que la tarjeta se parte igualmente en vez
+     de desbordarla. */
+  overflow-wrap: anywhere;
 }
 
 .card-sub {
@@ -542,7 +552,9 @@ button.card-head {
   display: none;
 }
 
-/* En la tarjeta de puntualidad el subtitulo lleva franja y sentido: cabe en dos lineas. */
+/* Subtitulos que son texto y no caben en una linea: la franja y el sentido de
+   un control de puntualidad, y el nombre oficial de una parada renombrada, que
+   es justo el dato que dice CUAL es. */
 .card-sub.is-wrap {
   white-space: normal;
   overflow: visible;
@@ -2396,4 +2408,420 @@ button.card-head {
 .map-expand:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+
+/* ==================================================================
+   Pestaña Mapas (experimental)
+   ==================================================================
+   Todo lo de aquí cuelga de clases propias y nada reescribe reglas
+   compartidas: apagada la pestaña, estas reglas no se aplican a nada. */
+
+/* Aviso de que esto está en pruebas. Se lee una vez y no vuelve a mirarse,
+   así que ocupa poco y no compite con el contenido. */
+.lab-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--r-md);
+  border: 1px dashed var(--border-strong);
+  background: var(--surface-2);
+  color: var(--text-2);
+}
+
+.lab-banner svg {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  margin-top: 1px;
+  color: var(--brand-500);
+}
+
+.lab-banner strong {
+  display: block;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.lab-banner span {
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+/* El icono dentro del selector de modo: el texto solo no distingue bien
+   "paradas cercanas" de "rutas" de un vistazo. */
+.segmented-item svg {
+  width: 17px;
+  height: 17px;
+  margin-right: 6px;
+  vertical-align: -3px;
+}
+
+.maps-shell {
+  height: 42dvh;
+  min-height: 240px;
+}
+
+.maps-shell #maps-map {
+  height: 100%;
+  width: 100%;
+}
+
+/* Botón de centrar en mi ubicación, sobre el mapa y lejos del zoom, que vive
+   abajo a la izquierda. */
+.map-locate {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 1000;
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--r-full);
+  background: var(--surface);
+  color: var(--brand-500);
+  box-shadow: var(--shadow-2);
+  cursor: pointer;
+}
+
+.map-locate svg {
+  width: 22px;
+  height: 22px;
+}
+
+.map-locate.is-busy svg {
+  animation: spin 1.1s linear infinite;
+}
+
+/* "Estás aquí": punto azul con un halo que late. Es el lenguaje que todo el
+   mundo ya conoce de cualquier mapa, así que no hay que explicarlo. */
+.map-me {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+}
+
+.map-me::before {
+  content: "";
+  position: absolute;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--r-full);
+  background: rgba(31, 111, 235, 0.28);
+  animation: pulse-me 2s ease-out infinite;
+}
+
+.map-me-dot {
+  position: relative;
+  width: 14px;
+  height: 14px;
+  border-radius: var(--r-full);
+  background: #1f6feb;
+  border: 2.5px solid #fff;
+  box-shadow: 0 1px 4px rgba(6, 12, 26, 0.5);
+}
+
+@keyframes pulse-me {
+  0% {
+    transform: scale(0.5);
+    opacity: 0.9;
+  }
+  100% {
+    transform: scale(1.6);
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .map-me::before {
+    animation: none;
+    opacity: 0.35;
+  }
+}
+
+/* Las teselas de OpenStreetMap son SIEMPRE claras, también con la aplicación en
+   modo oscuro. Por eso lo que va encima del mapa lleva colores fijos y no los
+   tokens del tema: con var(--surface) las chinchetas salían azul oscuro sobre
+   azul oscuro y no se leía el número. */
+.map-near {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--r-full);
+  background: #fff;
+  border: 2.5px solid #1e4fd8;
+  color: #12306f;
+  font-size: 13.5px;
+  font-weight: 800;
+  box-shadow: 0 2px 8px rgba(6, 12, 26, 0.35);
+}
+
+/* La más cercana es la respuesta a la pregunta que se estaba haciendo: va
+   maciza y algo más grande para que se distinga sin leer el número. */
+.map-near.is-first {
+  background: #1e4fd8;
+  color: #fff;
+  transform: scale(1.14);
+}
+
+/* Extremos de una ruta: salida hueca, llegada maciza. */
+.map-end {
+  display: block;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--r-full);
+  border: 4px solid #1e4fd8;
+  background: #fff;
+  box-shadow: 0 2px 8px rgba(6, 12, 26, 0.35);
+}
+
+.map-end.is-destination {
+  border-color: #10203f;
+  background: #10203f;
+}
+
+/* Subida y bajada del autobús, del color de su línea. */
+.map-stopdot {
+  display: block;
+  width: 18px;
+  height: 18px;
+  border-radius: var(--r-full);
+  background: #fff;
+  border: 4px solid var(--dot, #1e4fd8);
+  box-shadow: 0 1px 5px rgba(6, 12, 26, 0.3);
+}
+
+.map-stopdot.is-alight {
+  background: var(--dot, #1e4fd8);
+}
+
+/* ---- Lista de paradas cercanas ---- */
+
+.nearby-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.nearby-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.nearby-item:hover {
+  border-color: var(--border-strong);
+}
+
+.nearby-rank {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--r-full);
+  background: var(--brand-500);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.nearby-copy {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+/* Igual que en las tarjetas: el nombre de una parada NO se recorta, que es
+   justo lo que hace confundir dos aceras de la misma calle. */
+.nearby-name {
+  font-size: 14.5px;
+  font-weight: 650;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.nearby-meta {
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+
+.nearby-item > svg {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  color: var(--text-3);
+}
+
+/* ---- Formulario de ruta ---- */
+
+.route-form {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.route-field {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.route-field-dot {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border-radius: var(--r-full);
+  border: 3px solid var(--brand-500);
+}
+
+.route-field-dot.is-end {
+  border-color: var(--text);
+  background: var(--text);
+}
+
+.route-field-copy {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.route-field-label {
+  font-size: 11.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-3);
+}
+
+.route-field-value {
+  font-size: 14.5px;
+  font-weight: 620;
+  overflow-wrap: anywhere;
+}
+
+.route-field-value.is-empty {
+  font-weight: 500;
+  color: var(--text-3);
+}
+
+.route-field > svg {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  color: var(--text-3);
+}
+
+/* El botón de intercambiar se monta sobre la costura de los dos campos: es
+   donde se espera encontrarlo y no roba una fila entera. */
+.route-swap {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 2;
+  background: var(--surface);
+}
+
+/* ---- Itinerario ---- */
+
+.itinerary.is-best {
+  border-color: var(--brand-500);
+}
+
+.itinerary-lines {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  max-width: 45%;
+}
+
+.itinerary-legs {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.leg {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 8px 0;
+}
+
+/* Línea vertical que une los tramos: sin ella son cuatro filas sueltas, y con
+   ella se lee como un trayecto de principio a fin. */
+.leg + .leg {
+  border-top: 1px solid var(--border);
+}
+
+.leg-mark {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  min-height: 34px;
+}
+
+.leg.is-walk .leg-mark {
+  color: var(--text-3);
+}
+
+.leg.is-walk .leg-mark svg {
+  width: 20px;
+  height: 20px;
+}
+
+.leg-copy {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.leg-copy strong {
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.leg-copy span {
+  font-size: 12.5px;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.leg-meta {
+  color: var(--text-3) !important;
+  font-size: 12px !important;
 }

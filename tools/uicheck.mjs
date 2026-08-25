@@ -125,14 +125,20 @@ async function main() {
     })
 
     if (args.includes('--seed')) {
-      // Paradas reales muy transitadas, para ver la interfaz con datos de verdad.
+      // Paradas reales muy transitadas, para ver la interfaz con datos de
+      // verdad. La 350 esta ahi por su nombre: es el mas largo de la red
+      // ("C/ Licenciado Vidriera, s/n (Frente residencia)", 47 caracteres) y
+      // solo se distingue de la 344 por el final, asi que es el caso que dice
+      // si la tarjeta esta recortando nombres.
       await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
         source: `
           localStorage.setItem('salbus.tourVersion', '${appVersion}');
           localStorage.setItem('salbus.favourites', JSON.stringify([
             { stopId: '222', alias: null, addedAt: Date.now() },
             { stopId: '301', alias: 'Casa', addedAt: Date.now() },
-            { stopId: '36', alias: null, addedAt: Date.now() }
+            { stopId: '36', alias: null, addedAt: Date.now() },
+            { stopId: '350', alias: null, addedAt: Date.now() },
+            { stopId: '344', alias: 'Trabajo', addedAt: Date.now() }
           ]));
           localStorage.setItem('salbus.follows', JSON.stringify([
             { id: '222|4|4|dos', stopId: '222', stopName: 'C/ Gran Vía, 38',

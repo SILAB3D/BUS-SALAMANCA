@@ -2,6 +2,7 @@ import type { Network } from './services/network'
 import { averageMinutes } from './services/punctuality'
 import type { MonitorRuntime } from './services/punctuality'
 import type { ReleaseInfo } from './services/release-parser'
+import type { GeoPoint, PlanOutcome } from './services/routing'
 import type { ScheduleDataset, ServiceDayType, StopFeed } from './types'
 
 /** Version con la que se COMPILO este bundle. Sale de package.json via Vite. */
@@ -10,7 +11,7 @@ export const APP_VERSION = `v${__APP_VERSION__}`
 /** versionCode de esta compilacion, segun el bundle. */
 export const APP_VERSION_CODE = __APP_VERSION_CODE__
 
-export type TabId = 'inicio' | 'buscar' | 'monitor' | 'seguimiento' | 'ajustes'
+export type TabId = 'inicio' | 'buscar' | 'monitor' | 'seguimiento' | 'mapas' | 'ajustes'
 export type SearchMode = 'nombre' | 'linea' | 'mapa'
 export type PermissionState = 'granted' | 'denied' | 'unknown'
 
@@ -249,6 +250,8 @@ export interface AppState {
 
   settings: AppSettings
 
+  maps: MapsState
+
   tour: TourState
 
   /**
@@ -264,6 +267,66 @@ export interface AppState {
   update: UpdateState
 
   logs: LogEntry[]
+}
+
+/* ------------------------------------------------------------------ *
+ * Pestana experimental "Mapas"                                         *
+ * ------------------------------------------------------------------ */
+
+/** Un extremo de la ruta: donde estoy, o una parada elegida a mano. */
+export interface RoutePoint {
+  kind: 'location' | 'stop'
+  label: string
+  lat: number
+  lon: number
+  /** Solo cuando el punto ES una parada de la red. */
+  stopId?: string
+}
+
+export type MapsMode = 'cercanas' | 'rutas'
+
+/**
+ * Todo lo de la pestana experimental vive aqui dentro y NO se guarda en disco.
+ *
+ * Que sea efimero es deliberado: una ubicacion es del momento en que se pidio,
+ * y arrancar la app con una posicion de ayer marcada en el mapa enganaria. Al
+ * cerrar la pestana se vacia (resetMaps), asi que apagada no ocupa ni memoria.
+ */
+export interface MapsState {
+  mode: MapsMode
+
+  /** Ultima ubicacion conocida, con su margen de error en metros. */
+  location: { point: GeoPoint, accuracy: number, at: number } | null
+  locating: boolean
+  /** Motivo por el que no hay ubicacion, ya redactado para leerse en pantalla. */
+  locationError: string | null
+
+  origin: RoutePoint | null
+  destination: RoutePoint | null
+  /** Campo que se esta rellenando; con null no hay buscador abierto. */
+  picking: 'origin' | 'destination' | null
+  query: string
+
+  plan: PlanOutcome | null
+  planning: boolean
+  /** Tramo del itinerario resaltado en el mapa. */
+  focusedLeg: number | null
+}
+
+export function emptyMapsState(): MapsState {
+  return {
+    mode: 'cercanas',
+    location: null,
+    locating: false,
+    locationError: null,
+    origin: null,
+    destination: null,
+    picking: null,
+    query: '',
+    plan: null,
+    planning: false,
+    focusedLeg: null,
+  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -285,11 +348,22 @@ export interface AppSettings {
    * subido al primero.
    */
   trackingBusTarget: number
+
+  /**
+   * Pestana experimental "Mapas" (paradas cercanas y rutas).
+   *
+   * Apagada por defecto y apagada de verdad: con este ajuste en false la
+   * pestana no existe, no se pide la ubicacion, no se crea ningun mapa y no se
+   * calcula nada. Lo experimental no puede robarle recursos —ni turno en la
+   * cola de consultas— a lo que ya funciona.
+   */
+  experimentalMaps: boolean
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
   vibrateOnApproach: true,
   trackingBusTarget: 1,
+  experimentalMaps: false,
 }
 
 /* ------------------------------------------------------------------ *
@@ -426,6 +500,8 @@ export const state: AppState = {
   },
 
   settings: readSettings(),
+
+  maps: emptyMapsState(),
 
   // El tour se abre solo la primera vez que se arranca cada version nueva.
   tour: { open: readTourVersion() !== APP_VERSION, step: 0 },
@@ -796,6 +872,9 @@ function writeJson(key: string, value: unknown): void {
 }
 
 function readTab(): TabId {
+  // "mapas" NO esta en la lista: es experimental y puede estar apagada. Quien la
+  // tuviera abierta al cerrar la app vuelve a Inicio, en vez de aterrizar en una
+  // pestana que ya no existe.
   const valid: TabId[] = ['inicio', 'buscar', 'monitor', 'seguimiento', 'ajustes']
   try {
     // "paradas" existio hasta la v4.4 como pestaña propia; ahora vive dentro de

@@ -1,4 +1,11 @@
 import { getClientHealth, MIN_REQUEST_SPACING_MS } from './services/arrivals'
+import {
+  nearestStops,
+  type BusLeg,
+  type Itinerary,
+  type NearbyStop,
+  type RouteLeg,
+} from './services/routing'
 import { currentDayType } from './services/schedule'
 import {
   activeJobCount,
@@ -18,6 +25,7 @@ import {
   TRACKING_WARN_MINUTES,
   type MonitorJob,
   type MonitorRow,
+  type RoutePoint,
   type TabId,
   type TrackingJob,
 } from './state'
@@ -107,12 +115,28 @@ const TABS: TabDefinition[] = [
   { id: 'monitor', label: 'Puntualidad', iconName: 'chart' },
 ]
 
+/**
+ * Pestañas que se ven ahora mismo.
+ *
+ * "Mapas" es experimental y solo aparece si se enciende en Ajustes. Apagada no
+ * se dibuja, no ocupa sitio en la barra y no puede abrirse: es la garantía de
+ * que lo experimental no estorba a quien no lo ha pedido.
+ */
+function visibleTabs(): TabDefinition[] {
+  if (!state.settings.experimentalMaps) {
+    return TABS
+  }
+
+  return [...TABS, { id: 'mapas', label: 'Mapas', iconName: 'map' }]
+}
+
 /** Ajustes no esta en la barra, pero su pantalla tambien necesita titulo. */
 const TAB_TITLES: Record<TabId, string> = {
   inicio: 'Inicio',
   buscar: 'Buscar',
   seguimiento: 'Seguir',
   monitor: 'Puntualidad',
+  mapas: 'Mapas',
   ajustes: 'Ajustes',
 }
 
@@ -171,7 +195,7 @@ function renderTabbar(): string {
 
   return `
     <nav class="tabbar" aria-label="Secciones">
-      ${TABS.map((tab) => {
+      ${visibleTabs().map((tab) => {
         const isCurrent = tab.id === state.tab
         const dot = tab.id === 'seguimiento' && trackingActive ? '<span class="tab-dot"></span>' : ''
         return `
@@ -211,6 +235,10 @@ function renderScreen(): string {
       return renderSeguimiento()
     case 'monitor':
       return renderMonitor()
+    case 'mapas':
+      // Apagada en Ajustes no hay pantalla que enseñar, ni aunque se llegue
+      // aquí por una pestaña guardada de antes.
+      return state.settings.experimentalMaps ? renderMapas() : renderInicio()
     case 'ajustes':
       return renderAjustes()
     default:
@@ -780,7 +808,7 @@ function renderFavouriteCard(stopId: string): string {
           <span class="stop-code">${esc(stopId)}</span>
           <span class="card-head-copy">
             <span class="card-title">${esc(label)}</span>
-            <span class="card-sub${expanded ? '' : ' is-chips'}">${
+            <span class="card-sub${expanded ? ' is-wrap' : ' is-chips'}">${
               expanded
                 ? esc(official)
                 : lines
@@ -1366,7 +1394,403 @@ function renderTour(): string {
 }
 
 /* ================================================================== *
- * 6 · AJUSTES                                                         *
+ * 6 · MAPAS (experimental)                                            *
+ * ================================================================== */
+
+/**
+ * Pestaña experimental: paradas cercanas y rutas.
+ *
+ * Vive aparte del resto a propósito. No consulta la fuente oficial de llegadas
+ * (esa fuente limita por IP y su cola es para el aviso de próximo bus), no
+ * guarda nada en disco y no toca el estado de ninguna otra pantalla. Lo único
+ * que comparte es la red de líneas ya cargada y la ficha de parada.
+ */
+function renderMapas(): string {
+  const maps = state.maps
+
+  return `
+    <div class="lab-banner">
+        ${icon('info')}
+        <div>
+          <strong>Función experimental</strong>
+          <span>Los tiempos de ruta son estimaciones a partir del recorrido oficial, no horarios en firme.</span>
+        </div>
+      </div>
+
+      <div class="segmented" role="tablist" aria-label="Modo del mapa">
+        ${[
+          { id: 'cercanas', label: 'Paradas cercanas', iconName: 'pin' },
+          { id: 'rutas', label: 'Rutas', iconName: 'route' },
+        ]
+          .map(
+            (item) => `
+              <button
+                class="segmented-item"
+                type="button"
+                role="tab"
+                aria-selected="${maps.mode === item.id}"
+                data-action="maps-mode"
+                data-mode="${item.id}"
+              >${icon(item.iconName)}<span>${esc(item.label)}</span></button>
+            `,
+          )
+          .join('')}
+      </div>
+
+      <div class="map-shell maps-shell">
+        <!-- data-morph="skip": dentro manda Leaflet. Sin esto, el repintado
+             incremental le borraba los hijos en cada latido del reloj y el mapa
+             se quedaba en un rectangulo vacio. -->
+        <div id="maps-map" data-morph="skip"></div>
+        ${
+          maps.mode === 'cercanas'
+            ? `<button class="map-locate${maps.locating ? ' is-busy' : ''}" type="button"
+                 data-action="maps-locate" aria-label="Centrar en mi ubicación">
+                 ${icon('crosshair')}
+               </button>`
+            : ''
+        }
+      </div>
+
+    ${maps.mode === 'cercanas' ? renderNearbyPanel() : renderRoutePanel()}
+  `
+}
+
+/* ------------------------------ Cercanas ------------------------------ */
+
+function renderNearbyPanel(): string {
+  const maps = state.maps
+
+  if (maps.locating && !maps.location) {
+    return `
+      <section class="card"><div class="card-body">
+        <div class="skeleton skeleton-row"></div>
+        <div class="skeleton skeleton-row"></div>
+        <p class="text-tiny">Buscando tu ubicación…</p>
+      </div></section>
+    `
+  }
+
+  if (!maps.location) {
+    return `
+      <section class="card"><div class="card-body">
+        ${
+          maps.locationError
+            ? notice('error', maps.locationError)
+            : `<p class="card-sub is-wrap">Para enseñarte las paradas que tienes al lado, la aplicación
+                 necesita saber dónde estás. La ubicación no sale del teléfono ni se guarda.</p>`
+        }
+        <button class="btn btn-primary btn-block" type="button" data-action="maps-locate">
+          ${icon('crosshair')} Usar mi ubicación
+        </button>
+      </div></section>
+    `
+  }
+
+  const nearby = nearestStopsForView()
+
+  if (nearby.length === 0) {
+    return `
+      <section class="card"><div class="card-body">
+        ${emptyState(
+          'pin',
+          'Ninguna parada cerca',
+          'No hay paradas de la red a menos de 900 m de donde estás.',
+        )}
+      </div></section>
+    `
+  }
+
+  return `
+    <section class="card">
+      <div class="card-head"><div class="card-head-copy">
+        <h2 class="card-title">Paradas más cercanas</h2>
+        <p class="card-sub">${esc(locationAgeLabel())}</p>
+      </div></div>
+      <div class="card-body">
+        <div class="nearby-list">
+          ${nearby
+            .map((entry, index) => {
+              const lines = state.network?.getLinesForStop(entry.stop.stopId) ?? []
+              return `
+                <button class="nearby-item" type="button" data-action="maps-open-stop" data-stop="${esc(
+                  entry.stop.stopId,
+                )}">
+                  <span class="nearby-rank">${index + 1}</span>
+                  <span class="nearby-copy">
+                    <span class="nearby-name">${esc(entry.stop.stopName)}</span>
+                    <span class="nearby-meta">${esc(formatMeters(entry.meters))} · ${esc(
+                      formatWalk(entry.minutes),
+                    )} andando</span>
+                    <span class="chip-row">
+                      ${lines
+                        .slice(0, 8)
+                        .map((line) => lineChip(line.lineId, line.color, 'sm'))
+                        .join('')}
+                    </span>
+                  </span>
+                  ${icon('chevron')}
+                </button>
+              `
+            })
+            .join('')}
+        </div>
+      </div>
+    </section>
+  `
+}
+
+/* -------------------------------- Rutas ------------------------------- */
+
+function renderRoutePanel(): string {
+  const maps = state.maps
+
+  if (maps.picking) {
+    return renderRoutePicker(maps.picking)
+  }
+
+  return `
+    <section class="card">
+      <div class="card-body">
+        <div class="route-form">
+          ${renderRouteField('origin', 'Desde', maps.origin)}
+          <button class="mini-btn route-swap" type="button" data-action="maps-swap"
+            aria-label="Intercambiar origen y destino">${icon('swap')}</button>
+          ${renderRouteField('destination', 'Hasta', maps.destination)}
+        </div>
+
+        <button
+          class="btn btn-primary btn-block"
+          type="button"
+          data-action="maps-plan"
+          ${!maps.origin || !maps.destination || maps.planning ? 'disabled' : ''}
+        >${icon('route')} ${maps.planning ? 'Calculando…' : 'Calcular ruta'}</button>
+      </div>
+    </section>
+
+    ${renderPlanResult()}
+  `
+}
+
+function renderRouteField(field: 'origin' | 'destination', label: string, point: RoutePoint | null): string {
+  return `
+    <button class="route-field" type="button" data-action="maps-pick" data-field="${field}">
+      <span class="route-field-dot${field === 'destination' ? ' is-end' : ''}"></span>
+      <span class="route-field-copy">
+        <span class="route-field-label">${esc(label)}</span>
+        <span class="route-field-value${point ? '' : ' is-empty'}">${esc(
+          point ? point.label : 'Elegir en la lista de paradas',
+        )}</span>
+      </span>
+      ${icon('chevron')}
+    </button>
+  `
+}
+
+/**
+ * Buscador de un extremo de la ruta.
+ *
+ * Se abre DENTRO de la pestaña y no en la hoja inferior compartida: así esta
+ * función experimental no toca la maquinaria que usan el resto de pantallas.
+ */
+function renderRoutePicker(field: 'origin' | 'destination'): string {
+  const results = state.network?.findStops(state.maps.query, 25) ?? []
+
+  return `
+    <section class="card">
+      <div class="card-head">
+        <div class="card-head-copy">
+          <h2 class="card-title">${field === 'origin' ? 'Punto de salida' : 'Punto de llegada'}</h2>
+          <p class="card-sub">Tu ubicación o una parada de la red</p>
+        </div>
+        <button class="mini-btn" type="button" data-action="maps-pick-cancel" aria-label="Cerrar">
+          ${icon('close')}
+        </button>
+      </div>
+      <div class="card-body">
+        <button class="btn btn-secondary btn-block" type="button" data-action="maps-pick-here">
+          ${icon('crosshair')} Mi ubicación
+        </button>
+
+        <input
+          class="input"
+          id="maps-query"
+          type="search"
+          placeholder="Buscar una parada por su nombre"
+          value="${esc(state.maps.query)}"
+          autocomplete="off"
+        />
+
+        <div class="result-list">
+          ${
+            results.length === 0
+              ? emptyState('search', 'Sin resultados', 'Ninguna parada coincide con lo que has escrito.')
+              : results
+                  .map(
+                    (stop) => `
+                      <button class="result-item" type="button" data-action="maps-pick-stop" data-stop="${esc(
+                        stop.stopId,
+                      )}">
+                        <span class="stop-code">${esc(stop.stopId)}</span>
+                        <span class="result-copy">
+                          <span class="result-name is-wrap">${esc(stop.stopName)}</span>
+                        </span>
+                        ${icon('chevron')}
+                      </button>
+                    `,
+                  )
+                  .join('')
+          }
+        </div>
+      </div>
+    </section>
+  `
+}
+
+function renderPlanResult(): string {
+  const plan = state.maps.plan
+
+  if (!plan) {
+    return ''
+  }
+
+  if (plan.status === 'unreachable') {
+    return `<section class="card"><div class="card-body">${notice('warn', plan.reason)}</div></section>`
+  }
+
+  if (plan.status === 'walk') {
+    return `
+      <section class="card">
+        <div class="card-head"><div class="card-head-copy">
+          <h2 class="card-title">Se llega antes andando</h2>
+          <p class="card-sub">${esc(formatWalk(plan.walking.totalMinutes))} · ${esc(
+            formatMeters(walkingMeters(plan.walking)),
+          )}</p>
+        </div></div>
+        <div class="card-body">
+          <p class="text-tiny">Ningún autobús te deja antes que tus pies para esa distancia.</p>
+        </div>
+      </section>
+    `
+  }
+
+  return `
+    <div id="ruta-resultado" class="stack-sm">
+      ${renderItinerary(plan.best, true)}
+      ${plan.alternatives.map((itinerary) => renderItinerary(itinerary, false)).join('')}
+    </div>
+  `
+}
+
+function renderItinerary(itinerary: Itinerary, best: boolean): string {
+  const lines = itinerary.legs.filter((leg): leg is BusLeg => leg.kind === 'bus')
+
+  return `
+    <section class="card itinerary${best ? ' is-best' : ''}">
+      <div class="card-head">
+        <div class="card-head-copy">
+          <h2 class="card-title">${esc(formatWalk(itinerary.totalMinutes))}${
+            best ? ' · la más rápida' : ''
+          }</h2>
+          <p class="card-sub is-wrap">${esc(
+            `${itinerary.transfers === 0 ? 'Sin transbordos' : itinerary.transfers === 1 ? 'Un transbordo' : `${itinerary.transfers} transbordos`} · ${formatWalk(
+              itinerary.walkMinutes,
+            )} a pie · espera ${formatWalk(itinerary.waitMinutes)}`,
+          )}</p>
+        </div>
+        <span class="itinerary-lines">
+          ${lines.map((leg) => lineChip(leg.lineId, lineColor(leg.lineId), 'sm')).join('')}
+        </span>
+      </div>
+      <div class="card-body">
+        <ol class="itinerary-legs">
+          ${itinerary.legs.map((leg, index) => renderLeg(leg, index)).join('')}
+        </ol>
+      </div>
+    </section>
+  `
+}
+
+function renderLeg(leg: RouteLeg, index: number): string {
+  if (leg.kind === 'walk') {
+    // Un transbordo de treinta metros no es "andar", es cruzar; decirlo así
+    // evita que parezca una caminata y, sobre todo, deja claro que la parada
+    // de subida NO es la misma en la que te has bajado.
+    const verb = leg.meters < 80 ? 'Cruzar a' : 'Andar hasta'
+
+    return `
+      <li class="leg is-walk">
+        <span class="leg-mark">${icon('walk')}</span>
+        <div class="leg-copy">
+          <strong>${esc(verb)} ${esc(leg.toName)}</strong>
+          <span>${esc(formatMeters(leg.meters))} · ${esc(formatWalk(leg.minutes))}</span>
+        </div>
+      </li>
+    `
+  }
+
+  const color = lineColor(leg.lineId)
+
+  return `
+    <li class="leg is-bus">
+      <span class="leg-mark" style="--leg:${esc(color)}">${lineChip(leg.lineId, color, 'sm')}</span>
+      <div class="leg-copy">
+        <strong>Hacia ${esc(leg.headsign)}</strong>
+        <span>Sube en ${esc(leg.from.stopName)}</span>
+        <span>Baja en ${esc(leg.to.stopName)}</span>
+        <span class="leg-meta">${leg.stops.length - 1} paradas · ${esc(
+          formatWalk(leg.minutes),
+        )} · espera ~${esc(formatWalk(leg.waitMinutes))}</span>
+      </div>
+      <button class="mini-btn" type="button" data-action="maps-focus-leg" data-leg="${index}"
+        aria-label="Ver este tramo en el mapa">${icon('eye')}</button>
+    </li>
+  `
+}
+
+/* ---------------------------- Ayudas de la pestaña -------------------- */
+
+export function nearestStopsForView(): NearbyStop[] {
+  const location = state.maps.location
+  if (!location || !state.network) {
+    return []
+  }
+
+  return nearestStops(location.point, state.network.stops, 6)
+}
+
+function locationAgeLabel(): string {
+  const location = state.maps.location
+  if (!location) {
+    return ''
+  }
+
+  const accuracy = Number.isFinite(location.accuracy) ? Math.round(location.accuracy) : null
+  return accuracy ? `Precisión aproximada de ${accuracy} m` : 'Ubicación aproximada'
+}
+
+function walkingMeters(itinerary: Itinerary): number {
+  return itinerary.legs.reduce((total, leg) => (leg.kind === 'walk' ? total + leg.meters : total), 0)
+}
+
+export function formatMeters(meters: number): string {
+  if (meters < 1000) {
+    return `${Math.round(meters / 10) * 10} m`
+  }
+  return `${(meters / 1000).toFixed(1).replace('.', ',')} km`
+}
+
+/** Minutos redondeados hacia arriba: prometer menos de lo que se tarda molesta. */
+export function formatWalk(minutes: number): string {
+  const total = Math.max(1, Math.ceil(minutes))
+  if (total < 60) {
+    return `${total} min`
+  }
+  return `${Math.floor(total / 60)} h ${total % 60} min`
+}
+
+/* ================================================================== *
+ * 7 · AJUSTES                                                         *
  * ================================================================== */
 
 function renderAjustes(): string {
@@ -1401,6 +1825,8 @@ function renderAjustes(): string {
     </section>
 
     ${renderTrackingRulesCard()}
+
+    ${renderExperimentalCard()}
 
     ${renderUpdateCard()}
 
@@ -1578,6 +2004,38 @@ function renderTrackingRulesCard(): string {
         <button class="btn btn-secondary btn-block" type="button" data-action="tour-open">
           ${icon('info')} Ver el tour de la aplicación
         </button>
+      </div>
+    </section>
+  `
+}
+
+/**
+ * Funciones en pruebas.
+ *
+ * Van en su propia tarjeta y no mezcladas con los ajustes de siempre: encender
+ * algo experimental tiene que ser una decisión consciente, y apagarlo tiene que
+ * ser fácil de encontrar cuando estorbe.
+ */
+function renderExperimentalCard(): string {
+  return `
+    <section class="card">
+      <div class="card-head"><div class="card-head-copy">
+        <h3 class="card-title">Experimental</h3>
+        <p class="card-sub">En pruebas: puede cambiar o desaparecer</p>
+      </div></div>
+      <div class="card-body">
+        ${renderSettingRow(
+          'map',
+          'Pestaña Mapas',
+          'Paradas cercanas a tu ubicación y cálculo de rutas en autobús. Apagada no consume nada.',
+          state.settings.experimentalMaps,
+          'toggle-maps',
+        )}
+        <p class="text-tiny">
+          Las rutas se calculan con el recorrido oficial de las líneas, así que los minutos son
+          estimaciones y no horarios en firme. No consulta los tiempos de llegada en tiempo real:
+          esa cola es para los avisos de próximo bus.
+        </p>
       </div>
     </section>
   `

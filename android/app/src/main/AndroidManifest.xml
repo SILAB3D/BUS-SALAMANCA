@@ -73,6 +73,20 @@
     <uses-permission android:name="android.permission.VIBRATE" />
 
     <!--
+        Paradas cercanas de la pestana experimental "Mapas".
+
+        No hace falta plugin: cuando la pagina llama a navigator.geolocation es
+        Capacitor (BridgeWebChromeClient) quien saca el dialogo del permiso. Sin
+        estas dos lineas ese dialogo no puede llegar a aparecer.
+
+        Se piden las dos: con la precision aproximada basta para ordenar las
+        paradas de alrededor, y Android 12+ deja elegir a la persona usuaria cual
+        de las dos concede.
+    -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+
+    <!--
         Actualizacion desde las releases de GitHub. Android no permite instalar
         en silencio: este permiso solo deja LANZAR el instalador del sistema, y
         en Android 8+ hay que concederlo ademas por app desde los ajustes.

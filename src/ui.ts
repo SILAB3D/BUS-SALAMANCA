@@ -49,6 +49,13 @@ const ICONS: Record<string, string> = {
   down: '<path d="M12 5v14"/><path d="m6 13 6 6 6-6"/>',
   up: '<path d="M12 19V5"/><path d="m6 11 6-6 6 6"/>',
   vibrate: '<rect x="9" y="4" width="6" height="16" rx="2"/><path d="M5 9v6M19 9v6M2 11v2M22 11v2"/>',
+  /** Punto de mira: "centrar en mi ubicacion". */
+  crosshair:
+    '<circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/>',
+  /** Silueta andando, para los tramos a pie de una ruta. */
+  walk: '<circle cx="13" cy="4" r="1.8"/><path d="M11 21l1.5-5.5L10 13l1-5 3 2 2.5 1"/><path d="M10 8 7 10l-1 3"/><path d="m12.5 15.5 3 5.5"/>',
+  /** Dos flechas encontradas: intercambiar origen y destino. */
+  swap: '<path d="M7 4v16"/><path d="m4 7 3-3 3 3"/><path d="M17 20V4"/><path d="m14 17 3 3 3-3"/>',
 }
 
 export function icon(name: keyof typeof ICONS | string, extraClass = ''): string {

@@ -18,6 +18,7 @@ src/
     arrivals.ts            Cliente de llegadas con cola y control de ritmo
     arrival-parser.ts      Lectura del panel oficial (sin red: se puede probar)
     punctuality.ts         Detección de pasos reales y desvío frente al horario
+    routing.ts             Paradas cercanas y cálculo de rutas (experimental)
     network.ts             Red oficial de líneas, sentidos y paradas
     schedule.ts            Horario programado a partir del GTFS estático
     notifications.ts       Notificaciones locales
@@ -159,6 +160,10 @@ real con el mismo parser y la misma lógica que la app, y escribe lo observado.
 Hay dos modalidades y las dos tienen tope, porque cada una consulta por su cuenta
 una fuente que limita por IP:
 
+Las paradas guardadas **solo se consultan cuando están desplegadas**: plegadas
+enseñan sus líneas, no tiempos, así que pedir las diez guardadas para no mirar
+ninguna era gastar cola contra una fuente que limita por IP.
+
 | | Máximo creadas | Notas |
 | --- | --- | --- |
 | Aviso de próximo bus | 2 | notificación persistente; termina tras ver pasar los autobuses que se elijan en Ajustes (1 a 3, uno por defecto) |
@@ -175,6 +180,51 @@ Los avisos de próximo bus NO se pausan: un aviso creado está siempre en marcha
 porque pausarlo no se distinguía de quitarlo. Los recorridos sí, y además solos:
 consultan ocho paradas por ciclo, así que fuera de su pestaña dejan de mirar y
 le ceden el sitio en la cola al aviso, que es lo que tiene que llegar a tiempo.
+
+## Mapas (experimental)
+
+Pestaña **apagada de fábrica**. Se enciende en Ajustes → Experimental, y apagada
+no existe: no aparece en la barra, no se puede abrir aunque quedara guardada como
+última pestaña, no crea ningún mapa y no pide la ubicación. Al apagarla —incluso
+estando dentro— se sueltan en el acto el mapa, el `watchPosition` y lo calculado.
+
+Dos funciones:
+
+**Paradas cercanas.** Ubicación por `navigator.geolocation`; en Android es
+Capacitor quien saca el diálogo del permiso al llamarla, así que no hace falta
+plugin propio, solo `ACCESS_COARSE_LOCATION` y `ACCESS_FINE_LOCATION` en el
+manifiesto. Se piden **las dos** cosas: `getCurrentPosition`, que responde
+enseguida (vale incluso una lectura cacheada), y `watchPosition`, que la va
+afinando. Solo con el seguimiento la primera posición puede tardar o no llegar
+según el sistema y la pantalla se queda en "Buscando tu ubicación…" —pasó en las
+pruebas—; solo con la lectura suelta, las "paradas más cercanas" salían de otro
+barrio, porque el primer dato trae cientos de metros de error. Una posición peor
+nunca pisa a una mejor, o las paradas se moverían hacia atrás en pantalla.
+El mapa dibuja el punto con su círculo de precisión —enseñar un punto exacto
+cuando el sistema dice "en algún sitio de estos 300 m" es mentir— y las seis
+paradas más próximas numeradas.
+
+**Rutas.** Origen y destino se eligen entre "mi ubicación" y las paradas de la
+red; no hay buscador de calles porque no hay geocodificador sin conexión. El
+cálculo (`src/services/routing.ts`) es un Dijkstra sobre las paradas donde el
+coste es el TIEMPO: cada arista de autobús va de la parada de subida a la de
+bajada de un mismo sentido, así que el camino ya sale troceado en tramos. Hay
+penalización por transbordo (cambiar de autobús cansa: sin ella el cálculo
+proponía dos saltos para ganar un minuto) y tope de dos.
+
+El tiempo dentro del autobús se **estima** con la distancia real entre paradas
+del recorrido a 17 km/h más una espera por parada. El GTFS daría minutos
+exactos, pero son 543.000 filas y caduca: indexarlas por trayecto encarecería el
+arranque de TODA la app por una función experimental. La espera en parada sí sale
+del horario cuando lo hay, como frecuencia (mediana de los huecos entre salidas
+de la franja, dividida entre dos) y no como "la próxima salida a las 08:12": una
+hora concreta de un feed caducado acaba siendo mentira, una frecuencia envejece
+mucho mejor.
+
+> Lo experimental no le quita recursos a lo demás: esta pestaña **no consulta ni
+> un solo tiempo de llegada**. Esa fuente limita por IP y su cola es para el
+> aviso de próximo bus. La única consulta que hace es la de la ficha de una
+> parada, y solo cuando se toca a propósito.
 
 ## Funcionamiento en segundo plano
 

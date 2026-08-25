@@ -13,6 +13,13 @@ import {
 import { loadNetwork } from './services/network'
 import { checkForUpdate, isNativeAndroid, readInstalledVersion, Updater } from './services/updates'
 import { matchSlot, observe } from './services/punctuality'
+import {
+  DEFAULT_WAIT_MINUTES,
+  isValidPoint,
+  nearestStops,
+  planRoute,
+  type GeoPoint,
+} from './services/routing'
 import { currentDayType, loadSchedule } from './services/schedule'
 import {
   cancelNotification,
@@ -42,6 +49,7 @@ import {
   persistSettings,
   persistTab,
   persistTrackings,
+  emptyMapsState,
   state,
   clampBusTarget,
   trackingBusTarget,
@@ -51,6 +59,7 @@ import {
   MAX_FOLLOW_JOBS,
   MAX_TRACKING_JOBS,
   type MonitorJob,
+  type RoutePoint,
   type TabId,
   type TrackingJob,
 } from './state'
@@ -609,14 +618,12 @@ function buildRefreshPlan(): Array<{ stopId: string, maxAgeMs: number, priority:
     add(state.search.selectedStopId, FRESHNESS.focused, 'high')
   }
 
-  // Inicio ES la lista de paradas guardadas: la desplegada manda sobre el resto.
-  if (state.tab === 'inicio') {
-    if (state.expandedStopId) {
-      add(state.expandedStopId, FRESHNESS.focused, 'high')
-    }
-    for (const favourite of state.favourites) {
-      add(favourite.stopId, FRESHNESS.visible)
-    }
+  // Inicio ES la lista de paradas guardadas, pero SOLO se consulta la que está
+  // desplegada: es la única que enseña tiempos (plegada solo se ven sus líneas),
+  // y pedir las diez guardadas para no mirar ninguna dejaba sin turno en la cola
+  // al aviso de próximo bus, que sí tiene que llegar a tiempo.
+  if (state.tab === 'inicio' && state.expandedStopId) {
+    add(state.expandedStopId, FRESHNESS.focused, 'high')
   }
 
   // 4. Recorridos en seguimiento: la parada propia primero, luego hacia atras.
@@ -1410,6 +1417,9 @@ function paint(): void {
   // existir), además de perder foco, cursor y desplazamiento.
   patch(appRoot, renderApp())
   syncMap()
+  // Solo hace algo cuando la pestaña experimental está abierta; en cualquier
+  // otra pantalla se limita a soltar el mapa si quedaba alguno.
+  syncMapsMap()
   applyPendingScroll()
 }
 
@@ -1454,6 +1464,13 @@ appRoot.addEventListener('input', (event) => {
 
   if (target.id === 'stop-query') {
     state.search.query = target.value
+    render()
+  }
+
+  // Buscador de la pestaña experimental: estado aparte del buscador de siempre,
+  // para que escribir en uno no mueva el otro.
+  if (target.id === 'maps-query') {
+    state.maps.query = target.value
     render()
   }
 
@@ -1742,6 +1759,116 @@ async function handleAction(action: string, element: HTMLElement): Promise<void>
       render()
       return
 
+    case 'toggle-maps': {
+      const enabled = !state.settings.experimentalMaps
+      state.settings.experimentalMaps = enabled
+      persistSettings()
+
+      // Al apagarla se suelta todo lo suyo en el acto: mapa, ubicación y ruta.
+      // Si no, un `watchPosition` seguiría vivo con la pestaña ya invisible.
+      if (!enabled) {
+        closeMaps()
+        if (state.tab === 'mapas') {
+          state.tab = 'inicio'
+          persistTab()
+        }
+      }
+
+      showToast(enabled ? 'Pestaña Mapas activada' : 'Pestaña Mapas desactivada', 'info')
+      render()
+      return
+    }
+
+    case 'maps-mode': {
+      const mode = element.dataset.mode as 'cercanas' | 'rutas' | undefined
+      if (mode) {
+        state.maps.mode = mode
+        state.maps.picking = null
+        mapsSignature = ''
+        render()
+      }
+      return
+    }
+
+    case 'maps-locate':
+      locateMe()
+      return
+
+    case 'maps-open-stop':
+      // Se reutiliza la ficha de siempre. Es la ÚNICA consulta que hace esta
+      // pestaña, y solo cuando alguien toca una parada a propósito.
+      state.search.selectedStopId = stopId
+      render()
+      await refreshOneStop(stopId)
+      return
+
+    case 'maps-pick': {
+      const field = element.dataset.field as 'origin' | 'destination' | undefined
+      if (field) {
+        state.maps.picking = field
+        state.maps.query = ''
+        render()
+      }
+      return
+    }
+
+    case 'maps-pick-cancel':
+      state.maps.picking = null
+      render()
+      return
+
+    case 'maps-pick-here': {
+      const point = currentLocationPoint()
+      if (!point) {
+        // Aún no se sabe dónde está: se pide, se deja el buscador abierto para
+        // poder elegir una parada mientras tanto, y se anota el campo para
+        // rellenarlo solo en cuanto llegue la posición.
+        pendingLocationField = state.maps.picking
+        showToast('Buscando tu ubicación…', 'info')
+        locateMe()
+        return
+      }
+
+      applyRoutePoint(point)
+      return
+    }
+
+    case 'maps-pick-stop': {
+      const stop = state.network?.stopById.get(stopId)
+      if (stop) {
+        applyRoutePoint({
+          kind: 'stop',
+          label: stop.stopName,
+          lat: stop.lat,
+          lon: stop.lon,
+          stopId: stop.stopId,
+        })
+      }
+      return
+    }
+
+    case 'maps-swap': {
+      const { origin, destination } = state.maps
+      state.maps.origin = destination
+      state.maps.destination = origin
+      state.maps.plan = null
+      mapsSignature = ''
+      render()
+      return
+    }
+
+    case 'maps-plan':
+      planMapsRoute()
+      return
+
+    case 'maps-focus-leg': {
+      const leg = Number.parseInt(element.dataset.leg ?? '', 10)
+      state.maps.focusedLeg = Number.isFinite(leg) && state.maps.focusedLeg !== leg ? leg : null
+      mapsSignature = ''
+      render()
+      return
+    }
+
     case 'toggle-vibration':
       state.settings.vibrateOnApproach = !state.settings.vibrateOnApproach
       persistSettings()
@@ -1825,6 +1952,13 @@ async function goToTab(tab: TabId): Promise<void> {
 
   if (previous === 'seguimiento' && tab !== 'seguimiento') {
     pauseFollows('se salió de la pestaña Seguir')
+  }
+
+  // Al salir de Mapas se suelta TODO lo suyo: el seguimiento de la ubicación, el
+  // mapa y lo calculado. Una función experimental no puede quedarse trabajando
+  // por detrás mientras miras otra pantalla.
+  if (previous === 'mapas' && tab !== 'mapas') {
+    closeMaps()
   }
 
   if (tab === 'buscar' && previous !== 'buscar') {
@@ -2171,6 +2305,592 @@ function buildStopPopup(stop: { stopId: string, stopName: string }): string {
       )}">Ver tiempos</button>
     </div>
   `
+}
+
+/* ------------------------------------------------------------------ *
+ * Mapas (pestaña experimental)                                         *
+ * ------------------------------------------------------------------ */
+
+/** Guarda el extremo recién elegido y cierra el buscador. */
+function applyRoutePoint(point: RoutePoint): void {
+  const field = state.maps.picking
+  if (!field) {
+    return
+  }
+
+  state.maps[field] = point
+  state.maps.picking = null
+  state.maps.query = ''
+  // El itinerario anterior ya no vale: era de otro trayecto.
+  state.maps.plan = null
+  state.maps.focusedLeg = null
+  mapsSignature = ''
+  render()
+}
+
+/**
+ * Todo lo de la pestaña experimental vive en este bloque y en `routing.ts`.
+ *
+ * Reglas que se respetan aquí sin excepción, para que lo experimental no pueda
+ * estropear lo que ya funciona:
+ *
+ *  - Mapa, marcadores y seguimiento de la ubicación se crean al entrar y se
+ *    destruyen al salir (`closeMaps`). Fuera de la pestaña no queda nada vivo.
+ *  - No se pide un solo tiempo de llegada. La fuente oficial limita por IP y su
+ *    cola es para el aviso de próximo bus.
+ *  - Usa su propia instancia de Leaflet, distinta de la del buscador: compartirla
+ *    obligaría a que las dos pantallas se pusieran de acuerdo sobre el encuadre.
+ */
+
+let mapsMap: L.Map | null = null
+let mapsLayer: L.LayerGroup | null = null
+let mapsSignature = ''
+
+/** Id del `watchPosition` en curso, o null si no se está siguiendo nada. */
+let locationWatchId: number | null = null
+
+/** Suelta el mapa, el seguimiento de ubicación y lo calculado. */
+function closeMaps(): void {
+  stopWatchingLocation()
+  pendingLocationField = null
+
+  // La ficha de parada se comparte con el buscador y se dibuja fuera de la
+  // pantalla actual: dejarla abierta al salir la haría aparecer en la pestaña
+  // siguiente, que no es donde se abrió.
+  state.search.selectedStopId = null
+
+  if (mapsMap) {
+    mapsMap.remove()
+    mapsMap = null
+    mapsLayer = null
+    mapsSignature = ''
+  }
+
+  state.maps = emptyMapsState()
+}
+
+function stopWatchingLocation(): void {
+  if (locationWatchId !== null) {
+    try {
+      navigator.geolocation?.clearWatch(locationWatchId)
+    } catch {
+      /* el navegador puede no tenerlo */
+    }
+    locationWatchId = null
+  }
+}
+
+/**
+ * Extremo de la ruta que está esperando a que llegue la ubicación.
+ *
+ * Quien toca "Mi ubicación" antes de que el sistema sepa dónde está no puede
+ * quedarse mirando: se anota qué campo quería rellenar y se rellena solo en
+ * cuanto hay posición. Antes había que volver a tocar el botón, sin que nada
+ * dijera cuándo.
+ */
+let pendingLocationField: 'origin' | 'destination' | null = null
+
+/**
+ * Pide la ubicación.
+ *
+ * En Android es Capacitor quien saca el diálogo del permiso en cuanto la página
+ * llama a `geolocation`; por eso no hace falta plugin propio, solo declarar los
+ * permisos en el manifiesto.
+ *
+ * Se piden LAS DOS cosas: una lectura suelta, que llega enseguida (vale incluso
+ * una cacheada), y un seguimiento que la va afinando. Solo con el seguimiento la
+ * primera posición puede tardar o no llegar nunca según el sistema, y la
+ * pantalla se quedaba en "Buscando tu ubicación…"; solo con la lectura suelta,
+ * las "paradas más cercanas" salían de un barrio de al lado, porque el primer
+ * dato suele traer cientos de metros de error.
+ */
+function locateMe(): void {
+  if (!navigator.geolocation) {
+    state.maps.locationError = 'Este dispositivo no permite compartir la ubicación.'
+    state.maps.locating = false
+    render()
+    return
+  }
+
+  state.maps.locating = true
+  state.maps.locationError = null
+  render()
+
+  stopWatchingLocation()
+
+  try {
+    navigator.geolocation.getCurrentPosition(acceptPosition, rejectPosition, {
+      enableHighAccuracy: false,
+      timeout: 10_000,
+      maximumAge: 60_000,
+    })
+
+    locationWatchId = navigator.geolocation.watchPosition(acceptPosition, rejectPosition, {
+      enableHighAccuracy: true,
+      timeout: 20_000,
+      maximumAge: 15_000,
+    })
+  } catch (error) {
+    state.maps.locating = false
+    state.maps.locationError = errorMessage(error)
+    render()
+  }
+}
+
+/**
+ * Una lectura de posición.
+ *
+ * Una posición peor NO pisa a una mejor: la lectura rápida y el seguimiento
+ * llegan mezclados, y dejar que una cacheada de 500 m sustituyera a una recién
+ * afinada de 20 m movía las paradas cercanas hacia atrás delante de tus ojos.
+ */
+function acceptPosition(position: GeolocationPosition): void {
+  // Se puede haber salido de la pestaña mientras llegaba la posición.
+  if (state.tab !== 'mapas') {
+    stopWatchingLocation()
+    return
+  }
+
+  const point: GeoPoint = {
+    lat: position.coords.latitude,
+    lon: position.coords.longitude,
+  }
+
+  if (!isValidPoint(point)) {
+    return
+  }
+
+  const accuracy = position.coords.accuracy ?? Number.NaN
+  const known = state.maps.location
+  const better = !known
+    || !Number.isFinite(known.accuracy)
+    || !Number.isFinite(accuracy)
+    || accuracy <= known.accuracy
+    // Una lectura vieja deja de mandar aunque fuera más precisa: te has movido.
+    || Date.now() - known.at > 20_000
+
+  state.maps.locating = false
+  state.maps.locationError = null
+
+  if (!better) {
+    render()
+    return
+  }
+
+  state.maps.location = { point, accuracy, at: Date.now() }
+  mapsSignature = ''
+
+  // Alguien está esperando esta posición para rellenar un extremo de la ruta.
+  if (pendingLocationField && state.maps.picking === pendingLocationField) {
+    const here = currentLocationPoint()
+    pendingLocationField = null
+    if (here) {
+      applyRoutePoint(here)
+      return
+    }
+  }
+
+  render()
+}
+
+function rejectPosition(error: GeolocationPositionError): void {
+  pendingLocationField = null
+  state.maps.locating = false
+
+  // Un fallo de la lectura rápida no puede borrar una posición que ya se tenía;
+  // el seguimiento puede seguir dando buenas lecturas después.
+  if (!state.maps.location) {
+    state.maps.locationError = describeGeolocationError(error)
+    log('warn', 'mapas', state.maps.locationError)
+  }
+
+  if (error.code === error.PERMISSION_DENIED) {
+    stopWatchingLocation()
+  }
+
+  render()
+}
+
+function describeGeolocationError(error: GeolocationPositionError): string {
+  switch (error.code) {
+    case error.PERMISSION_DENIED:
+      return 'Has denegado el permiso de ubicación. Se concede desde los ajustes del sistema, en los permisos de SALBUS.'
+    case error.POSITION_UNAVAILABLE:
+      return 'El sistema no ha podido calcular dónde estás. Bajo techo suele tardar más; prueba a salir a la calle.'
+    case error.TIMEOUT:
+      return 'La ubicación ha tardado demasiado en llegar.'
+    default:
+      return 'No se ha podido obtener la ubicación.'
+  }
+}
+
+/** El punto que representa "yo", ya sea como origen o como destino. */
+function currentLocationPoint(): RoutePoint | null {
+  const location = state.maps.location
+  if (!location) {
+    return null
+  }
+
+  return {
+    kind: 'location',
+    label: 'Mi ubicación',
+    lat: location.point.lat,
+    lon: location.point.lon,
+  }
+}
+
+/**
+ * Calcula la ruta.
+ *
+ * La espera en parada sale del horario programado cuando lo hay: es donde más
+ * se equivoca una estimación a ojo. Si el GTFS no cubre esa línea se usa un
+ * valor fijo, que es peor pero honesto.
+ */
+function planMapsRoute(): void {
+  const { origin, destination } = state.maps
+  const network = state.network
+
+  if (!origin || !destination || !network) {
+    return
+  }
+
+  state.maps.planning = true
+  state.maps.focusedLeg = null
+  render()
+
+  try {
+    const directions = network.lines.flatMap((line) => line.directions)
+    const dayType = currentDayType()
+    const nowMinutes = new Date().getHours() * 60 + new Date().getMinutes()
+    const waitCache = new Map<string, number>()
+
+    const plan = planRoute({
+      origin: { lat: origin.lat, lon: origin.lon },
+      destination: { lat: destination.lat, lon: destination.lon },
+      originName: origin.label,
+      destinationName: destination.label,
+      directions,
+      waitMinutes: (stopId, lineId, directionKey) => {
+        const key = `${stopId}|${directionKey}`
+        const cached = waitCache.get(key)
+        if (cached !== undefined) {
+          return cached
+        }
+
+        const wait = estimateWait(stopId, lineId, directionKey, dayType, nowMinutes)
+        waitCache.set(key, wait)
+        return wait
+      },
+    })
+
+    state.maps.plan = plan
+    mapsSignature = ''
+    // El itinerario aparece por debajo del formulario, fuera de la pantalla: sin
+    // llevar la vista hasta él, calcular una ruta parecía no hacer nada.
+    scrollPending = 'ruta-resultado'
+
+    if (plan.status === 'ok') {
+      log(
+        'info',
+        'mapas',
+        `Ruta calculada: ${Math.round(plan.best.totalMinutes)} min, ${plan.best.transfers} transbordo(s).`,
+      )
+    }
+  } catch (error) {
+    state.maps.plan = { status: 'unreachable', reason: errorMessage(error) }
+    log('error', 'mapas', errorMessage(error))
+  } finally {
+    state.maps.planning = false
+    render()
+  }
+}
+
+/**
+ * Minutos de espera estimados en una parada.
+ *
+ * Se calcula la frecuencia real de esa línea en esa parada (la mediana de los
+ * huecos entre salidas programadas) y se supone que se llega a la mitad del
+ * hueco, que es lo que ocurre cuando no se mira el horario. Usar "la próxima
+ * salida a las 08:12" sería más preciso, pero el GTFS incluido caduca y esa
+ * hora exacta acabaría siendo mentira; una frecuencia envejece mucho mejor.
+ */
+function estimateWait(
+  stopId: string,
+  lineId: string,
+  directionKey: string,
+  dayType: ReturnType<typeof currentDayType>,
+  nowMinutes: number,
+): number {
+  const schedule = state.schedule
+  if (!schedule) {
+    return DEFAULT_WAIT_MINUTES
+  }
+
+  let times: string[]
+  try {
+    times = schedule.getScheduledTimes(stopId, lineId, dayType, directionKey)
+  } catch {
+    return DEFAULT_WAIT_MINUTES
+  }
+
+  // Solo la franja de alrededor: a las ocho de la mañana no importa la
+  // frecuencia de las tres de la tarde.
+  const window = times
+    .map((clock) => parseClockToMinutes(clock))
+    .filter((minutes) => Math.abs(minutes - nowMinutes) <= 90)
+    .sort((left, right) => left - right)
+
+  if (window.length < 2) {
+    return DEFAULT_WAIT_MINUTES
+  }
+
+  const gaps: number[] = []
+  for (let index = 1; index < window.length; index += 1) {
+    gaps.push(window[index] - window[index - 1])
+  }
+
+  gaps.sort((left, right) => left - right)
+  const headway = gaps[Math.floor(gaps.length / 2)]
+
+  // Una frecuencia absurda (un solo paso al día, o datos rotos) no puede
+  // convertirse en una espera de hora y media dentro del cálculo.
+  return Math.min(DEFAULT_WAIT_MINUTES * 3, Math.max(1, headway / 2))
+}
+
+/**
+ * Dibuja el mapa de la pestaña.
+ *
+ * Igual que el del buscador, se repinta solo cuando cambia algo de verdad: la
+ * firma evita rehacer marcadores y encuadre en cada latido del reloj.
+ */
+function syncMapsMap(): void {
+  const container = document.querySelector<HTMLDivElement>('#maps-map')
+
+  if (!container || !state.network || state.tab !== 'mapas') {
+    if (mapsMap) {
+      mapsMap.remove()
+      mapsMap = null
+      mapsLayer = null
+      mapsSignature = ''
+    }
+    return
+  }
+
+  if (!mapsMap || mapsMap.getContainer() !== container) {
+    mapsMap?.remove()
+    mapsMap = L.map(container, { zoomControl: false, attributionControl: true })
+    L.control.zoom({ position: 'bottomleft' }).addTo(mapsMap)
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap',
+    }).addTo(mapsMap)
+    mapsLayer = L.layerGroup().addTo(mapsMap)
+    mapsSignature = ''
+  }
+
+  const maps = state.maps
+  const signature = [
+    maps.mode,
+    maps.location ? `${maps.location.point.lat.toFixed(5)},${maps.location.point.lon.toFixed(5)}` : '',
+    maps.origin ? `${maps.origin.lat},${maps.origin.lon}` : '',
+    maps.destination ? `${maps.destination.lat},${maps.destination.lon}` : '',
+    maps.plan?.status ?? '',
+    maps.focusedLeg ?? '',
+  ].join('|')
+
+  if (signature === mapsSignature) {
+    mapsMap.invalidateSize()
+    return
+  }
+
+  mapsSignature = signature
+  mapsLayer?.clearLayers()
+  mapsMap.invalidateSize()
+
+  const bounds: Array<[number, number]> = []
+
+  if (maps.mode === 'cercanas') {
+    paintNearby(bounds)
+  } else {
+    paintRoute(bounds)
+  }
+
+  if (bounds.length === 1) {
+    mapsMap.setView(bounds[0], 16)
+  } else if (bounds.length > 1) {
+    mapsMap.fitBounds(bounds, { padding: [36, 36], maxZoom: 17 })
+  } else {
+    // Sin nada que enseñar, el centro de Salamanca es mejor que el Atlántico.
+    mapsMap.setView([40.9701, -5.6635], 13)
+  }
+
+  // El contenedor puede seguir cambiando de tamaño cuando se pinta; sin esta
+  // segunda pasada el encuadre queda calculado sobre el tamaño anterior.
+  window.setTimeout(() => {
+    if (!mapsMap || state.tab !== 'mapas') {
+      return
+    }
+    mapsMap.invalidateSize()
+    if (bounds.length > 1) {
+      mapsMap.fitBounds(bounds, { padding: [36, 36], maxZoom: 17 })
+    }
+  }, 80)
+}
+
+function paintNearby(bounds: Array<[number, number]>): void {
+  const location = state.maps.location
+  if (!location || !mapsLayer || !state.network) {
+    return
+  }
+
+  const here: [number, number] = [location.point.lat, location.point.lon]
+  bounds.push(here)
+
+  // Circulo del margen de error: enseñar un punto exacto cuando el GPS dice
+  // "en algún sitio de estos 300 m" es mentir con precisión.
+  if (Number.isFinite(location.accuracy) && location.accuracy > 25) {
+    L.circle(here, {
+      radius: location.accuracy,
+      color: '#1f6feb',
+      weight: 1,
+      opacity: 0.5,
+      fillOpacity: 0.08,
+    }).addTo(mapsLayer)
+  }
+
+  L.marker(here, {
+    icon: L.divIcon({
+      className: '',
+      html: '<span class="map-me"><span class="map-me-dot"></span></span>',
+      iconSize: [26, 26],
+      iconAnchor: [13, 13],
+    }),
+    keyboard: false,
+    zIndexOffset: 1200,
+  }).addTo(mapsLayer)
+
+  nearestStops(location.point, state.network.stops, 6).forEach((entry, index) => {
+    const stop = entry.stop
+    bounds.push([stop.lat, stop.lon])
+
+    const marker = L.marker([stop.lat, stop.lon], {
+      icon: L.divIcon({
+        className: '',
+        html: `<span class="map-near${index === 0 ? ' is-first' : ''}">${index + 1}</span>`,
+        iconSize: [32, 32],
+        iconAnchor: [16, 16],
+        popupAnchor: [0, -16],
+      }),
+      keyboard: false,
+      zIndexOffset: 100 - index,
+    })
+
+    marker.bindPopup(buildStopPopup(stop), {
+      className: 'map-popup',
+      closeButton: true,
+      maxWidth: 260,
+      minWidth: 200,
+      autoPanPadding: [16, 16],
+    })
+
+    marker.addTo(mapsLayer as L.LayerGroup)
+  })
+}
+
+function paintRoute(bounds: Array<[number, number]>): void {
+  const maps = state.maps
+  if (!mapsLayer) {
+    return
+  }
+
+  for (const [point, kind] of [
+    [maps.origin, 'origin'],
+    [maps.destination, 'destination'],
+  ] as Array<[RoutePoint | null, 'origin' | 'destination']>) {
+    if (!point) {
+      continue
+    }
+
+    bounds.push([point.lat, point.lon])
+    L.marker([point.lat, point.lon], {
+      icon: L.divIcon({
+        className: '',
+        html: `<span class="map-end is-${kind}"></span>`,
+        iconSize: [22, 22],
+        iconAnchor: [11, 11],
+      }),
+      keyboard: false,
+      zIndexOffset: 900,
+    }).addTo(mapsLayer)
+  }
+
+  const plan = maps.plan
+  if (!plan || plan.status === 'unreachable') {
+    return
+  }
+
+  const itinerary = plan.status === 'walk' ? plan.walking : plan.best
+
+  itinerary.legs.forEach((leg, index) => {
+    const dimmed = maps.focusedLeg !== null && maps.focusedLeg !== index
+
+    if (leg.kind === 'walk') {
+      const points: Array<[number, number]> = [
+        [leg.from.lat, leg.from.lon],
+        [leg.to.lat, leg.to.lon],
+      ]
+      points.forEach((point) => bounds.push(point))
+
+      L.polyline(points, {
+        color: '#6b7a90',
+        weight: 4,
+        opacity: dimmed ? 0.25 : 0.85,
+        dashArray: '2 8',
+        lineCap: 'round',
+      }).addTo(mapsLayer as L.LayerGroup)
+      return
+    }
+
+    const color = state.network?.getLineColor(leg.lineId) ?? '#173764'
+    const points = leg.stops
+      .filter((stop) => isValidPoint(stop))
+      .map((stop) => [stop.lat, stop.lon] as [number, number])
+
+    points.forEach((point) => bounds.push(point))
+
+    L.polyline(points, {
+      color,
+      weight: dimmed ? 4 : 6,
+      opacity: dimmed ? 0.25 : 0.9,
+      lineCap: 'round',
+      lineJoin: 'round',
+    }).addTo(mapsLayer as L.LayerGroup)
+
+    // Solo se marcan subida y bajada: una chincheta por parada intermedia
+    // convierte el trazado en un collar ilegible.
+    for (const [stop, role] of [
+      [leg.from, 'board'],
+      [leg.to, 'alight'],
+    ] as Array<[typeof leg.from, 'board' | 'alight']>) {
+      if (!isValidPoint(stop)) {
+        continue
+      }
+
+      L.marker([stop.lat, stop.lon], {
+        icon: L.divIcon({
+          className: '',
+          html: `<span class="map-stopdot is-${role}" style="--dot:${esc(color)}"></span>`,
+          iconSize: [18, 18],
+          iconAnchor: [9, 9],
+          popupAnchor: [0, -9],
+        }),
+        keyboard: false,
+        zIndexOffset: 500,
+      })
+        .bindPopup(buildStopPopup(stop), { className: 'map-popup', maxWidth: 260, minWidth: 200 })
+        .addTo(mapsLayer as L.LayerGroup)
+    }
+  })
 }
 
 /* ------------------------------------------------------------------ *

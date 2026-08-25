@@ -85,6 +85,7 @@ async function main() {
     'network.ts',
     'schedule.ts',
     'release-parser.ts',
+    'routing.ts',
   ])
 
   const { parseStopFeed } = await import(pathToUrl(path.join(build, 'arrival-parser.js')))
@@ -668,6 +669,262 @@ async function main() {
   check('las franjas sobreviven a que la app se cierre',
     service.includes('static String[] readStoredMonitors(Context context)')
       && service.includes('storeMonitors(this, incoming)'))
+
+  /* ---------------------------------------------------------------- *
+   * 9 · Mapas: cercanas y rutas (experimental)                         *
+   * ---------------------------------------------------------------- */
+
+  section('9 · Mapas: paradas cercanas y rutas')
+
+  const routing = await import(pathToUrl(path.join(build, 'routing.js')))
+
+  // Distancia conocida: la Plaza Mayor de Salamanca y la Catedral Nueva estan a
+  // unos 400 m. Un error en la formula se ve enseguida con un caso real.
+  {
+    const plaza = { lat: 40.9650, lon: -5.6640 }
+    const catedral = { lat: 40.9613, lon: -5.6647 }
+    const meters = routing.distanceMeters(plaza, catedral)
+    check('la distancia entre dos puntos conocidos es la real',
+      meters > 380 && meters < 460, Math.round(meters) + ' m')
+    check('la distancia de un punto a si mismo es cero',
+      routing.distanceMeters(plaza, plaza) < 0.001)
+  }
+
+  // Red de juguete: una linea recta de cinco paradas separadas ~500 m, y una
+  // segunda linea que la cruza. Con datos inventados el resultado esperado se
+  // puede calcular a mano, que es lo que hace util la prueba.
+  const stopAt = (id, index) => ({
+    stopId: id,
+    stopName: 'Parada ' + id,
+    lat: 40.96 + index * 0.0045,
+    lon: -5.66,
+  })
+
+  const lineA = {
+    key: 'A|uno',
+    slot: 'uno',
+    way: 'ida',
+    partial: false,
+    circular: false,
+    label: 'A1 > A5',
+    origin: 'A1',
+    destination: 'Norte',
+    stopCount: 5,
+    stops: ['A1', 'A2', 'A3', 'A4', 'A5'].map(stopAt),
+  }
+
+  // Cruza en A3 y se aleja hacia el este.
+  const lineB = {
+    key: 'B|uno',
+    slot: 'uno',
+    way: 'ida',
+    partial: false,
+    circular: false,
+    label: 'A3 > B3',
+    origin: 'A3',
+    destination: 'Este',
+    stopCount: 3,
+    stops: [
+      lineA.stops[2],
+      { stopId: 'B2', stopName: 'Parada B2', lat: 40.969, lon: -5.6535 },
+      { stopId: 'B3', stopName: 'Parada B3', lat: 40.969, lon: -5.647 },
+    ],
+  }
+
+  const fixedWait = () => 5
+
+  {
+    // De la primera parada a la ultima de la misma linea: sin transbordos.
+    const plan = routing.planRoute({
+      origin: lineA.stops[0],
+      destination: lineA.stops[4],
+      originName: 'Origen',
+      destinationName: 'Destino',
+      directions: [lineA, lineB],
+      waitMinutes: fixedWait,
+    })
+
+    check('encuentra la ruta directa de una sola linea',
+      plan.status === 'ok' && plan.best.transfers === 0
+        && plan.best.legs.filter((leg) => leg.kind === 'bus').length === 1,
+      plan.status)
+
+    const bus = plan.status === 'ok' ? plan.best.legs.find((leg) => leg.kind === 'bus') : null
+    check('el tramo en autobus va de la parada de subida a la de bajada',
+      bus?.from.stopId === 'A1' && bus?.to.stopId === 'A5' && bus?.stops.length === 5)
+
+    // Origen y destino SON paradas: no debe colarse ningun paseo de cero metros.
+    check('no aparecen paseos de cero metros',
+      plan.status === 'ok'
+        && plan.best.legs.every((leg) => leg.kind !== 'walk' || leg.meters >= 30))
+  }
+
+  {
+    // Cruzando de la linea A a la B: obliga a un transbordo en A3.
+    const plan = routing.planRoute({
+      origin: lineA.stops[0],
+      destination: lineB.stops[2],
+      originName: 'Origen',
+      destinationName: 'Destino',
+      directions: [lineA, lineB],
+      waitMinutes: fixedWait,
+    })
+
+    check('resuelve una ruta con transbordo',
+      plan.status === 'ok' && plan.best.transfers === 1, plan.status)
+
+    const lines = plan.status === 'ok'
+      ? plan.best.legs.filter((leg) => leg.kind === 'bus').map((leg) => leg.lineId)
+      : []
+    check('usa las dos lineas en el orden correcto',
+      lines.join('-') === 'A-B', lines.join('-'))
+  }
+
+  {
+    // Dos puntos pegados: proponer un autobus para cruzar la calle es absurdo.
+    const plan = routing.planRoute({
+      origin: { lat: 40.96, lon: -5.66 },
+      destination: { lat: 40.9615, lon: -5.66 },
+      originName: 'Origen',
+      destinationName: 'Destino',
+      directions: [lineA, lineB],
+      waitMinutes: fixedWait,
+    })
+    check('para dos manzanas propone ir andando', plan.status === 'walk', plan.status)
+  }
+
+  {
+    // Un destino en mitad del campo, sin ninguna parada cerca.
+    const plan = routing.planRoute({
+      origin: lineA.stops[0],
+      destination: { lat: 41.5, lon: -5.0 },
+      originName: 'Origen',
+      destinationName: 'Destino',
+      directions: [lineA, lineB],
+      waitMinutes: fixedWait,
+    })
+    check('dice claramente que no se puede llegar', plan.status === 'unreachable', plan.status)
+  }
+
+  {
+    // La espera se inyecta: el modulo no puede inventarsela.
+    const conWait = (minutes) => routing.planRoute({
+      origin: lineA.stops[0],
+      destination: lineA.stops[4],
+      originName: 'Origen',
+      destinationName: 'Destino',
+      directions: [lineA, lineB],
+      waitMinutes: () => minutes,
+    })
+
+    const corta = conWait(2)
+    const larga = conWait(20)
+    check('la espera en parada cuenta en el total',
+      corta.status === 'ok' && larga.status === 'ok'
+        && Math.round(larga.best.totalMinutes - corta.best.totalMinutes) === 18,
+      corta.status === 'ok' && larga.status === 'ok'
+        ? Math.round(larga.best.totalMinutes - corta.best.totalMinutes) + ' min'
+        : 'sin ruta')
+  }
+
+  // Paradas cercanas: orden y corte por distancia.
+  {
+    const here = { lat: 40.96, lon: -5.66 }
+    const nearby = routing.nearestStops(here, lineA.stops, 3, 900)
+    check('las paradas cercanas salen de menor a mayor distancia',
+      nearby.length === 2 && nearby[0].stop.stopId === 'A1' && nearby[1].stop.stopId === 'A2',
+      nearby.map((n) => n.stop.stopId).join(','))
+    check('una parada lejana no se cuela entre las cercanas',
+      nearby.every((entry) => entry.meters <= 900))
+    check('cada parada cercana trae su tiempo andando',
+      nearby[0].minutes >= 0 && nearby[1].minutes > nearby[0].minutes)
+  }
+
+  // La red REAL: es la prueba que de verdad protege, porque el calculo corre
+  // sobre 80 sentidos y 349 paradas, no sobre el juguete de arriba.
+  {
+    const payload = JSON.parse(
+      await fs.readFile(path.join(projectRoot, 'public', 'data', 'network.json'), 'utf8'),
+    )
+    const realDirections = payload.lines.flatMap((line) => line.directions)
+    const from = payload.stopsById['309']
+    const to = payload.stopsById['326']
+
+    const started = Date.now()
+    const plan = routing.planRoute({
+      origin: from,
+      destination: to,
+      originName: from.stopName,
+      destinationName: to.stopName,
+      directions: realDirections,
+    })
+    const elapsed = Date.now() - started
+
+    check('cruza la ciudad real de punta a punta',
+      plan.status === 'ok' && plan.best.legs.some((leg) => leg.kind === 'bus'), plan.status)
+    check('el calculo sobre la red real es instantaneo',
+      elapsed < 1500, elapsed + ' ms')
+
+    if (plan.status === 'ok') {
+      const signature = (itinerary) => itinerary.legs
+        .filter((leg) => leg.kind === 'bus')
+        .map((leg) => leg.lineId)
+        .join('-')
+
+      check('las alternativas no repiten la ruta recomendada',
+        plan.alternatives.every((alt) => signature(alt) !== signature(plan.best)))
+      check('no hay dos tramos a pie seguidos',
+        plan.best.legs.every((leg, index) =>
+          !(leg.kind === 'walk' && plan.best.legs[index + 1]?.kind === 'walk')))
+      check('el total es la suma de sus partes',
+        Math.abs(plan.best.totalMinutes
+          - (plan.best.walkMinutes + plan.best.rideMinutes + plan.best.waitMinutes)) < 0.001)
+    }
+  }
+
+  // La pestana es experimental: apagada no puede existir ni dejar rastro.
+  {
+    const stateSource = await fs.readFile(path.join(projectRoot, 'src', 'state.ts'), 'utf8')
+    const viewsSource = await fs.readFile(path.join(projectRoot, 'src', 'views.ts'), 'utf8')
+    const mainSource = await fs.readFile(path.join(projectRoot, 'src', 'main.ts'), 'utf8')
+
+    check('la pestana Mapas viene apagada de fabrica',
+      /experimentalMaps: false/.test(stateSource))
+    check('apagada no aparece en la barra de pestanas',
+      viewsSource.includes('if (!state.settings.experimentalMaps)')
+        && viewsSource.includes('function visibleTabs()'))
+    check('una pestana Mapas guardada no revive al arrancar',
+      /const valid: TabId\[\] = \['inicio', 'buscar', 'monitor', 'seguimiento', 'ajustes'\]/
+        .test(stateSource))
+    check('al salir de la pestana se suelta el mapa y la ubicacion',
+      mainSource.includes('function closeMaps()')
+        && mainSource.includes("if (previous === 'mapas' && tab !== 'mapas')")
+        && mainSource.includes('function stopWatchingLocation()'))
+    check('el manifiesto pide los permisos de ubicacion',
+      manifest.includes('android.permission.ACCESS_COARSE_LOCATION')
+        && manifest.includes('android.permission.ACCESS_FINE_LOCATION'))
+
+    // La ubicacion se pide por partida doble: una lectura suelta que llega
+    // enseguida y un seguimiento que la afina. Solo con el seguimiento, la
+    // primera posicion puede no llegar nunca y la pantalla se queda "buscando".
+    check('la ubicacion se pide con lectura rapida Y seguimiento',
+      mainSource.includes('navigator.geolocation.getCurrentPosition(acceptPosition')
+        && mainSource.includes('navigator.geolocation.watchPosition(acceptPosition'))
+    check('una posicion peor no pisa a una mejor',
+      mainSource.includes('accuracy <= known.accuracy'))
+    // Tocar "Mi ubicacion" antes de que el sistema sepa donde estas dejaba el
+    // buscador abierto sin hacer nada: habia que volver a tocarlo a ciegas.
+    check('"Mi ubicacion" rellena el campo en cuanto llega la posicion',
+      mainSource.includes('let pendingLocationField')
+        && mainSource.includes('pendingLocationField && state.maps.picking === pendingLocationField'))
+  }
+
+  // Solo se consulta la parada desplegada: pedir las diez guardadas dejaba sin
+  // turno al aviso de proximo bus contra una fuente que limita por IP.
+  check('en Inicio solo se actualiza la parada desplegada',
+    /if \(state\.tab === 'inicio' && state\.expandedStopId\) \{/.test(mainSourceForUpdates)
+      && !/for \(const favourite of state\.favourites\) \{\s*\n\s*add\(favourite\.stopId/
+        .test(mainSourceForUpdates))
 
   console.log(`\n${passed} correctas · ${failed} fallidas`)
   process.exitCode = failed > 0 ? 1 : 0
