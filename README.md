@@ -82,7 +82,7 @@ progresiva ante un 429. Ese es el mínimo seguro; bajar de ~1,5 s vuelve a
 provocar bloqueos.
 
 Consecuencia visible: en una lista larga los tiempos **no son de un mismo
-instante**. Cada parada de «Ver por dónde viene» lleva a su derecha un punto con
+instante**. Cada parada del recorrido de un aviso lleva a su derecha un punto con
 la fase en la que está (`syncState` en `src/ui.ts`), y la tarjeta incluye la
 leyenda de colores:
 
@@ -111,8 +111,8 @@ eso es lo que permite que lo encendido llegue a tiempo.
 | Parada desplegada | 15 s | Solo la que esté abierta (una a la vez) |
 | Ficha de una parada | 15 s | Buscador y mapa; el globo del mapa ya la adelanta |
 | Aviso de próximo bus | 15 s | Solo si está activo; con la app cerrada, el servicio nativo |
-| Por dónde viene el aviso | 30 s | Solo con el autobús a menos de 20 min, y solo hasta donde puede estar |
-| Ver por dónde viene | 20 s por parada | Solo activo, en su pestaña y con la app delante |
+| Por dónde viene · mirándolo | 20 s por parada | El recorrido entero (8 paradas), con la pestaña Seguir delante |
+| Por dónde viene · de fondo | 30 s | Solo el «a N paradas»: autobús a menos de 20 min y hasta donde puede estar |
 | Puntualidad | 30 s (15 s con bus entrando) | Solo dentro de la franja del control |
 
 Los números viven **una sola vez**, en `FRESHNESS` de `src/state.ts`. Ajustes →
@@ -261,49 +261,61 @@ ejecuta cuando *llega* un dato:
   por qué la app sigue despierta. La publica solo la web, y solo para los
   controles que **no** lleva el servicio nativo, que ya publica la suya.
 
-## Funciones de seguimiento
+## El aviso de próximo bus
 
-Hay dos modalidades y las dos tienen tope, porque cada una consulta por su cuenta
-una fuente que limita por IP:
+Es la **única** función de seguimiento. Antes eran dos —el aviso, que
+notificaba los minutos, y «ver por dónde viene», que dibujaba el recorrido— y
+eran la misma pregunta partida en dos: quien espera un autobús quiere saber
+cuánto falta **y** por dónde viene, no una cosa o la otra. Tenerlas separadas
+obligaba además a elegir cuál de las dos gastaba el único turno disponible en la
+cola de consultas.
 
-Las paradas guardadas **solo se consultan cuando están desplegadas**: plegadas
-enseñan sus líneas, no tiempos, así que pedir las diez guardadas para no mirar
-ninguna era gastar cola contra una fuente que limita por IP.
+Fusionadas, un aviso hace las dos cosas: publica su notificación persistente con
+los minutos y el «a N paradas», y en su tarjeta dibuja las ocho paradas
+anteriores con el autobús situado en una de ellas.
 
-| | Máximo creadas | Notas |
+> Los «ver por dónde viene» que hubiera guardados **se retiran** al actualizar
+> (`dropLegacyFollows`). No se convierten en avisos a propósito: un recorrido no
+> publicaba notificación ni vibraba, y convertirlo pondría a sonar el móvil de
+> quien nunca pidió que sonara.
+
+| | Cuántos | Notas |
 | --- | --- | --- |
-| Aviso de próximo bus | 2 | notificación persistente con los minutos y a cuántas paradas viene; termina tras ver pasar los autobuses que se elijan en Ajustes (1 a 3, uno por defecto) |
-| Ver por dónde viene | 2 | recorrido parada a parada, una consulta cada 20 s por parada |
-| **Actualizándose a la vez** | **1 en total** | de cualquier modalidad |
+| **Creados** | **2** | por ejemplo el de la ida y el de la vuelta; se conservan enteros y se alterna de un toque |
+| **Actualizándose a la vez** | **1** | reanudar uno pausa automáticamente el otro |
 
-Al crear una por encima del tope de su modalidad se pregunta **cuál se
-sustituye**, en vez de rechazar la acción.
+Al crear uno por encima del tope se pregunta **cuál se sustituye**, en vez de
+rechazar la acción.
 
-**Solo una función se mantiene actualizada a la vez**, sea de la modalidad que
-sea. Con dos, el recorrido —ocho paradas por ciclo— y el aviso se quitaban el
-turno en una cola que admite una petición cada dos segundos, y las dos llegaban
-tarde. **Reanudar una pausa automáticamente la otra**: no hay nada que elegir ni
-ningún error que leer, y el botón lo avisa antes de pulsarlo.
+**Solo uno se mantiene actualizado.** Un aviso activo consulta su parada cada
+15 s y además rastrea las paradas anteriores; la fuente admite una petición cada
+dos segundos. Con dos, los dos llegan tarde. Reanudar uno pausa el otro: no hay
+nada que elegir ni ningún error que leer, y el botón lo avisa antes de pulsarlo.
 
-Las dos modalidades se pausan y se reanudan. Un aviso en pausa se conserva
-entero —parada, línea, autobuses ya vistos— y vuelve de un toque; lo que sí
-desaparece al pausarlo es **su notificación**, y por eso desaparece: una
-notificación persistente que ya no se actualiza es peor que ninguna, porque se
-queda enseñando una hora que dejó de ser verdad.
+Un aviso en pausa se conserva entero —parada, línea, sentido, autobuses ya
+vistos— y vuelve de un toque. Lo que sí desaparece al pausar es **su
+notificación**, y por eso desaparece: una notificación persistente que ya no se
+actualiza es peor que ninguna, porque se queda enseñando una hora que dejó de ser
+verdad. Su tarjeta tampoco dibuja el recorrido: sin consultas, las ocho filas
+solo podrían enseñar un guion cada una.
 
-Se pausa solo, sin tocar nada, en tres situaciones:
+### El aviso no se pausa solo: se degrada
 
-| Situación | Qué sigue vivo |
+Un aviso vive de sonar cuando **no** se está mirando la pantalla, así que
+pausarlo al salir de su pestaña sería tanto como borrarlo. Lo que se ajusta es
+cuánto rastrea, que es la parte cara:
+
+| Dónde estás | Qué hace el aviso |
 | --- | --- |
-| Se sale de la pestaña Seguir | solo el aviso de próximo bus que estuviera activo |
-| La app pasa a segundo plano | ídem: el aviso es justo lo que tiene sentido fuera de la pantalla |
-| Hay una franja de puntualidad abierta | nada: la pestaña entera se apaga |
+| En la pestaña Seguir | recorrido entero: 8 paradas cada 20 s, dibujadas una a una |
+| En otra pestaña, o la app en segundo plano | solo el «a N paradas»: busca hacia atrás y para en la primera que tenga el autobús encima |
+| Con una franja de puntualidad abierta | sigue dando la hora, pero no rastrea nada |
 
-La tercera es la más severa a propósito. Medir a qué hora pasa de verdad un
-autobús exige no perderse una sola consulta de **esa** parada; un recorrido pide
-ocho por ciclo. Entre las dos cosas, la que tiene una hora que perder es el
-recorrido: la franja dura minutos y no se repite hasta mañana. Mientras dure, la
-pestaña Seguir lo dice donde se ve y sus botones de reanudar están apagados.
+La última merece una nota. Medir a qué hora pasa de verdad un autobús exige no
+perderse una sola consulta de **esa** parada, y dibujar un recorrido pide ocho
+por ciclo. Pero apagar el aviso entero durante la franja sería apagar una
+notificación que alguien está esperando, así que se le quita lo caro —el
+rastreo— y se le deja lo esencial: la hora. La pestaña lo dice donde se ve.
 
 ## En qué parada está el autobús
 
@@ -321,7 +333,7 @@ Lo de «la más avanzada» no es un detalle de estilo. Las paradas se consultan 
 serie, una cada dos segundos, así que los datos de una ventana **no son del
 mismo instante**: puede quedar un «llegando» rezagado de hace medio minuto y
 otro más adelante recién traído. Como un autobús solo avanza, el índice mayor es
-siempre la verdad más nueva. Por eso cada parada de «ver por dónde viene» lleva
+siempre la verdad más nueva. Por eso cada parada del recorrido de un aviso lleva
 su punto de color: la diferencia de medio minuto entre dos renglones es el precio
 de una fuente que no deja preguntar más deprisa, no un error.
 
@@ -498,9 +510,9 @@ cruza de verdad.
 
 Los avisos de «próximo bus» los mantiene un **servicio en primer plano** nativo
 (`BusTrackingService`), no el WebView: Android congela los temporizadores de la
-página al pasar a segundo plano. El servicio lleva hasta dos avisos, cada uno con
-su notificación y su cuenta de autobuses, los consulta **en serie** dentro de
-cada ciclo y envía los datos a la interfaz mediante el plugin `BusTracking` para
+página al pasar a segundo plano. El servicio recibe solo los avisos activos —uno, por
+definición—, con su notificación y su cuenta de autobuses, y los consulta **en
+serie** dentro de cada ciclo y envía los datos a la interfaz mediante el plugin `BusTracking` para
 que pantalla y notificaciones digan siempre lo mismo.
 
 La web manda siempre la **lista completa** de avisos activos (`BusTracking.sync`),

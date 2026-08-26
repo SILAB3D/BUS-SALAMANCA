@@ -21,7 +21,19 @@ export interface FavouriteStop {
   addedAt: number
 }
 
-/** Aviso de proximo bus: notificacion persistente que se actualiza en vivo. */
+/**
+ * Aviso de proximo bus.
+ *
+ * Es la UNICA funcion de seguimiento que existe. Antes habia dos —el
+ * aviso, que notificaba los minutos, y "ver por donde viene", que dibujaba el
+ * recorrido— y eran la misma pregunta partida en dos: quien espera un autobus
+ * quiere saber cuanto falta Y por donde viene, no una cosa o la otra. Tenerlas
+ * separadas obligaba ademas a elegir cual de las dos gastaba el unico turno
+ * disponible en la cola de consultas.
+ *
+ * Fusionadas, un aviso publica su notificacion persistente y ademas ensena las
+ * paradas anteriores con el autobus situado en una de ellas.
+ */
 export interface TrackingJob {
   id: string
   stopId: string
@@ -144,18 +156,6 @@ export const MAX_TRACE_PER_MONITOR = 60
 /** Cuantos pasos se conservan por control (unos dos meses de una franja diaria). */
 export const MAX_PASSES_PER_MONITOR = 400
 
-/** Seguimiento: sigue el avance de un bus por las paradas previas a la tuya. */
-export interface FollowJob {
-  id: string
-  stopId: string
-  stopName: string
-  lineId: string
-  directionKey: string
-  /** Igual que en los avisos: creado pero en reposo mientras no este activo. */
-  active: boolean
-  createdAt: number
-}
-
 /* ------------------------------------------------------------------ *
  * Limites de las funciones de seguimiento                              *
  * ------------------------------------------------------------------ */
@@ -163,17 +163,17 @@ export interface FollowJob {
 /** Avisos de "proximo bus" que se pueden tener creados a la vez. */
 export const MAX_TRACKING_JOBS = 2
 
-/** Seguimientos de "ver por donde viene" que se pueden tener creados a la vez. */
-export const MAX_FOLLOW_JOBS = 2
-
 /**
- * Funciones que pueden estar ACTIVAS a la vez, sumando las dos modalidades.
+ * Avisos que pueden estar ACTIVOS a la vez.
  *
- * Es UNA. Cada funcion consulta la fuente oficial por su cuenta y esa fuente
- * limita por IP: con dos a la vez, el recorrido (ocho paradas por ciclo) y el
- * aviso se quitaban el turno en la cola y las dos llegaban tarde. Reanudar una
- * funcion pausa automaticamente la otra, asi que no hay nada que administrar:
- * lo que se acaba de tocar es lo que se esta mirando.
+ * Es UNO. Un aviso activo consulta su parada cada 15 s y ademas rastrea las
+ * paradas anteriores para situar el autobus; la fuente oficial limita por IP y
+ * solo admite una peticion cada dos segundos. Con dos, los dos llegan tarde.
+ *
+ * Se pueden tener DOS creados —el de la ida y el de la vuelta, por ejemplo— y
+ * alternar de un toque: reanudar uno pausa automaticamente el otro. Un aviso en
+ * reposo conserva su parada, su linea, su sentido y los autobuses ya contados,
+ * pero no consulta ni publica notificacion.
  */
 export const MAX_ACTIVE_JOBS = 1
 
@@ -206,19 +206,27 @@ export const FRESHNESS = {
   focused: 15_000,
   /** Resto de paradas guardadas visibles. Hoy solo se usa en el repaso de arranque. */
   visible: 45_000,
-  /** Cada parada del recorrido de un "ver por donde viene" activo. */
-  follow: 20_000,
   /**
-   * Paradas anteriores que mira un aviso de proximo bus para saber por donde
-   * viene.
+   * Paradas anteriores de un aviso MIENTRAS SE MIRA su pestana.
    *
-   * Mas espaciado que un recorrido completo (20 s) porque es informacion
-   * secundaria: lo que el aviso tiene que clavar es el tiempo de SU parada, y
-   * esa va aparte a 15 s. Un autobus urbano tarda minuto y medio en pasar de
-   * una parada a la siguiente, asi que medio minuto de retraso en el recuento
-   * no llega a valer media parada.
+   * Es el recorrido entero, dibujado parada a parada. Solo se sostiene con la
+   * pestana Seguir delante: son ocho paradas por ciclo contra una fuente que
+   * admite una peticion cada dos segundos.
    */
-  trackingRoute: 30_000,
+  routeVisible: 20_000,
+
+  /**
+   * Paradas anteriores de un aviso FUERA de su pestana o en segundo plano.
+   *
+   * Ahi el recorrido no se dibuja —nadie lo mira— y lo unico que hace falta es
+   * el "a N paradas" de la notificacion, que se resuelve buscando de tu parada
+   * hacia atras y parando en la primera que tenga el autobus encima. Mas
+   * espaciado porque es informacion secundaria: lo que el aviso tiene que
+   * clavar es el tiempo de SU parada, y esa va aparte a 15 s. Un autobus urbano
+   * tarda minuto y medio entre paradas, asi que medio minuto de retraso en el
+   * recuento no llega a valer media parada.
+   */
+  routeBackground: 30_000,
   /** Parada de un control de puntualidad dentro de su franja. */
   monitor: 30_000,
 }
@@ -331,14 +339,13 @@ export interface AppState {
   monitorTrace: Record<string, MonitorTrace[]>
   /** Controles cuyo registro esta desplegado en la pantalla de puntualidad. */
   monitorTraceOpen: Record<string, boolean>
-  follows: FollowJob[]
 
   sheet:
     | { kind: 'stop-actions', stopId: string }
-    | { kind: 'pick-line', stopId: string, purpose: 'tracking' | 'monitor' | 'follow' }
+    | { kind: 'pick-line', stopId: string, purpose: 'tracking' | 'monitor' }
     | { kind: 'rename', stopId: string }
     /** Se ha alcanzado el limite de esa modalidad: hay que sustituir una. */
-    | { kind: 'replace-job', stopId: string, purpose: 'tracking' | 'follow' }
+    | { kind: 'replace-job', stopId: string }
     | null
 
   draft: {
@@ -510,6 +517,7 @@ const KEYS = {
   monitorPasses: 'salbus.monitorPasses',
   monitorRuntime: 'salbus.monitorRuntime',
   monitorTrace: 'salbus.monitorTrace',
+  /** Formato antiguo: los "ver por donde viene", retirados al fusionarse. */
   follows: 'salbus.follows',
   logs: 'salbus.logs',
   tab: 'salbus.tab',
@@ -548,10 +556,25 @@ function readTrackings(): TrackingJob[] {
     }))
 }
 
-/** Un trabajo guardado sin `active` (formato antiguo) se considera activo. */
-function normalizeFollow(job: FollowJob): FollowJob {
-  return { ...job, active: job.active !== false }
+/**
+ * Tira los "ver por donde viene" guardados.
+ *
+ * La modalidad ya no existe: el aviso hace las dos cosas. No se convierten en
+ * avisos a proposito —un recorrido no publicaba notificacion ni vibraba, y
+ * convertirlo pondria a sonar el movil de quien nunca pidio que sonara—, asi
+ * que se retiran y quien los quiera los vuelve a crear como aviso.
+ */
+function dropLegacyFollows(): void {
+  try {
+    window.localStorage.removeItem(KEYS.follows)
+  } catch {
+    /* almacenamiento no disponible */
+  }
 }
+
+// La modalidad "ver por donde viene" ya no existe: lo que quedara guardado de
+// ella se retira al arrancar, antes de montar el estado.
+dropLegacyFollows()
 
 export const state: AppState = {
   ready: false,
@@ -598,10 +621,6 @@ export const state: AppState = {
   monitorSeenAt: {},
   monitorTrace: readJson<Record<string, MonitorTrace[]>>(KEYS.monitorTrace, {}),
   monitorTraceOpen: {},
-  follows: readJson<FollowJob[]>(KEYS.follows, [])
-    .filter((item) => typeof item?.id === 'string')
-    .map(normalizeFollow),
-
   sheet: null,
 
   draft: {
@@ -786,10 +805,6 @@ function readPasses(): MonitorPasses {
   return migrated
 }
 
-export function persistFollows(): void {
-  writeJson(KEYS.follows, state.follows)
-}
-
 /**
  * Compilacion que se lanzo a instalar y todavia no se ha confirmado.
  *
@@ -852,75 +867,35 @@ export function clearLogs(): void {
  * ------------------------------------------------------------------ */
 
 /* ------------------------------------------------------------------ *
- * Funciones de seguimiento activas                                     *
+ * Avisos activos                                                       *
  * ------------------------------------------------------------------ */
-
-/** Una funcion de seguimiento, vista sin importar de que modalidad sea. */
-export interface JobRef {
-  kind: 'tracking' | 'follow'
-  id: string
-  active: boolean
-  createdAt: number
-}
-
-/** Todas las funciones creadas, de la mas antigua a la mas reciente. */
-export function allJobs(): JobRef[] {
-  return [
-    ...state.trackings.map((job) => ({
-      kind: 'tracking' as const,
-      id: job.id,
-      active: job.active,
-      createdAt: job.startedAt,
-    })),
-    ...state.follows.map((job) => ({
-      kind: 'follow' as const,
-      id: job.id,
-      active: job.active,
-      createdAt: job.createdAt,
-    })),
-  ].sort((left, right) => left.createdAt - right.createdAt)
-}
 
 export function activeJobCount(): number {
   return state.trackings.filter((job) => job.active).length
-    + state.follows.filter((job) => job.active).length
-}
-
-/** Apaga una funcion concreta, sea de la modalidad que sea. */
-export function deactivateJob(ref: JobRef): void {
-  if (ref.kind === 'tracking') {
-    const job = state.trackings.find((item) => item.id === ref.id)
-    if (job) {
-      job.active = false
-    }
-    return
-  }
-
-  const job = state.follows.find((item) => item.id === ref.id)
-  if (job) {
-    job.active = false
-  }
 }
 
 /**
- * Deja como mucho MAX_ACTIVE_JOBS funciones activas, apagando siempre las mas
- * antiguas: al crear o activar una, la ultima en llegar es la que interesa.
+ * Deja como mucho MAX_ACTIVE_JOBS avisos activos, pausando siempre los mas
+ * antiguos: al crear o reanudar uno, el ultimo en llegar es el que interesa.
  *
- * @param keepId Funcion que nunca se apaga (la que se acaba de crear o activar).
- * @returns Las funciones que se han apagado, para poder avisar de ello.
+ * @param keepId Aviso que nunca se pausa (el que se acaba de crear o reanudar).
+ * @returns Los avisos que se han pausado, para poder avisar de ello.
  */
-export function enforceActiveLimit(keepId?: string): JobRef[] {
-  const turnedOff: JobRef[] = []
-  const active = allJobs().filter((job) => job.active && job.id !== keepId)
+export function enforceActiveLimit(keepId?: string): TrackingJob[] {
+  const turnedOff: TrackingJob[] = []
 
-  // El excedente se cuenta sobre el total, incluida la funcion protegida.
+  const active = state.trackings
+    .filter((job) => job.active && job.id !== keepId)
+    .sort((left, right) => left.startedAt - right.startedAt)
+
+  // El excedente se cuenta sobre el total, incluido el aviso protegido.
   let excess = activeJobCount() - MAX_ACTIVE_JOBS
 
   for (const job of active) {
     if (excess <= 0) {
       break
     }
-    deactivateJob(job)
+    job.active = false
     turnedOff.push(job)
     excess -= 1
   }

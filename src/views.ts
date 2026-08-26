@@ -11,13 +11,12 @@ import {
   locateBus,
   ROUTE_SCAN_MAX_MINUTES,
   ROUTE_FIX_MAX_AGE_MS,
-  ROUTE_SCAN_MAX_STOPS,
+  ROUTE_WINDOW_STOPS,
   stopsAwayFrom,
 } from './services/bus-position'
 import { currentDayType } from './services/schedule'
 import {
   activeJobCount,
-  anyMonitorWindowOpen,
   APP_VERSION,
   AUTO_CYCLE_MS,
   FRESHNESS,
@@ -27,7 +26,6 @@ import {
   isFavourite,
   isWithinWindow,
   MAX_ACTIVE_JOBS,
-  MAX_FOLLOW_JOBS,
   MAX_TRACKING_JOBS,
   state,
   TRACKING_INTERVAL_SECONDS,
@@ -195,7 +193,7 @@ export function trackingStopsAway(job: TrackingJob): number | null {
   const window = state.network.getDirectionWindow(
     job.directionKey,
     job.stopId,
-    ROUTE_SCAN_MAX_STOPS + 1,
+    ROUTE_WINDOW_STOPS + 1,
   )
 
   if (window.length === 0) {
@@ -506,7 +504,7 @@ function renderInicio(): string {
       </div>
       <div class="hero-stats">
         <div class="hero-stat"><strong>${favourites.length}</strong><span>Paradas</span></div>
-        <div class="hero-stat"><strong>${state.follows.length}</strong><span>Seguimientos</span></div>
+        <div class="hero-stat"><strong>${state.trackings.length}</strong><span>Avisos</span></div>
         <div class="hero-stat"><strong>${state.monitors.length}</strong><span>Controles</span></div>
       </div>
     </section>
@@ -565,74 +563,196 @@ function renderTrackingBanner(tracking: TrackingJob): string {
     ? `Autobús ${Math.min(tracking.busesSeen + 1, target)} de ${target} · `
     : ''
 
-  // Dónde viene el autobús, con la misma detección que "ver por dónde viene".
+  // Dónde viene el autobús, con la misma detección que dibuja el recorrido.
   // Solo mientras el aviso trabaja: en pausa nadie está mirando las paradas
   // anteriores, así que el número que hubiera es de hace rato.
   const stopsAway = tracking.active ? describeStopsAway(trackingStopsAway(tracking)) : ''
 
   return `
     <section class="card${tracking.active ? '' : ' is-paused'}" data-key="tracking-${esc(tracking.id)}">
-      <div class="card-head">
-        ${lineChip(tracking.lineId, lineColor(tracking.lineId), 'lg')}
-        <div class="card-head-copy">
-          <h2 class="card-title">${esc(tracking.stopName)}</h2>
-          <p class="card-sub${stopsAway ? ' is-wrap' : ''}">${esc(
-            progress + describeArrival(tracking.stopId, tracking.lineId),
-          )}${
-            stopsAway ? `<span class="stops-away">${icon('bus')}${esc(stopsAway)}</span>` : ''
-          }</p>
-        </div>
-        <div class="card-actions">
-          <div class="arrival-eta">${
-            !tracking.active
-              ? '<span class="eta-unit">en pausa</span>'
-              : arrival
-                ? renderEta(arrival)
-                : '<span class="eta-unit">buscando…</span>'
-          }</div>
-          ${renderJobToggle('tracking', tracking.id, tracking.active)}
-          <button class="mini-btn is-danger" type="button" data-action="stop-tracking" data-tracking="${esc(
-            tracking.id,
-          )}" aria-label="Detener el aviso">${icon('bellOff')}</button>
-        </div>
+      ${renderTrackingHead(tracking, arrival, progress, stopsAway)}
+    </section>
+  `
+}
+
+/**
+ * Cabecera de un aviso: parada, sentido, tiempo que falta y los dos botones.
+ *
+ * La comparten la tarjeta compacta de Inicio y la completa de Seguir. Inicio es
+ * un vistazo —cuánto falta— y no dibuja el recorrido; la pestaña Seguir es donde
+ * se va a mirar por dónde viene, y ahí sí.
+ */
+function renderTrackingHead(
+  tracking: TrackingJob,
+  arrival: Arrival | null,
+  progress: string,
+  stopsAway: string,
+  /**
+   * El subtitulo puede ocupar dos lineas.
+   *
+   * En la tarjeta completa si, porque ahi sobra sitio y el subtitulo lleva tres
+   * cosas —el contador de autobuses, el sentido y por donde viene— que juntas no
+   * caben en una linea: se quedaba en "Autobus 1 de 3 · Haci…", que es
+   * justamente perder el unico dato que dice hacia donde va. En el vistazo de
+   * Inicio no, porque alli lo que manda es que cada aviso ocupe poco.
+   */
+  wrap = false,
+): string {
+  return `
+    <div class="card-head">
+      ${lineChip(tracking.lineId, lineColor(tracking.lineId), 'lg')}
+      <div class="card-head-copy">
+        <h2 class="card-title">${esc(tracking.stopName)}</h2>
+        <p class="card-sub${wrap || stopsAway ? ' is-wrap' : ''}">${esc(
+          progress + describeArrival(tracking.stopId, tracking.lineId),
+        )}${
+          stopsAway ? `<span class="stops-away">${icon('bus')}${esc(stopsAway)}</span>` : ''
+        }</p>
+      </div>
+      <div class="card-actions">
+        <div class="arrival-eta">${
+          !tracking.active
+            ? '<span class="eta-unit">en pausa</span>'
+            : arrival
+              ? renderEta(arrival)
+              : '<span class="eta-unit">buscando…</span>'
+        }</div>
+        ${renderJobToggle(tracking.id, tracking.active)}
+        <button class="mini-btn is-danger" type="button" data-action="stop-tracking" data-tracking="${esc(
+          tracking.id,
+        )}" aria-label="Quitar el aviso">${icon('bellOff')}</button>
+      </div>
+    </div>
+  `
+}
+
+/**
+ * Un aviso entero, tal y como se ve en la pestaña Seguir.
+ *
+ * Es la fusión de lo que antes eran dos funciones: el aviso decía cuánto falta y
+ * "ver por dónde viene" dibujaba el recorrido. Eran la misma pregunta partida en
+ * dos, y encima competían por el único turno disponible en la cola de consultas.
+ */
+function renderTrackingCard(tracking: TrackingJob): string {
+  const feed = feedOf(tracking.stopId)
+  const arrival = feed?.arrivals.find((item) => item.lineId === tracking.lineId) ?? null
+  const target = trackingBusTarget()
+  const progress = target > 1
+    ? `Autobús ${Math.min(tracking.busesSeen + 1, target)} de ${target} · `
+    : ''
+  const stopsAway = tracking.active ? describeStopsAway(trackingStopsAway(tracking)) : ''
+
+  return `
+    <section class="card${tracking.active ? '' : ' is-paused'}" data-key="tracking-${esc(tracking.id)}">
+      ${renderTrackingHead(tracking, arrival, progress, stopsAway, true)}
+      <div class="card-body">
+        ${
+          // En pausa NO se dibuja el recorrido. Un aviso en reposo no consulta,
+          // así que la fila de cada parada solo podría enseñar un guion: ocho
+          // renglones vacíos que ocupan media pantalla y no dicen nada. Se
+          // sustituyen por la única frase que sí informa, que es por qué está
+          // vacío y cómo se llena.
+          tracking.active
+            ? renderTrackingRoute(tracking)
+            : '<p class="text-tiny">En pausa: no consulta ni avisa. Reanúdalo para ver por dónde viene; solo un aviso se mantiene actualizado a la vez.</p>'
+        }
       </div>
     </section>
   `
 }
 
 /**
- * Interruptor de una función de seguimiento.
+ * Las paradas anteriores, con el autobús situado en una de ellas.
  *
- * Una función en reposo no se borra: sigue creada y con su configuración, pero
- * no consulta ni publica notificación. Es lo que permite alternar entre las
- * cuatro que se pueden crear sin volver a montarlas cada vez.
- *
- * Solo UNA se mantiene actualizada a la vez, sea de la modalidad que sea:
- * reanudar una pausa automáticamente la otra. No hay nada que elegir ni ningún
- * error que leer, y el botón lo avisa antes de pulsarlo.
+ * Solo se puede dibujar sabiendo el sentido, porque las paradas anteriores solo
+ * existen dentro de un recorrido concreto. Un aviso creado antes de la fusión en
+ * una parada por la que la línea pasa en los dos sentidos puede no tenerlo:
+ * entonces se dice, en vez de dejar un hueco que parece un fallo.
  */
-function renderJobToggle(kind: 'tracking' | 'follow', id: string, active: boolean): string {
+function renderTrackingRoute(tracking: TrackingJob): string {
+  const network = state.network
+  if (!network) {
+    return ''
+  }
+
+  if (!tracking.directionKey) {
+    return notice(
+      'info',
+      'Por esta parada pasa la línea en los dos sentidos y este aviso no fijó ninguno, así que no se puede saber por dónde viene. Vuelve a crearlo para elegir el sentido.',
+    )
+  }
+
+  const windowStops = network.getDirectionWindow(
+    tracking.directionKey,
+    tracking.stopId,
+    ROUTE_WINDOW_STOPS,
+  )
+
+  if (windowStops.length === 0) {
+    return notice('warn', 'No se pudo reconstruir el recorrido de esta línea.')
+  }
+
+  // Misma regla que usa la notificación para contar paradas: una sola
+  // implementación, o la tarjeta y el aviso situarían el autobús en sitios
+  // distintos con los mismos datos delante.
+  const busIndex = locateBusInWindow(windowStops, tracking.lineId)
+
+  return `
+    <div class="timeline">
+      ${windowStops
+        .map((stop, index) => {
+          const feed = feedOf(stop.stopId)
+          const arrival = feed?.arrivals
+            .filter((item) => item.lineId === tracking.lineId)
+            .sort((left, right) => liveMinutes(left) - liveMinutes(right))[0]
+
+          const isTarget = stop.stopId === tracking.stopId
+          const isBus = index === busIndex
+          const classes = [isTarget ? 'is-target' : '', isBus ? 'is-bus' : ''].filter(Boolean).join(' ')
+          const eta = arrival
+            ? liveMinutes(arrival) <= 0
+              ? 'aquí'
+              : `${liveMinutes(arrival)} min`
+            : '—'
+
+          return `
+            <div class="timeline-stop ${classes}">
+              <div class="timeline-rail"><span class="timeline-dot"></span></div>
+              <span class="timeline-name">${esc(stop.stopName)}</span>
+              <span class="timeline-eta">${esc(eta)}</span>
+              ${syncDot(feed, state.stopSync[stop.stopId])}
+            </div>
+          `
+        })
+        .join('')}
+    </div>
+    ${renderSyncLegend()}
+  `
+}
+
+/**
+ * Interruptor de un aviso.
+ *
+ * Un aviso en reposo no se borra: sigue creado y con su parada, su línea, su
+ * sentido y los autobuses ya contados, pero no consulta ni publica
+ * notificación. Es lo que permite tener montados el de la ida y el de la vuelta
+ * y alternar de un toque sin volver a configurarlos.
+ *
+ * Solo uno se mantiene actualizado a la vez: reanudar uno pausa automáticamente
+ * el otro. No hay nada que elegir ni ningún error que leer, y el botón lo avisa
+ * antes de pulsarlo.
+ */
+function renderJobToggle(id: string, active: boolean): string {
   const swaps = !active && activeJobCount() >= MAX_ACTIVE_JOBS
-  // Mientras se mide la puntualidad no se reanuda nada: esa cola es de la
-  // parada que se está midiendo.
-  const blocked = !active && anyMonitorWindowOpen()
 
   return `
     <button
       class="mini-btn${active ? ' is-on' : ''}"
       type="button"
       data-action="toggle-job"
-      data-kind="${kind}"
       data-job="${esc(id)}"
-      ${blocked ? 'disabled' : ''}
       aria-label="${active ? 'Pausar' : 'Reanudar'}"
-      title="${
-        blocked
-          ? 'Hay un control de puntualidad midiendo'
-          : swaps
-            ? 'Se pausará la otra: solo una se mantiene actualizada a la vez'
-            : ''
-      }"
+      title="${swaps ? 'Se pausará el otro aviso: solo uno se mantiene actualizado a la vez' : ''}"
     >${icon(active ? 'pause' : 'play')}</button>
   `
 }
@@ -1117,18 +1237,19 @@ function renderArrivalRow(arrival: Arrival, stopId: string, showStop: boolean): 
 function renderSeguimiento(): string {
   // Mientras hay una franja de puntualidad abierta esta pestaña está apagada.
   // No es una restricción de adorno: medir a qué hora pasa de verdad un autobús
-  // obliga a no perderse una sola consulta de ESA parada, y un recorrido pide
-  // ocho paradas por ciclo contra una fuente que admite una cada dos segundos.
-  // Entre las dos cosas, la que tiene una hora que perder es la medición.
+  // obliga a no perderse una sola consulta de ESA parada, y dibujar el recorrido
+  // pide ocho paradas por ciclo contra una fuente que admite una cada dos
+  // segundos. El aviso NO se pausa —es una notificación que alguien espera— pero
+  // sí deja de rastrear el recorrido mientras dura la franja.
   const measuring = state.monitors.filter((monitor) => isWithinWindow(monitor))
 
-  if (state.follows.length === 0 && state.trackings.length === 0) {
+  if (state.trackings.length === 0) {
     return `
       <section class="card"><div class="card-body">
         ${emptyState(
-          'route',
-          'Sin seguimientos',
-          'Abre una parada guardada y elige “Avisos y seguimiento”.',
+          'bell',
+          'Sin avisos',
+          'Abre una parada guardada y elige “Avisos y seguimiento”: verás los minutos que faltan y por dónde viene el autobús.',
           '<button class="btn btn-primary" type="button" data-action="tab" data-tab="inicio">Ir a mis paradas</button>',
         )}
       </div></section>
@@ -1142,7 +1263,7 @@ function renderSeguimiento(): string {
             'warn',
             `Hay ${measuring.length === 1 ? 'un control' : `${measuring.length} controles`} de puntualidad midiendo hasta las ${formatMinutesClock(
               Math.max(...measuring.map((monitor) => monitor.endMinutes)),
-            )}. Mientras dure, esta pestaña está en pausa: las consultas van a la parada que se está midiendo.`,
+            )}. El aviso sigue dando la hora, pero hasta entonces no rastrea por dónde viene: esas consultas van a la parada que se está midiendo.`,
           )
         : ''
     }
@@ -1151,16 +1272,8 @@ function renderSeguimiento(): string {
       'Avisos de próximo bus',
       `${state.trackings.length} de ${MAX_TRACKING_JOBS}`,
       'bell',
-      state.trackings.map((job) => renderTrackingBanner(job)).join(''),
-      state.trackings.length === 0 ? 'Sin avisos creados.' : '',
-    )}
-
-    ${renderJobGroup(
-      'Ver por dónde viene',
-      `${state.follows.length} de ${MAX_FOLLOW_JOBS}`,
-      'route',
-      state.follows.map((follow) => renderFollowCard(follow.id)).join(''),
-      state.follows.length === 0 ? 'Sin seguimientos creados.' : '',
+      state.trackings.map((job) => renderTrackingCard(job)).join(''),
+      '',
     )}
   `
 }
@@ -1183,82 +1296,6 @@ function renderJobGroup(
         <span class="job-group-count">${esc(subtitle)}</span>
       </header>
       ${emptyMessage ? `<p class="job-group-empty">${esc(emptyMessage)}</p>` : body}
-    </section>
-  `
-}
-
-function renderFollowCard(followId: string): string {
-  const follow = state.follows.find((item) => item.id === followId)
-  const network = state.network
-  if (!follow || !network) {
-    return ''
-  }
-
-  const windowStops = network.getDirectionWindow(follow.directionKey, follow.stopId, 8)
-  const direction = network.directionByKey.get(follow.directionKey)
-
-  // Misma regla que usa el aviso de próximo bus para contar paradas: una sola
-  // implementación, o las dos pantallas acabarían situando el autobús en sitios
-  // distintos con los mismos datos delante.
-  const busIndex = locateBusInWindow(windowStops, follow.lineId)
-
-  const etas = windowStops.map((stop) => {
-    const feed = feedOf(stop.stopId)
-    const arrival = feed?.arrivals
-      .filter((item) => item.lineId === follow.lineId)
-      .sort((left, right) => liveMinutes(left) - liveMinutes(right))[0]
-
-    return { stop, arrival, feed }
-  })
-
-  return `
-    <section class="card${follow.active ? '' : ' is-paused'}" data-key="follow-${esc(follow.id)}">
-      <div class="card-head">
-        ${lineChip(follow.lineId, lineColor(follow.lineId), 'lg')}
-        <div class="card-head-copy">
-          <h2 class="card-title">${esc(follow.stopName)}</h2>
-          <p class="card-sub">${esc(direction ? directionLabel(direction) : `Línea ${follow.lineId}`)}</p>
-        </div>
-        <div class="card-actions">
-          ${renderJobToggle('follow', follow.id, follow.active)}
-          <button class="mini-btn is-danger" type="button" data-action="remove-follow" data-follow="${esc(
-            follow.id,
-          )}" aria-label="Quitar seguimiento">${icon('trash')}</button>
-        </div>
-      </div>
-      <div class="card-body">
-        ${
-          follow.active
-            ? ''
-            : '<p class="text-tiny">En pausa. Se detiene sola al salir de esta pestaña.</p>'
-        }
-        ${
-          windowStops.length === 0
-            ? notice('warn', 'No se pudo reconstruir el recorrido de esta línea.')
-            : `<div class="timeline">${etas
-                .map(({ stop, arrival, feed }, index) => {
-                  const isTarget = stop.stopId === follow.stopId
-                  const isBus = index === busIndex
-                  const classes = [isTarget ? 'is-target' : '', isBus ? 'is-bus' : ''].filter(Boolean).join(' ')
-                  const eta = arrival
-                    ? liveMinutes(arrival) <= 0
-                      ? 'aquí'
-                      : `${liveMinutes(arrival)} min`
-                    : '—'
-
-                  return `
-                    <div class="timeline-stop ${classes}">
-                      <div class="timeline-rail"><span class="timeline-dot"></span></div>
-                      <span class="timeline-name">${esc(stop.stopName)}</span>
-                      <span class="timeline-eta">${esc(eta)}</span>
-                      ${syncDot(feed, state.stopSync[stop.stopId])}
-                    </div>
-                  `
-                })
-                .join('')}</div>
-              ${renderSyncLegend()}`
-        }
-      </div>
     </section>
   `
 }
@@ -1572,9 +1609,9 @@ const TOUR: TourStep[] = [
     body: 'Encuentra una parada por su nombre, recorriendo una línea o tocándola en el mapa.',
   },
   {
-    iconName: 'route',
+    iconName: 'bell',
     title: 'Seguir',
-    body: 'Avisos de próximo bus, que llegan aunque cierres la app, y el recorrido parada a parada de la línea que elijas.',
+    body: 'El aviso de próximo bus: te dice los minutos que faltan, por cuántas paradas viene y te llega aunque cierres la app.',
   },
   {
     iconName: 'chart',
@@ -2290,14 +2327,14 @@ function renderRefreshRulesCard(): string {
       `Solo si está activo. Con la app cerrada lo lleva el servicio en segundo plano, que consulta cada ${TRACKING_INTERVAL_SECONDS} s.`,
     ],
     [
-      'Por dónde viene el aviso',
-      seconds(FRESHNESS.trackingRoute),
-      `Las paradas anteriores, para decir a cuántas está. Solo con el autobús a menos de ${ROUTE_SCAN_MAX_MINUTES} min, y solo hasta donde puede estar: se para en la primera que lo tenga encima.`,
+      'Por dónde viene · mirándolo',
+      seconds(FRESHNESS.routeVisible),
+      `El recorrido entero (${ROUTE_WINDOW_STOPS} paradas) mientras la pestaña Seguir está delante. Son ${ROUTE_WINDOW_STOPS * 2} s de cola por vuelta: solo se sostiene con la pantalla puesta.`,
     ],
     [
-      'Ver por dónde viene',
-      seconds(FRESHNESS.follow),
-      'Solo si está activo, dentro de la pestaña Seguir y con la app delante. Son ocho paradas por ciclo: se para solo al salir.',
+      'Por dónde viene · de fondo',
+      seconds(FRESHNESS.routeBackground),
+      `Fuera de la pestaña solo se busca el "a N paradas" del aviso: con el autobús a menos de ${ROUTE_SCAN_MAX_MINUTES} min, hasta donde puede estar, y parando en la primera parada que lo tenga encima.`,
     ],
     [
       'Puntualidad',
@@ -2383,21 +2420,20 @@ function renderTrackingRulesCard(): string {
         </p>
 
         <dl class="kv">
-          <dt>Avisos de próximo bus</dt><dd>máximo ${MAX_TRACKING_JOBS} creados</dd>
-          <dt>Ver por dónde viene</dt><dd>máximo ${MAX_FOLLOW_JOBS} creados</dd>
-          <dt>Actualizándose a la vez</dt><dd>${MAX_ACTIVE_JOBS}, de cualquier tipo</dd>
-          <dt>Al reanudar una</dt><dd>se pausa automáticamente la otra</dd>
-          <dt>Al crear una de más</dt><dd>se pide sustituir una de esa modalidad</dd>
-          <dt>Al salir de la pestaña Seguir</dt><dd>solo sigue el aviso de próximo bus</dd>
-          <dt>Midiendo puntualidad</dt><dd>la pestaña Seguir se pausa entera</dd>
+          <dt>Avisos creados</dt><dd>máximo ${MAX_TRACKING_JOBS}</dd>
+          <dt>Actualizándose a la vez</dt><dd>${MAX_ACTIVE_JOBS}</dd>
+          <dt>Al reanudar uno</dt><dd>se pausa automáticamente el otro</dd>
+          <dt>Al crear uno de más</dt><dd>se pide cuál se sustituye</dd>
+          <dt>Fuera de la pestaña Seguir</dt><dd>sigue avisando, sin dibujar el recorrido</dd>
+          <dt>Midiendo puntualidad</dt><dd>sigue avisando, sin rastrear por dónde viene</dd>
         </dl>
 
         <p class="text-tiny">
-          Un aviso activo mira también las paradas anteriores para decir a cuántas viene el
-          autobús, con la misma detección que “ver por dónde viene”. Para eso hace falta saber por
-          qué recorrido viene, y la fuente oficial nunca lo dice: cuando por tu parada pasa la
-          línea en los dos sentidos, se pregunta al crear el aviso. Por el resto de paradas pasa
-          uno solo y no hay nada que elegir.
+          Un aviso hace las dos cosas que antes estaban separadas: la notificación con los minutos
+          que faltan y el recorrido parada a parada con el autobús situado en una de ellas. Para lo
+          segundo hace falta saber por qué sentido viene, y la fuente oficial nunca lo dice: cuando
+          por tu parada pasa la línea en los dos sentidos, se pregunta al crear el aviso. Por el
+          resto de paradas pasa uno solo y no hay nada que elegir.
         </p>
 
         ${renderSettingRow(
@@ -2512,7 +2548,7 @@ function renderSheet(): string {
       : sheet.kind === 'pick-line'
         ? renderPickLineSheet(sheet.stopId, sheet.purpose)
         : sheet.kind === 'replace-job'
-          ? renderReplaceJobSheet(sheet.stopId, sheet.purpose)
+          ? renderReplaceJobSheet(sheet.stopId)
           : renderRenameSheet(sheet.stopId)
 
   return `
@@ -2537,16 +2573,7 @@ function renderStopActionsSheet(stopId: string): string {
         ${icon('bell')}
         <span class="sheet-option-copy">
           <strong>Avisarme del próximo bus</strong>
-          <span>Notificación fija con los minutos que faltan · ${state.trackings.length} de ${MAX_TRACKING_JOBS} creados.</span>
-        </span>
-      </button>
-      <button class="sheet-option" type="button" data-action="pick-line" data-stop="${esc(
-        stopId,
-      )}" data-purpose="follow">
-        ${icon('route')}
-        <span class="sheet-option-copy">
-          <strong>Ver por dónde viene</strong>
-          <span>Las paradas anteriores y en cuál está el autobús · ${state.follows.length} de ${MAX_FOLLOW_JOBS} creados.</span>
+          <span>Notificación fija con los minutos que faltan y por dónde viene · ${state.trackings.length} de ${MAX_TRACKING_JOBS} creados.</span>
         </span>
       </button>
       <button class="sheet-option" type="button" data-action="pick-line" data-stop="${esc(
@@ -2563,54 +2590,32 @@ function renderStopActionsSheet(stopId: string): string {
 }
 
 /**
- * Se ha alcanzado el tope de esa modalidad.
+ * Se ha alcanzado el tope de avisos creados.
  *
  * En vez de rechazar la acción con un error, se enseña lo que ya hay y se pide
- * cuál se sustituye: la persona ya ha decidido que quiere esta función nueva, y
+ * cuál se sustituye: quien lo pide ya ha decidido que quiere este aviso nuevo, y
  * lo único que falta por saber es a costa de cuál.
  */
-function renderReplaceJobSheet(stopId: string, purpose: 'tracking' | 'follow'): string {
-  const isTracking = purpose === 'tracking'
-  const limit = isTracking ? MAX_TRACKING_JOBS : MAX_FOLLOW_JOBS
-  const title = isTracking ? 'Avisarme del próximo bus' : 'Ver por dónde viene'
-
-  const jobs: Array<{ id: string, lineId: string, stopName: string, meta: string, active: boolean }> =
-    isTracking
-      ? state.trackings.map((job) => ({
-          id: job.id,
-          lineId: job.lineId,
-          stopName: job.stopName,
-          meta: describeArrival(job.stopId, job.lineId),
-          active: job.active,
-        }))
-      : state.follows.map((job) => ({
-          id: job.id,
-          lineId: job.lineId,
-          stopName: job.stopName,
-          meta: (() => {
-            const direction = state.network?.directionByKey.get(job.directionKey)
-            return direction ? directionLabel(direction) : `Línea ${job.lineId}`
-          })(),
-          active: job.active,
-        }))
-
+function renderReplaceJobSheet(stopId: string): string {
   return `
     <div class="sheet-head">
-      <h3>${esc(title)}</h3>
-      <p>Ya tienes ${limit} de ${limit}. Elige cuál se sustituye por la de ${esc(stopName(stopId))}.</p>
+      <h3>Avisarme del próximo bus</h3>
+      <p>Ya tienes ${MAX_TRACKING_JOBS} de ${MAX_TRACKING_JOBS}. Elige cuál se sustituye por el de ${esc(
+        stopName(stopId),
+      )}.</p>
     </div>
 
     <div class="sheet-options">
-      ${jobs
+      ${state.trackings
         .map(
           (job) => `
         <button class="sheet-option" type="button" data-action="replace-job" data-stop="${esc(
           stopId,
-        )}" data-purpose="${purpose}" data-job="${esc(job.id)}">
+        )}" data-job="${esc(job.id)}">
           ${lineChip(job.lineId, lineColor(job.lineId))}
           <span class="sheet-option-copy">
             <strong>${esc(job.stopName)}</strong>
-            <span>${esc(job.meta)} · ${job.active ? 'activa' : 'en pausa'}</span>
+            <span>${esc(describeArrival(job.stopId, job.lineId))} · ${job.active ? 'activo' : 'en pausa'}</span>
           </span>
           ${icon('chevron')}
         </button>
@@ -2625,14 +2630,13 @@ function renderReplaceJobSheet(stopId: string, purpose: 'tracking' | 'follow'): 
   `
 }
 
-function renderPickLineSheet(stopId: string, purpose: 'tracking' | 'monitor' | 'follow'): string {
+function renderPickLineSheet(stopId: string, purpose: 'tracking' | 'monitor'): string {
   const network = state.network
   const lines = network?.getLinesForStop(stopId) ?? []
   const selectedLineId = state.draft.lineId || lines[0]?.lineId || ''
   const directions = selectedLineId ? network?.getDirectionsThroughStop(stopId, selectedLineId) ?? [] : []
 
-  const title =
-    purpose === 'tracking' ? 'Avisarme del próximo bus' : purpose === 'follow' ? 'Ver por dónde viene' : 'Medir puntualidad'
+  const title = purpose === 'tracking' ? 'Avisarme del próximo bus' : 'Medir puntualidad'
 
   if (lines.length === 0) {
     return `

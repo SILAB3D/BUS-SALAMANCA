@@ -1121,16 +1121,18 @@ async function main() {
     check('reanudar una pausa automaticamente la otra',
       mainSource.includes('enforceActiveLimit(id)'))
 
-    // "Al dia" son 40 s: el doble del ciclo de un recorrido activo.
+    // "Al dia" son 40 s: el doble del ciclo del recorrido de un aviso mirado.
     check('un dato esta al dia durante 40 segundos',
       /const SYNC_FRESH_MS = 40_000/.test(uiSource))
-    check('un recorrido activo se refresca cada 20 segundos',
-      /follow: 20_000/.test(stateSource))
+    check('el recorrido que se esta mirando se refresca cada 20 segundos',
+      /routeVisible: 20_000/.test(stateSource))
+    check('de fondo, el rastreo va mas espaciado',
+      /routeBackground: 30_000/.test(stateSource))
 
     // Las frecuencias viven en un solo sitio porque Ajustes las enseña.
     check('las frecuencias se cuentan en un solo sitio',
       /export const FRESHNESS = \{/.test(stateSource)
-        && viewsSource.includes('FRESHNESS.follow')
+        && viewsSource.includes('FRESHNESS.routeVisible')
         && !/const FRESHNESS = \{/.test(mainSource))
     check('Ajustes explica las frecuencias y sus condiciones',
       viewsSource.includes('Frecuencias de actualización')
@@ -1138,19 +1140,18 @@ async function main() {
 
     // Un aviso se puede pausar, y al pausarlo su notificacion se retira.
     check('el aviso de proximo bus se puede pausar',
-      viewsSource.includes("renderJobToggle('tracking', tracking.id, tracking.active)"))
+      viewsSource.includes('renderJobToggle(tracking.id, tracking.active)'))
     check('al pausar un aviso se cierra su notificacion',
-      mainSource.includes("if (!job.active && kind === 'tracking')")
+      mainSource.includes('if (!job.active) {')
         && mainSource.includes('await cancelNotification(notificationId(id))'))
 
-    // Midiendo puntualidad, la pestana Seguir se apaga entera.
-    check('midiendo puntualidad se pausan los recorridos',
-      mainSource.includes("pauseFollows('hay un control de puntualidad midiendo')"))
-    check('midiendo puntualidad no se reanuda ninguna funcion',
-      mainSource.includes('if (!job.active && anyMonitorWindowOpen())'))
-    check('los recorridos no entran en el plan mientras se mide',
-      mainSource.includes('const measuring = anyMonitorWindowOpen()')
-        && mainSource.includes('if (follow.active && !measuring) {'))
+    // Midiendo puntualidad NO se pausa el aviso: es una notificacion que
+    // alguien espera. Lo que se apaga es su rastreo, que es la parte cara.
+    check('midiendo puntualidad el aviso sigue dando la hora',
+      !mainSource.includes('pauseFollows')
+        && mainSource.includes('const measuring = anyMonitorWindowOpen()'))
+    check('midiendo puntualidad no se rastrea el recorrido',
+      mainSource.includes('trackingServiceActive || measuring'))
 
     // El registro de puntualidad: la respuesta a "por que no se apunta nada".
     check('cada control deja registro de lo que ve',
@@ -1201,6 +1202,58 @@ async function main() {
   }
 
   section('12 · Por dónde viene el autobús')
+
+  {
+    const stateSource = await fs.readFile(path.join(projectRoot, 'src', 'state.ts'), 'utf8')
+    const mainSource = await fs.readFile(path.join(projectRoot, 'src', 'main.ts'), 'utf8')
+    const viewsSource = await fs.readFile(path.join(projectRoot, 'src', 'views.ts'), 'utf8')
+
+    // "Ver por donde viene" ya no es una funcion aparte: el aviso hace las dos
+    // cosas. Lo que queda de la modalidad antigua tiene que ser SOLO el codigo
+    // que retira sus datos guardados.
+    check('la modalidad "ver por dónde viene" ya no existe',
+      !stateSource.includes('interface FollowJob')
+        && !stateSource.includes('MAX_FOLLOW_JOBS')
+        && !/state\.follows/.test(mainSource)
+        && !/state\.follows/.test(viewsSource))
+    check('no queda ni una tarjeta ni una hoja de la modalidad retirada',
+      !viewsSource.includes('renderFollowCard')
+        && !viewsSource.includes("data-purpose=\"follow\"")
+        && !mainSource.includes("purpose === 'follow'"))
+    check('lo guardado de la modalidad retirada se tira al arrancar',
+      stateSource.includes('function dropLegacyFollows()')
+        && stateSource.includes('dropLegacyFollows()')
+        && stateSource.includes("window.localStorage.removeItem(KEYS.follows)"))
+
+    // Se pueden tener dos montados —ida y vuelta— pero solo uno trabaja.
+    check('se pueden tener dos avisos creados',
+      /export const MAX_TRACKING_JOBS = 2/.test(stateSource))
+    check('solo uno se mantiene actualizado',
+      /export const MAX_ACTIVE_JOBS = 1/.test(stateSource))
+    check('reanudar uno pausa el otro',
+      mainSource.includes('const turnedOff = job.active ? enforceActiveLimit(id) : []'))
+
+    // La tarjeta del aviso lleva dentro el recorrido; la de Inicio no, que es
+    // un vistazo y no la pantalla donde se va a mirar por donde viene.
+    check('la tarjeta del aviso dibuja el recorrido',
+      viewsSource.includes('function renderTrackingCard(')
+        && viewsSource.includes('renderTrackingRoute(tracking)')
+        && viewsSource.includes('renderTrackingCard(job)'))
+    check('Inicio sigue siendo un vistazo, sin recorrido',
+      viewsSource.includes('renderTrackingBanner(job)')
+        && !/renderTrackingBanner[\s\S]{0,400}renderTrackingRoute/.test(viewsSource))
+    check('la cabecera es la misma en las dos',
+      viewsSource.includes('function renderTrackingHead('))
+
+    // Fuera de la pestana se degrada: sigue avisando, deja de dibujar.
+    check('el recorrido entero solo se pide mirándolo',
+      mainSource.includes("const watchingRoute = state.tab === 'seguimiento' && document.visibilityState === 'visible'")
+        && mainSource.includes('watchingRoute ? FRESHNESS.routeVisible : FRESHNESS.routeBackground'))
+    check('fuera de la pestaña se busca solo hasta donde puede estar',
+      mainSource.includes('routeScanDepth(nextArrivalMinutes(job.stopId, job.lineId))'))
+    check('salir de la pestaña Seguir ya no pausa nada',
+      !mainSource.includes('pauseFollows'))
+  }
 
   {
     const {
@@ -1378,8 +1431,8 @@ async function main() {
 
       // Una sola implementacion de la regla: dos situarian el mismo autobus en
       // dos sitios distintos con los mismos datos delante.
-      check('el recorrido y el aviso comparten el localizador',
-        viewsSource.includes('const busIndex = locateBusInWindow(windowStops, follow.lineId)')
+      check('el recorrido dibujado y el recuento comparten el localizador',
+        viewsSource.includes('const busIndex = locateBusInWindow(windowStops, tracking.lineId)')
           && viewsSource.includes('locateBusInWindow(window, job.lineId)'))
 
       // Con el servicio vivo el rastreo es suyo: hacerlo dos veces seria el

@@ -140,7 +140,13 @@ async function main() {
       await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
         source: `
           localStorage.setItem('salbus.tourVersion', '${appVersion}');
-          ${withMaps ? "localStorage.setItem('salbus.settings', JSON.stringify({ vibrateOnApproach: true, trackingBusTarget: 1, experimentalMaps: true }));" : ''}
+          // Tres autobuses por aviso. No es un capricho: con el ajuste por
+          // defecto (uno) el aviso sembrado TERMINA solo en cuanto pasa el
+          // primer autobus, y la captura se encontraba la tarjeta ya retirada.
+          localStorage.setItem('salbus.settings', JSON.stringify({
+            vibrateOnApproach: true, trackingBusTarget: 3,
+            experimentalMaps: ${withMaps ? 'true' : 'false'}
+          }));
           localStorage.setItem('salbus.favourites', JSON.stringify([
             { stopId: '222', alias: null, addedAt: Date.now() },
             { stopId: '301', alias: 'Casa', addedAt: Date.now() },
@@ -148,21 +154,19 @@ async function main() {
             { stopId: '350', alias: null, addedAt: Date.now() },
             { stopId: '344', alias: 'Trabajo', addedAt: Date.now() }
           ]));
-          // Un aviso activo: es la unica tarjeta que ensena el recuento de
-          // paradas, y sin el las capturas no dicen nada de esa funcion.
-          // La 222 con la linea 4 tiene un solo sentido completo, asi que el
-          // sentido se resuelve sin ambiguedad y la busqueda puede hacerse.
+          // Dos avisos, uno activo y otro en pausa: es el tope, y ensena de una
+          // vez la tarjeta trabajando (con su recorrido y su recuento de
+          // paradas) y la de reposo. La 222 con la linea 4 tiene un solo
+          // sentido completo, asi que el sentido se resuelve sin ambiguedad.
           localStorage.setItem('salbus.trackings', JSON.stringify([
             { id: '222|4', stopId: '222', stopName: 'C/ Gran Vía, 38', lineId: '4',
               directionKey: '4|dos', active: true, startedAt: Date.now(),
               lastMinutes: null, lastNotifiedAt: 0, armed: false, missingStreak: 0,
+              busesSeen: 0, warnedAt3: false },
+            { id: '301|4', stopId: '301', stopName: 'C/ Gran Vía, 45', lineId: '4',
+              directionKey: '4|uno', active: false, startedAt: Date.now() - 60000,
+              lastMinutes: null, lastNotifiedAt: 0, armed: false, missingStreak: 0,
               busesSeen: 0, warnedAt3: false }
-          ]));
-          // El recorrido va en pausa: solo una funcion se mantiene actualizada
-          // a la vez, y la que interesa ver trabajando aqui es el aviso.
-          localStorage.setItem('salbus.follows', JSON.stringify([
-            { id: '222|4|4|dos', stopId: '222', stopName: 'C/ Gran Vía, 38',
-              lineId: '4', directionKey: '4|dos', active: false, createdAt: Date.now() }
           ]));
           localStorage.setItem('salbus.monitors', JSON.stringify([
             { id: '222|4|4|dos|420|480', stopId: '222', stopName: 'C/ Gran Vía, 38',

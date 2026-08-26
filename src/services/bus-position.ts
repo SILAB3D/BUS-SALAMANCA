@@ -30,7 +30,18 @@
 export const AT_STOP_MINUTES = 1
 
 /**
- * Paradas anteriores como mucho que se miran para localizar el autobus.
+ * Paradas anteriores que ensena el recorrido de un aviso.
+ *
+ * Es lo que se DIBUJA cuando alguien esta mirando la pestana, y por tanto lo
+ * que se consulta entonces: ocho paradas son ~16 s de cola, sostenibles solo
+ * con la pantalla delante. Fuera de ahi nadie mira el recorrido y basta con
+ * buscar hasta ROUTE_SCAN_MAX_STOPS.
+ */
+export const ROUTE_WINDOW_STOPS = 8
+
+/**
+ * Paradas anteriores como mucho que se miran para localizar el autobus cuando
+ * NO se esta mirando el recorrido.
  *
  * Cada una es una peticion contra una fuente que solo admite una cada dos
  * segundos, y esas peticiones salen del mismo turno que necesita el tiempo de

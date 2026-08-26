@@ -10,7 +10,11 @@ import {
   fetchStopsSequentially,
   MIN_REQUEST_SPACING_MS,
 } from './services/arrivals'
-import { routeScanDepth, ROUTE_SCAN_MAX_STOPS } from './services/bus-position'
+import {
+  routeScanDepth,
+  ROUTE_SCAN_MAX_STOPS,
+  ROUTE_WINDOW_STOPS,
+} from './services/bus-position'
 import { loadNetwork } from './services/network'
 import { checkForUpdate, isNativeAndroid, readInstalledVersion, Updater } from './services/updates'
 import { ARM_MINUTES, matchSlot, MISSING_STREAK, observe } from './services/punctuality'
@@ -55,7 +59,6 @@ import {
   monitorSlots,
   parseClockToMinutes,
   persistFavourites,
-  persistFollows,
   persistMonitorPasses,
   persistMonitorRuntime,
   persistMonitors,
@@ -70,7 +73,6 @@ import {
   trackingBusTarget,
   TRACKING_WARN_MINUTES,
   markTourSeen,
-  MAX_FOLLOW_JOBS,
   MAX_TRACKING_JOBS,
   type MonitorJob,
   type RoutePoint,
@@ -334,11 +336,9 @@ async function bootstrap(): Promise<void> {
   window.setInterval(tick, TICK_MS)
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'visible') {
-      // "Ver por donde viene" consulta OCHO paradas por ciclo contra una fuente
-      // que limita por IP. Con la app en segundo plano nadie mira ese recorrido,
-      // asi que se para: lo que se ahorra ahi es lo que hace que el aviso de
-      // proximo bus —que si tiene que seguir vivo— llegue a tiempo.
-      pauseFollows('la app pasó a segundo plano')
+      // No hay nada que parar: el aviso tiene que seguir vivo justamente aquí,
+      // y su rastreo ya se reduce solo al perder la pantalla (el plan de
+      // refresco mira `visibilityState`).
       return
     }
 
@@ -625,7 +625,6 @@ function dropStaleFavourites(): void {
 
   const before = state.favourites.length
   state.favourites = state.favourites.filter((favourite) => network.stopById.has(favourite.stopId))
-  state.follows = state.follows.filter((follow) => network.stopById.has(follow.stopId))
   state.monitors = state.monitors.filter((monitor) => network.stopById.has(monitor.stopId))
   state.trackings = state.trackings.filter((job) => network.stopById.has(job.stopId))
 
@@ -686,6 +685,11 @@ function buildRefreshPlan(): Array<{ stopId: string, maxAgeMs: number, priority:
     }
   }
 
+  // Mientras hay una franja de puntualidad abierta, medir manda: el aviso sigue
+  // dando la hora, pero deja de rastrear el recorrido para no quitarle turno a
+  // la parada que se está midiendo.
+  const measuring = anyMonitorWindowOpen()
+
   // 1. Los avisos activos mandan: siempre son lo primero.
   for (const job of state.trackings) {
     if (job.active) {
@@ -693,22 +697,35 @@ function buildRefreshPlan(): Array<{ stopId: string, maxAgeMs: number, priority:
     }
   }
 
-  // 1 bis. Y sus paradas ANTERIORES, para poder decir a cuántas viene el
-  // autobús además de cuántos minutos faltan. Van en prioridad normal y con
-  // menos frescura que la parada propia: si hay que elegir, el minuto de TU
-  // parada es lo que no puede llegar tarde.
+  // 1 bis. Y sus paradas ANTERIORES: por dónde viene el autobús.
   //
-  // No se miran las ocho de un recorrido completo, sino solo hasta donde el
-  // autobús puede estar según lo que falta (routeScanDepth). Con el autobús
-  // cerca —que es cuando el dato sirve— eso son una o dos paradas.
+  // La profundidad depende de si alguien lo está mirando, que es lo que decide
+  // para qué sirve el dato:
+  //
+  //  - Con la pestaña Seguir delante se pide el RECORRIDO ENTERO, porque se
+  //    dibuja parada a parada y hay que poder verlas todas.
+  //  - Fuera de ella (otra pestaña, o la app en segundo plano) nadie mira el
+  //    recorrido y lo único que hace falta es el "a N paradas" del aviso: se
+  //    busca de tu parada hacia atrás y se para en la primera que tenga el
+  //    autobús encima, sin llegar más lejos de donde puede estar.
+  //
+  // La diferencia no es cosmética: el recorrido entero son ocho paradas por
+  // ciclo contra una fuente que admite una petición cada dos segundos.
+  const watchingRoute = state.tab === 'seguimiento' && document.visibilityState === 'visible'
+
   for (const job of state.trackings) {
     // Con el servicio nativo vivo, el rastreo es suyo: hacerlo también aquí
     // sería el doble de peticiones y dos recuentos capaces de discrepar.
-    if (!job.active || !job.directionKey || trackingServiceActive) {
+    // Y mientras se mide la puntualidad no se rastrea nada: esa cola es de la
+    // parada que se está midiendo, y el aviso sigue dando la hora igual.
+    if (!job.active || !job.directionKey || trackingServiceActive || measuring) {
       continue
     }
 
-    const depth = routeScanDepth(nextArrivalMinutes(job.stopId, job.lineId))
+    const depth = watchingRoute
+      ? ROUTE_WINDOW_STOPS
+      : routeScanDepth(nextArrivalMinutes(job.stopId, job.lineId))
+
     if (depth === 0) {
       continue
     }
@@ -716,13 +733,15 @@ function buildRefreshPlan(): Array<{ stopId: string, maxAgeMs: number, priority:
     const window = state.network?.getDirectionWindow(
       job.directionKey,
       job.stopId,
-      ROUTE_SCAN_MAX_STOPS + 1,
+      ROUTE_WINDOW_STOPS + 1,
     ) ?? []
 
     // De la parada propia hacia atrás: las más cercanas son las que primero
     // delatan al autobús, y son las que antes conviene tener frescas.
-    for (const stop of window.slice(Math.max(0, window.length - 1 - depth), window.length - 1).reverse()) {
-      add(stop.stopId, FRESHNESS.trackingRoute)
+    const scanned = window.slice(Math.max(0, window.length - 1 - depth), window.length - 1).reverse()
+
+    for (const stop of scanned) {
+      add(stop.stopId, watchingRoute ? FRESHNESS.routeVisible : FRESHNESS.routeBackground)
     }
   }
 
@@ -746,23 +765,6 @@ function buildRefreshPlan(): Array<{ stopId: string, maxAgeMs: number, priority:
   // al aviso de próximo bus, que sí tiene que llegar a tiempo.
   if (state.tab === 'inicio' && state.expandedStopId) {
     add(state.expandedStopId, FRESHNESS.focused, 'high')
-  }
-
-  // 4. Recorridos en seguimiento: la parada propia primero, luego hacia atras.
-  // Solo los activos: uno en reposo no gasta consultas de una fuente limitada.
-  // Y ninguno mientras haya una franja de puntualidad abierta: medir a que hora
-  // pasa de verdad un autobus exige no perderse una sola consulta de ESA parada,
-  // y un recorrido pide ocho por ciclo.
-  const measuring = anyMonitorWindowOpen()
-
-  for (const follow of state.follows) {
-    if (follow.active && !measuring) {
-      const window = state.network?.getDirectionWindow(follow.directionKey, follow.stopId, 8) ?? []
-      // Se recorre al reves para pedir antes las paradas mas cercanas al usuario.
-      for (const stop of [...window].reverse()) {
-        add(stop.stopId, FRESHNESS.follow)
-      }
-    }
   }
 
   return Array.from(plan.values()).sort((left, right) => {
@@ -881,12 +883,10 @@ function tick(): void {
   // Registro, aviso de silencio y notificación persistente de la medición.
   superviseMonitors()
 
-  // Mientras se mide, la pestaña Seguir está apagada: la cola de consultas es
-  // para la parada que se está midiendo. Un recorrido pide ocho paradas por
-  // ciclo y se llevaría por delante justo el paso que se quiere anotar.
-  if (measuring) {
-    pauseFollows('hay un control de puntualidad midiendo')
-  }
+  // Mientras se mide NO se pausa el aviso: es una notificación que alguien está
+  // esperando, y apagarla sería tanto como borrarla. Lo que se apaga es su
+  // rastreo del recorrido, que es la parte cara; eso lo decide
+  // `buildRefreshPlan`, que ya sabe si hay una franja abierta.
 
   // Con el servicio nativo midiendo, los pasos aparecen en la pantalla de
   // puntualidad al ritmo al que él los detecta, no solo al reabrir la app.
@@ -1251,11 +1251,10 @@ async function createTracking(
 
   state.trackings = [...state.trackings, job]
 
-  // La recién creada es la que interesa: si con ella se pasa del límite de
-  // funciones activas, se apaga la más antigua.
+  // El recién creado es el que interesa: si con él se pasa del tope de avisos
+  // activos, se pausa el más antiguo.
   const turnedOff = enforceActiveLimit(id)
   persistTrackings()
-  persistFollows()
 
   log(
     'info',
@@ -1264,7 +1263,7 @@ async function createTracking(
   )
 
   if (turnedOff.length > 0) {
-    showToast('Se ha pausado la otra función: solo una se mantiene actualizada a la vez', 'info')
+    showToast('Se ha pausado el otro aviso: solo uno se mantiene actualizado a la vez', 'info')
   }
 
   await syncTrackingService()
@@ -1295,25 +1294,18 @@ async function removeTracking(id: string, notify = true): Promise<void> {
 }
 
 /**
- * Enciende o apaga una función sin borrarla.
+ * Pausa o reanuda un aviso sin borrarlo.
  *
- * Al encender se respeta el tope de funciones activas apagando la más antigua:
- * es preferible a rechazar la acción, porque lo que se acaba de tocar es
- * siempre lo que se quiere mirar ahora.
+ * Un aviso en reposo conserva su parada, su línea, su sentido y los autobuses
+ * ya contados: se pueden tener dos montados —el de la ida y el de la vuelta— y
+ * alternar de un toque. Al reanudar uno se pausa el otro, porque solo uno puede
+ * mantenerse actualizado: es preferible a rechazar la acción, porque lo que se
+ * acaba de tocar es siempre lo que se quiere mirar ahora.
  */
-async function toggleJobActive(kind: 'tracking' | 'follow', id: string): Promise<void> {
-  const job = kind === 'tracking'
-    ? trackingById(id)
-    : state.follows.find((item) => item.id === id)
+async function toggleJobActive(id: string): Promise<void> {
+  const job = trackingById(id)
 
   if (!job) {
-    return
-  }
-
-  // Mientras se mide la puntualidad no se reanuda nada: la cola de consultas es
-  // de la parada que se está midiendo. Pausar sí, siempre.
-  if (!job.active && anyMonitorWindowOpen()) {
-    showToast('Hay un control de puntualidad midiendo; la pestaña Seguir vuelve al terminar', 'error')
     return
   }
 
@@ -1321,9 +1313,8 @@ async function toggleJobActive(kind: 'tracking' | 'follow', id: string): Promise
   const turnedOff = job.active ? enforceActiveLimit(id) : []
 
   persistTrackings()
-  persistFollows()
 
-  if (!job.active && kind === 'tracking') {
+  if (!job.active) {
     // En pausa nadie mira las paradas anteriores: el último recuento envejece
     // sin que nada lo corrija, así que se tira en vez de dejarlo congelado.
     delete state.trackingStopsAway[id]
@@ -1333,9 +1324,9 @@ async function toggleJobActive(kind: 'tracking' | 'follow', id: string): Promise
   await syncTrackingService()
 
   if (turnedOff.length > 0) {
-    showToast('Se ha pausado la otra función: solo una se mantiene actualizada a la vez', 'info')
+    showToast('Se ha pausado el otro aviso: solo uno se mantiene actualizado a la vez', 'info')
   } else {
-    showToast(job.active ? 'Función activada' : 'Función en pausa', 'info')
+    showToast(job.active ? 'Aviso reanudado' : 'Aviso en pausa', 'info')
   }
 
   render()
@@ -2061,7 +2052,7 @@ appRoot.addEventListener('change', (event) => {
   if (action === 'draft-line') {
     state.draft.lineId = target.value
     const stopId = target.dataset.stop ?? ''
-    const purpose = state.sheet?.kind === 'pick-line' ? state.sheet.purpose : 'follow'
+    const purpose = state.sheet?.kind === 'pick-line' ? state.sheet.purpose : 'tracking'
     state.draft.directionKey = defaultDirectionKey(stopId, target.value, purpose)
     render()
   }
@@ -2214,19 +2205,15 @@ async function handleAction(action: string, element: HTMLElement): Promise<void>
       return
 
     case 'pick-line': {
-      const purpose = element.dataset.purpose as 'tracking' | 'monitor' | 'follow' | undefined
+      const purpose = element.dataset.purpose as 'tracking' | 'monitor' | undefined
       if (!purpose) {
         return
       }
 
-      // Cada modalidad tiene su tope de funciones creadas. Al alcanzarlo no se
-      // bloquea la accion: se pregunta cual de las existentes se sustituye.
-      const atLimit = purpose === 'tracking'
-        ? state.trackings.length >= MAX_TRACKING_JOBS
-        : purpose === 'follow' && state.follows.length >= MAX_FOLLOW_JOBS
-
-      if (atLimit && purpose !== 'monitor') {
-        state.sheet = { kind: 'replace-job', stopId, purpose }
+      // Con el tope de avisos creados alcanzado no se bloquea la acción: se
+      // pregunta cuál de los que ya hay se sustituye.
+      if (purpose === 'tracking' && state.trackings.length >= MAX_TRACKING_JOBS) {
+        state.sheet = { kind: 'replace-job', stopId }
         render()
         return
       }
@@ -2236,7 +2223,7 @@ async function handleAction(action: string, element: HTMLElement): Promise<void>
     }
 
     case 'confirm-sheet': {
-      const purpose = element.dataset.purpose as 'tracking' | 'monitor' | 'follow' | undefined
+      const purpose = element.dataset.purpose as 'tracking' | 'monitor' | undefined
       await confirmSheet(stopId, purpose)
       return
     }
@@ -2250,36 +2237,16 @@ async function handleAction(action: string, element: HTMLElement): Promise<void>
       await removeTracking(element.dataset.tracking ?? '')
       return
 
-    // Enciende o apaga una funcion sin borrarla.
+    // Pausa o reanuda un aviso sin borrarlo.
     case 'toggle-job':
-      await toggleJobActive(
-        element.dataset.kind === 'follow' ? 'follow' : 'tracking',
-        element.dataset.job ?? '',
-      )
+      await toggleJobActive(element.dataset.job ?? '')
       return
 
-    case 'remove-follow':
-      state.follows = state.follows.filter((item) => item.id !== element.dataset.follow)
-      persistFollows()
-      showToast('Seguimiento quitado', 'info')
-      render()
+    // Se ha alcanzado el tope de avisos creados: este es el que se sustituye.
+    case 'replace-job':
+      await removeTracking(element.dataset.job ?? '', false)
+      openPickLine(stopId, 'tracking')
       return
-
-    // Se ha alcanzado el limite de la modalidad: esta es la que se sustituye.
-    case 'replace-job': {
-      const purpose = element.dataset.purpose === 'follow' ? 'follow' : 'tracking'
-      const jobId = element.dataset.job ?? ''
-
-      if (purpose === 'tracking') {
-        await removeTracking(jobId, false)
-      } else {
-        state.follows = state.follows.filter((item) => item.id !== jobId)
-        persistFollows()
-      }
-
-      openPickLine(stopId, purpose)
-      return
-    }
 
     // Lista de llegadas: las que pasan de ARRIVALS_PREVIEW se piden a mano.
     case 'expand-arrivals':
@@ -2538,12 +2505,10 @@ async function handleAction(action: string, element: HTMLElement): Promise<void>
 async function goToTab(tab: TabId): Promise<void> {
   const previous = state.tab
 
-  // Al salir de Seguir se paran los recorridos. Los avisos de próximo bus NO:
-  // son la única función que tiene sentido fuera de su pestaña, porque lo que
-  // hacen es precisamente avisar cuando no se está mirando.
-  if (previous === 'seguimiento' && tab !== 'seguimiento') {
-    pauseFollows('se salió de la pestaña Seguir')
-  }
+  // Al salir de Seguir el aviso NO se pausa: es justo la función que tiene
+  // sentido fuera de su pantalla, porque lo que hace es avisar cuando no se
+  // está mirando. Lo que se reduce es su rastreo del recorrido, y de eso se
+  // encarga solo `buildRefreshPlan` mirando la pestaña activa.
 
   // Al salir de Mapas se suelta TODO lo suyo: el seguimiento de la ubicación, el
   // mapa y lo calculado. Una función experimental no puede quedarse trabajando
@@ -2569,30 +2534,8 @@ async function goToTab(tab: TabId): Promise<void> {
   void refreshVisible('auto')
 }
 
-/**
- * Para todos los recorridos activos.
- *
- * No se reactivan solos al volver: un recorrido consumiendo consultas sin que
- * nadie lo mire es justo lo que se quiere evitar, y volver a encenderlo es un
- * toque. La tarjeta lo dice donde se ve.
- */
-function pauseFollows(reason: string): void {
-  const running = state.follows.filter((follow) => follow.active)
-  if (running.length === 0) {
-    return
-  }
-
-  for (const follow of running) {
-    follow.active = false
-  }
-
-  persistFollows()
-  log('info', 'seguimiento', `${running.length} recorrido(s) en pausa: ${reason}.`)
-  render()
-}
-
 /** Abre la hoja de eleccion de linea con el borrador ya preparado. */
-function openPickLine(stopId: string, purpose: 'tracking' | 'monitor' | 'follow'): void {
+function openPickLine(stopId: string, purpose: 'tracking' | 'monitor'): void {
   const lines = state.network?.getLinesForStop(stopId) ?? []
   state.draft.lineId = lines[0]?.lineId ?? ''
   state.draft.directionKey = defaultDirectionKey(stopId, state.draft.lineId, purpose)
@@ -2611,7 +2554,7 @@ function openPickLine(stopId: string, purpose: 'tracking' | 'monitor' | 'follow'
 function defaultDirectionKey(
   stopId: string,
   lineId: string,
-  purpose: 'tracking' | 'monitor' | 'follow',
+  purpose: 'tracking' | 'monitor',
 ): string {
   const options = purpose === 'tracking'
     ? trackingDirectionOptions(stopId, lineId)
@@ -2632,7 +2575,7 @@ function closeTour(): void {
 
 async function confirmSheet(
   stopId: string,
-  purpose: 'tracking' | 'monitor' | 'follow' | undefined,
+  purpose: 'tracking' | 'monitor' | undefined,
 ): Promise<void> {
   const lineId = state.draft.lineId
   if (!purpose || !lineId) {
@@ -2650,50 +2593,6 @@ async function confirmSheet(
     persistTab()
     showToast('Te avisaremos cuando se acerque', 'success')
     render()
-    return
-  }
-
-  if (purpose === 'follow') {
-    const directionKey =
-      state.draft.directionKey || state.network?.getDirectionsThroughStop(stopId, lineId)[0]?.key || ''
-
-    if (!directionKey) {
-      showToast('No hay recorrido disponible para esa línea', 'error')
-      return
-    }
-
-    const id = `${stopId}|${lineId}|${directionKey}`
-    if (!state.follows.some((item) => item.id === id)) {
-      state.follows = [
-        ...state.follows,
-        {
-          id,
-          stopId,
-          stopName: stopName(stopId),
-          lineId,
-          directionKey,
-          active: true,
-          createdAt: Date.now(),
-        },
-      ]
-
-      // El recien creado es el que interesa: solo una funcion se mantiene
-      // actualizada a la vez, asi que crear esta pausa la que hubiera.
-      const turnedOff = enforceActiveLimit(id)
-      persistFollows()
-      persistTrackings()
-
-      if (turnedOff.length > 0) {
-        await syncTrackingService()
-        showToast('Se ha pausado la otra función: solo una se mantiene actualizada a la vez', 'info')
-      }
-    }
-
-    state.sheet = null
-    state.tab = 'seguimiento'
-    persistTab()
-    render()
-    void refreshVisible('auto')
     return
   }
 
