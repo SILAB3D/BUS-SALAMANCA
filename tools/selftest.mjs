@@ -86,6 +86,8 @@ async function main() {
     'schedule.ts',
     'release-parser.ts',
     'routing.ts',
+    'streets.ts',
+    'bus-position.ts',
   ])
 
   const { parseStopFeed } = await import(pathToUrl(path.join(build, 'arrival-parser.js')))
@@ -942,6 +944,457 @@ async function main() {
       && !/for \(const favourite of state\.favourites\) \{\s*\n\s*add\(favourite\.stopId/
         .test(mainSourceForUpdates))
 
+  section('10 · Callejero peatonal')
+
+  {
+    const { buildStreetGraph, nearestNode, walkPath } = await import(
+      pathToUrl(path.join(build, 'streets.js'))
+    )
+    const { refineWalking } = routing
+
+    // Un grafo minusculo con una forma que la linea recta no puede resolver:
+    // dos aceras paralelas unidas solo por un extremo. En recta son 20 m; a pie
+    // hay que rodear.
+    //
+    //   A ── B ── C        (acera norte)
+    //   |
+    //   D ── E ── F        (acera sur, sin union con C)
+    const grid = (() => {
+      const points = [
+        [40.9700, -5.6700], // 0  D
+        [40.9700, -5.6690], // 1  E
+        [40.9700, -5.6680], // 2  F
+        [40.9710, -5.6700], // 3  A
+        [40.9710, -5.6690], // 4  B
+        [40.9710, -5.6680], // 5  C
+      ]
+
+      // El formato en disco guarda diferencias sucesivas en millonesimas.
+      const lat = []
+      const lon = []
+      let previousLat = 0
+      let previousLon = 0
+      for (const [pointLat, pointLon] of points) {
+        const currentLat = Math.round(pointLat * 1e6)
+        const currentLon = Math.round(pointLon * 1e6)
+        lat.push(currentLat - previousLat)
+        lon.push(currentLon - previousLon)
+        previousLat = currentLat
+        previousLon = currentLon
+      }
+
+      return buildStreetGraph({
+        lat,
+        lon,
+        edges: [0, 1, 1, 2, 3, 4, 4, 5, 0, 3],
+        nodeCount: points.length,
+        edgeCount: 5,
+      })
+    })()
+
+    check('las coordenadas diferenciales se reconstruyen enteras',
+      Math.abs(grid.lat[0] - 40.97) < 1e-9 && Math.abs(grid.lon[5] + 5.668) < 1e-9)
+
+    check('cada nodo conoce a sus vecinos',
+      grid.offsets[1] - grid.offsets[0] === 2 && grid.offsets[3] - grid.offsets[2] === 1)
+
+    check('un punto se engancha a la calle que tiene al lado',
+      nearestNode(grid, { lat: 40.97002, lon: -5.66898 }) === 1)
+
+    check('un punto lejos de cualquier calle no se engancha',
+      nearestNode(grid, { lat: 41.05, lon: -5.60 }) === null)
+
+    // De F (esquina sureste) a C (esquina noreste) hay ~111 m en linea recta,
+    // pero por la calle hay que ir hasta el otro extremo y volver: ~390 m.
+    {
+      const direct = walkPath(grid, { lat: 40.9700, lon: -5.6680 }, { lat: 40.9710, lon: -5.6680 })
+      check('el camino rodea cuando no se puede cruzar', direct !== null && direct.meters > 300,
+        direct ? `${Math.round(direct.meters)} m` : 'sin camino')
+      check('el camino sale con todos sus puntos para poder dibujarlo',
+        direct !== null && direct.points.length >= 6)
+    }
+
+    check('dos puntos de la misma calle van en linea',
+      (() => {
+        const along = walkPath(grid, { lat: 40.9700, lon: -5.6700 }, { lat: 40.9700, lon: -5.6680 })
+        return along !== null && Math.abs(along.meters - 168) < 30
+      })())
+
+    // El afinado sustituye los metros del tramo a pie y rehace el total.
+    {
+      // El itinerario de partida es coherente consigo mismo: 111 m en linea
+      // recta y los minutos que corresponden a esos metros. Con un total
+      // inventado, la comprobacion de que el afinado rehace el total no diria
+      // nada.
+      const straightMinutes = routing.walkMinutes(111)
+      const straight = {
+        totalMinutes: straightMinutes,
+        walkMinutes: straightMinutes,
+        rideMinutes: 0,
+        waitMinutes: 0,
+        transfers: 0,
+        legs: [
+          {
+            kind: 'walk',
+            from: { lat: 40.9700, lon: -5.6680 },
+            to: { lat: 40.9710, lon: -5.6680 },
+            fromName: 'Aquí',
+            toName: 'Allí',
+            meters: 111,
+            minutes: straightMinutes,
+          },
+        ],
+      }
+
+      const refined = refineWalking(straight, (from, to) => walkPath(grid, from, to))
+
+      check('el afinado alarga el paseo hasta lo que se anda de verdad',
+        refined.legs[0].meters > straight.legs[0].meters)
+      check('el afinado deja marcado que el tramo va por las calles',
+        refined.legs[0].onStreets === true && Array.isArray(refined.legs[0].path))
+      check('el afinado rehace el total del itinerario',
+        Math.abs(refined.totalMinutes - refined.walkMinutes) < 0.001
+          && refined.totalMinutes > straight.totalMinutes)
+
+      // Sin callejero disponible, la ruta tiene que salir igual que antes.
+      const untouched = refineWalking(straight, () => null)
+      check('sin callejero la ruta no cambia', untouched === straight)
+    }
+
+    // El fichero real: si esta, tiene que servir para cruzar Salamanca andando.
+    {
+      const file = path.join(projectRoot, 'public', 'data', 'streets.json')
+      const exists = await fs.stat(file).then(() => true, () => false)
+
+      check('el callejero generado esta en el proyecto', exists)
+
+      if (exists) {
+        const payload = JSON.parse(await fs.readFile(file, 'utf8'))
+        const city = buildStreetGraph(payload)
+
+        check('el callejero real trae toda la ciudad', city.nodeCount > 20_000,
+          `${city.nodeCount} nodos`)
+
+        // Plaza Mayor → Estación de tren. Son unos 1.400 m andando; en linea
+        // recta salen ~1.150. La ruta a pie NUNCA puede ser mas corta que la
+        // recta, que es la comprobacion que delata un grafo mal montado.
+        const started = Date.now()
+        const path14 = walkPath(
+          city,
+          { lat: 40.9653, lon: -5.6642 },
+          { lat: 40.9741, lon: -5.6535 },
+        )
+        const elapsed = Date.now() - started
+
+        check('cruza la ciudad andando por calles reales',
+          path14 !== null && path14.meters > 1_100 && path14.meters < 3_000,
+          path14 ? `${Math.round(path14.meters)} m` : 'sin camino')
+        check('el camino a pie nunca es mas corto que la linea recta',
+          path14 !== null && path14.meters >= 1_100)
+        check('el calculo a pie no congela la interfaz', elapsed < 1_500, `${elapsed} ms`)
+      }
+    }
+
+    // No puede cargarse al arrancar: son cien mil nodos por una funcion en
+    // pruebas. Se pide al entrar en "Rutas".
+    {
+      const mainSource = await fs.readFile(path.join(projectRoot, 'src', 'main.ts'), 'utf8')
+      check('el callejero se carga solo al entrar en Rutas',
+        mainSource.includes("if (mode === 'rutas') {")
+          && mainSource.includes('void loadStreetGraph()')
+          && !mainSource.includes('await loadStreetGraph()'))
+    }
+  }
+
+  section('11 · Ritmo, límites y puntualidad')
+
+  {
+    const stateSource = await fs.readFile(path.join(projectRoot, 'src', 'state.ts'), 'utf8')
+    const mainSource = await fs.readFile(path.join(projectRoot, 'src', 'main.ts'), 'utf8')
+    const viewsSource = await fs.readFile(path.join(projectRoot, 'src', 'views.ts'), 'utf8')
+    const uiSource = await fs.readFile(path.join(projectRoot, 'src', 'ui.ts'), 'utf8')
+
+    // Una sola funcion activa: dos se quitaban el turno en una cola que solo
+    // admite una peticion cada dos segundos.
+    check('solo una funcion de seguimiento se mantiene actualizada',
+      /export const MAX_ACTIVE_JOBS = 1/.test(stateSource))
+    check('reanudar una pausa automaticamente la otra',
+      mainSource.includes('enforceActiveLimit(id)'))
+
+    // "Al dia" son 40 s: el doble del ciclo de un recorrido activo.
+    check('un dato esta al dia durante 40 segundos',
+      /const SYNC_FRESH_MS = 40_000/.test(uiSource))
+    check('un recorrido activo se refresca cada 20 segundos',
+      /follow: 20_000/.test(stateSource))
+
+    // Las frecuencias viven en un solo sitio porque Ajustes las enseña.
+    check('las frecuencias se cuentan en un solo sitio',
+      /export const FRESHNESS = \{/.test(stateSource)
+        && viewsSource.includes('FRESHNESS.follow')
+        && !/const FRESHNESS = \{/.test(mainSource))
+    check('Ajustes explica las frecuencias y sus condiciones',
+      viewsSource.includes('Frecuencias de actualización')
+        && viewsSource.includes('function renderRefreshRulesCard()'))
+
+    // Un aviso se puede pausar, y al pausarlo su notificacion se retira.
+    check('el aviso de proximo bus se puede pausar',
+      viewsSource.includes("renderJobToggle('tracking', tracking.id, tracking.active)"))
+    check('al pausar un aviso se cierra su notificacion',
+      mainSource.includes("if (!job.active && kind === 'tracking')")
+        && mainSource.includes('await cancelNotification(notificationId(id))'))
+
+    // Midiendo puntualidad, la pestana Seguir se apaga entera.
+    check('midiendo puntualidad se pausan los recorridos',
+      mainSource.includes("pauseFollows('hay un control de puntualidad midiendo')"))
+    check('midiendo puntualidad no se reanuda ninguna funcion',
+      mainSource.includes('if (!job.active && anyMonitorWindowOpen())'))
+    check('los recorridos no entran en el plan mientras se mide',
+      mainSource.includes('const measuring = anyMonitorWindowOpen()')
+        && mainSource.includes('if (follow.active && !measuring) {'))
+
+    // El registro de puntualidad: la respuesta a "por que no se apunta nada".
+    check('cada control deja registro de lo que ve',
+      stateSource.includes('export function addMonitorTrace')
+        && mainSource.includes('addMonitorTrace(monitor.id, {')
+        && viewsSource.includes('function renderMonitorTrace('))
+    check('se avisa cuando una franja lleva minutos sin consultas',
+      mainSource.includes('MONITOR_SILENCE_MS')
+        && mainSource.includes('function superviseMonitors()'))
+    check('mientras se mide hay notificacion persistente',
+      mainSource.includes('function syncMonitorNotification(')
+        && mainSource.includes('showOngoingNotification('))
+
+    // Repaso de arranque: una pasada por todas las guardadas, en serie.
+    check('al arrancar se precargan todas las paradas guardadas',
+      mainSource.includes('async function primeFavourites()')
+        && mainSource.includes('await primeFavourites()'))
+    check('el repaso de arranque se hace una sola vez',
+      mainSource.includes('let bootPrimeDone = false')
+        && mainSource.includes('bootPrimeDone = true'))
+
+    // El mapa del buscador sin linea elegida, y el adelanto de la consulta.
+    check('sin linea elegida el mapa enseña todas las paradas',
+      mainSource.includes('const showingAll = !direction')
+        && mainSource.includes('direction?.stops ?? state.network.stops'))
+    check('tocar una parada del mapa adelanta su consulta',
+      mainSource.includes("marker.on('popupopen', () => prefetchStop(stop.stopId))")
+        && mainSource.includes('function prefetchStop('))
+    check('"Ver tiempos" aprovecha lo ya adelantado',
+      mainSource.includes('async function ensureStopFresh(')
+        && mainSource.includes('await ensureStopFresh(stopId)'))
+
+    // La animacion de bienvenida dura 1,5 s exactos.
+    {
+      const css = await fs.readFile(path.join(projectRoot, 'src', 'style.css'), 'utf8')
+      check('la animacion de inicio dura 1,5 s',
+        /animation: splash-out 0\.32s ease 1\.5s forwards/.test(css)
+          && mainSource.includes('Math.max(0, 1500 - elapsed)'))
+    }
+
+    // Ubicacion: se lleva a quien mira hasta donde se activa.
+    check('se ofrece activar la ubicacion del sistema',
+      mainSource.includes('DeviceSettings.openLocationSettings()')
+        && viewsSource.includes("data-action=\"open-location-settings\""))
+    check('el mapa de la pestana Mapas se puede ampliar',
+      viewsSource.includes("data-action=\"maps-expand\"")
+        && mainSource.includes("case 'maps-expand':"))
+  }
+
+  section('12 · Por dónde viene el autobús')
+
+  {
+    const {
+      locateBus,
+      stopsAwayFrom,
+      routeScanDepth,
+      describeStopsAway,
+      AT_STOP_MINUTES,
+      ROUTE_SCAN_MAX_STOPS,
+      ROUTE_SCAN_MAX_MINUTES,
+      ROUTE_FIX_MAX_AGE_MS,
+      MINUTES_PER_STOP,
+    } = await import(pathToUrl(path.join(build, 'bus-position.js')))
+
+    // La ventana va de la parada mas lejana a la propia, que es la ultima.
+    // Un contador de 0 o 1 es lo unico que delata al autobus.
+    check('sitúa el autobús donde el contador está a cero',
+      locateBus([9, 7, 5, 0, 3]) === 3)
+    check('un contador de un minuto también cuenta como "aquí"',
+      locateBus([9, 7, 1]) === 2)
+    check('sin ningún contador bajo, el autobús no consta',
+      locateBus([9, 7, 5, 4]) === -1)
+    check('una parada que no publica esa línea no es un cero',
+      locateBus([null, null, 6]) === -1)
+
+    // La regla que sostiene todo: los datos de la ventana NO son del mismo
+    // instante, asi que puede haber dos "llegando" a la vez. Gana el mas
+    // avanzado, porque un autobus solo avanza.
+    check('con dos "llegando" gana el más avanzado del recorrido',
+      locateBus([0, 5, 6, 1, 8]) === 3)
+
+    check('el autobús en tu propia parada son cero paradas',
+      stopsAwayFrom(5, 4) === 0)
+    check('una parada antes es una parada',
+      stopsAwayFrom(5, 3) === 1)
+    check('cuatro paradas antes son cuatro paradas',
+      stopsAwayFrom(5, 0) === 4)
+    check('sin localización no hay número que dar',
+      stopsAwayFrom(5, -1) === null)
+
+    check('"en tu parada" no se cuenta como cero paradas',
+      describeStopsAway(0) === 'en tu parada')
+    check('una parada va en singular', describeStopsAway(1) === 'a 1 parada')
+    check('varias van en plural', describeStopsAway(4) === 'a 4 paradas')
+    check('sin dato no se escribe nada', describeStopsAway(null) === '')
+
+    // La profundidad de busqueda se ajusta a lo que falta: cerca cuesta una o
+    // dos consultas, y lejos ni se busca.
+    check('con el autobús encima basta con mirar una parada atrás',
+      routeScanDepth(0) === 1)
+    // 5 / 1,5 = 3,3 paradas, redondeado a 4, mas una de margen: la media entre
+    // paradas es eso, una media. Es el TOPE de la busqueda, no lo que cuesta:
+    // se para en la primera parada que tenga el autobus encima.
+    check('a cinco minutos se miran como mucho cinco paradas', routeScanDepth(5) === 5)
+    check('nunca se pasa del tope de paradas',
+      routeScanDepth(ROUTE_SCAN_MAX_MINUTES) === ROUTE_SCAN_MAX_STOPS)
+    check('lejos no se busca: costaría el máximo cuando menos sirve',
+      routeScanDepth(ROUTE_SCAN_MAX_MINUTES + 1) === 0)
+    check('sin dato de llegada no se busca', routeScanDepth(-1) === 0)
+
+    // Buscar es caro: cada parada es una peticion contra una fuente que admite
+    // una cada dos segundos, y salen del turno que necesita TU parada.
+    check('el tope de paradas cabe en la cola de la fuente',
+      ROUTE_SCAN_MAX_STOPS * 2 <= 15,
+      `${ROUTE_SCAN_MAX_STOPS} paradas = ${ROUTE_SCAN_MAX_STOPS * 2} s`)
+
+    // La copia portada a Java tiene que decir lo mismo: si se separan, la misma
+    // parada cuenta distinto segun si la app esta abierta o cerrada.
+    {
+      const service = await fs.readFile(
+        path.join(projectRoot, 'android', 'app', 'src', 'main', 'java', 'com', 'icuas', 'salbus',
+          'BusTrackingService.java'), 'utf8')
+
+      const constant = (name) => {
+        const match = new RegExp(name + '\\s*=\\s*([0-9_.]+)').exec(service)
+        return match ? Number(match[1].replace(/_/g, '')) : null
+      }
+
+      check('el servicio mira el mismo número de paradas que la web',
+        constant('ROUTE_SCAN_MAX_STOPS') === ROUTE_SCAN_MAX_STOPS,
+        `java ${constant('ROUTE_SCAN_MAX_STOPS')} vs web ${ROUTE_SCAN_MAX_STOPS}`)
+      check('deja de buscar a los mismos minutos',
+        constant('ROUTE_SCAN_MAX_MINUTES') === ROUTE_SCAN_MAX_MINUTES)
+      check('supone el mismo tiempo entre paradas',
+        constant('MINUTES_PER_STOP') === MINUTES_PER_STOP)
+      check('olvida la localización a la vez que la web',
+        constant('ROUTE_FIX_MAX_AGE_MS') === ROUTE_FIX_MAX_AGE_MS)
+      check('usa el mismo umbral de "el autobús está aquí"',
+        /arrival\.arriving \|\| arrival\.minutes <= 1/.test(service) && AT_STOP_MINUTES === 1)
+
+      // La busqueda va de la parada mas cercana hacia atras y para en la
+      // primera que lo tenga: siendo la mas cercana de las que lo tienen, es la
+      // mas avanzada. Ese orden es lo que la hace barata.
+      check('el servicio busca desde la parada más cercana hacia atrás',
+        service.includes('job.stopsAway = index + 1;')
+          && service.includes('for (int index = 0; index < depth; index += 1)'))
+      check('un bloqueo de la fuente no adelanta al autobús',
+        /STATUS_THROTTLED[\s\S]{0,200}?return;/.test(
+          service.slice(service.indexOf('private void sweepRoute'))))
+      check('al pasar un autobús se olvida dónde estaba',
+        /job\.warnedAt3 = false;\s*\n\s*\/\/[\s\S]{0,180}?job\.stopsAway = -1;/.test(service))
+      check('el recuento va detrás del tiempo en el título',
+        service.includes('title = title + " · " + where;'))
+    }
+
+    // Sobre la red real: la pregunta tiene que ser la excepcion, no la norma.
+    {
+      const lineById = new Map(network.lines.map((line) => [line.lineId, line]))
+      let asked = 0
+      let total = 0
+
+      for (const [stopId, lineIds] of Object.entries(network.linesByStopId)) {
+        for (const lineId of lineIds) {
+          const line = lineById.get(lineId)
+          if (!line) {
+            continue
+          }
+
+          const through = line.directions.filter(
+            (direction) => direction.stops.some((stop) => stop.stopId === stopId),
+          )
+          const complete = through.filter((direction) => !direction.partial)
+          const options = through.length <= 1
+            ? through
+            : (complete.length > 0 ? complete : through)
+
+          total += 1
+          if (options.length > 1) {
+            asked += 1
+          }
+        }
+      }
+
+      check('crear un aviso no pregunta el sentido casi nunca',
+        asked / total < 0.1,
+        `${asked} de ${total} pares parada-línea (${Math.round((100 * asked) / total)} %)`)
+      check('y cuando no pregunta, el sentido queda resuelto',
+        total - asked > 700, `${total - asked} resueltos solos`)
+    }
+
+    // El sentido: sin el no hay paradas anteriores que mirar, y adivinarlo
+    // mandaria a la acera de enfrente.
+    {
+      const mainSource = await fs.readFile(path.join(projectRoot, 'src', 'main.ts'), 'utf8')
+      const viewsSource = await fs.readFile(path.join(projectRoot, 'src', 'views.ts'), 'utf8')
+
+      check('el aviso resuelve su sentido al crearse',
+        mainSource.includes('function resolveTrackingDirection(')
+          && mainSource.includes('directionKey: resolveTrackingDirection(stopId, lineId, directionKey)'))
+
+      // Con un solo sentido posible no se pregunta nada; con varios se pregunta,
+      // porque quien espera SABE cual es su autobus y la fuente oficial no lo
+      // dice nunca. Lo que no se hace en ningun caso es adivinar.
+      check('con un solo sentido posible no se pregunta',
+        viewsSource.includes("purpose === 'tracking' && trackingDirectionOptions(stopId, selectedLineId).length < 2"))
+      check('con varios sentidos se pregunta al crear el aviso',
+        viewsSource.includes('export function trackingDirectionOptions(')
+          && viewsSource.includes("purpose === 'tracking' ? trackingDirectionOptions(stopId, selectedLineId) : directions"))
+      check('lo elegido a mano manda sobre la deducción',
+        mainSource.includes('if (chosen && options.some((direction) => direction.key === chosen))'))
+      check('el sentido elegido llega hasta el aviso',
+        mainSource.includes('await createTracking(stopId, lineId, state.draft.directionKey)'))
+      check('el desplegable abre con una opción que sí está en la lista',
+        mainSource.includes('function defaultDirectionKey(')
+          && !mainSource.includes("state.network?.getDirectionsThroughStop(stopId, state.draft.lineId)[0]?.key ?? ''"))
+
+      // Los parciales son variantes del mismo sentido: no cuentan como duda.
+      check('un trayecto parcial no cuenta como otro sentido',
+        viewsSource.includes('const complete = through.filter((direction) => !direction.partial)')
+          && viewsSource.includes('return complete.length > 0 ? complete : through'))
+
+      check('los avisos ya guardados reciben su sentido al arrancar',
+        mainSource.includes('function backfillTrackingDirections()')
+          && mainSource.includes('backfillTrackingDirections()'))
+
+      // Una sola implementacion de la regla: dos situarian el mismo autobus en
+      // dos sitios distintos con los mismos datos delante.
+      check('el recorrido y el aviso comparten el localizador',
+        viewsSource.includes('const busIndex = locateBusInWindow(windowStops, follow.lineId)')
+          && viewsSource.includes('locateBusInWindow(window, job.lineId)'))
+
+      // Con el servicio vivo el rastreo es suyo: hacerlo dos veces seria el
+      // doble de peticiones y dos recuentos capaces de discrepar.
+      check('la web no rastrea a la vez que el servicio',
+        mainSource.includes('!job.directionKey || trackingServiceActive'))
+      check('el servicio manda su recuento a la pantalla',
+        mainSource.includes("state.trackingStopsAway[update.jobId] = { stopsAway: update.stopsAway"))
+      check('un aviso en pausa no arrastra su última localización',
+        mainSource.includes('delete state.trackingStopsAway[id]'))
+      check('la notificación de la web también dice por dónde viene',
+        mainSource.includes('stopsAway: describeStopsAway(trackingStopsAway(job))'))
+    }
+  }
+
   console.log(`\n${passed} correctas · ${failed} fallidas`)
   process.exitCode = failed > 0 ? 1 : 0
 }
@@ -974,7 +1427,28 @@ async function compileSources(files) {
   )
 
   // El compilador conserva la estructura de carpetas del codigo fuente.
-  return path.join(outDir, 'services')
+  const servicesDir = path.join(outDir, 'services')
+
+  // La app se empaqueta con Vite, que resuelve `import './routing'` sin
+  // extension. Node no: cargando el JavaScript emitido tal cual, un modulo que
+  // importa a otro (streets → routing) falla con MODULE_NOT_FOUND. Se le pone
+  // la extension aqui en vez de escribirla en el codigo fuente, porque el
+  // codigo fuente es del empaquetador y no de esta prueba.
+  for (const file of await fs.readdir(servicesDir)) {
+    if (!file.endsWith('.js')) {
+      continue
+    }
+    const target = path.join(servicesDir, file)
+    const source = await fs.readFile(target, 'utf8')
+    await fs.writeFile(
+      target,
+      source.replace(/(from\s+['"]\.[^'"]*?)(['"])/g, (match, specifier, quote) =>
+        specifier.endsWith('.js') ? match : `${specifier}.js${quote}`,
+      ),
+    )
+  }
+
+  return servicesDir
 }
 
 function pathToUrl(filePath) {

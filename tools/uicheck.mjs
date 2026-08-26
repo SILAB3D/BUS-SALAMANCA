@@ -7,6 +7,8 @@
  *   node tools/uicheck.mjs --overflow            # informa de desbordes horizontales
  *   node tools/uicheck.mjs --stability           # comprueba que el refresco no destruye la interfaz
  *   node tools/uicheck.mjs --url http://...      # otra direccion
+ *   node tools/uicheck.mjs --wait 30000          # mas margen para el arranque
+ *   node tools/uicheck.mjs --maps                # enciende la pestana experimental
  */
 
 import { spawn } from 'node:child_process'
@@ -33,7 +35,12 @@ const outDir = valueOf('--out') ?? path.join(os.tmpdir(), 'salbus-ui')
 const width = Number.parseInt(valueOf('--width') ?? '412', 10)
 const height = Number.parseInt(valueOf('--height') ?? '915', 10)
 const onlyOverflow = args.includes('--overflow')
+/** Espera tras cargar la pagina. El GTFS son 4,8 MB y en una maquina lenta no
+    da tiempo a que la app termine de arrancar antes de la captura. */
+const waitMs = Number.parseInt(valueOf('--wait') ?? '', 10)
 const checkStability = args.includes('--stability')
+/** La pestana Mapas viene apagada de fabrica, asi que hay que pedirla a mano. */
+const withMaps = args.includes('--maps')
 
 function valueOf(flag) {
   const index = args.indexOf(flag)
@@ -133,6 +140,7 @@ async function main() {
       await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
         source: `
           localStorage.setItem('salbus.tourVersion', '${appVersion}');
+          ${withMaps ? "localStorage.setItem('salbus.settings', JSON.stringify({ vibrateOnApproach: true, trackingBusTarget: 1, experimentalMaps: true }));" : ''}
           localStorage.setItem('salbus.favourites', JSON.stringify([
             { stopId: '222', alias: null, addedAt: Date.now() },
             { stopId: '301', alias: 'Casa', addedAt: Date.now() },
@@ -140,9 +148,21 @@ async function main() {
             { stopId: '350', alias: null, addedAt: Date.now() },
             { stopId: '344', alias: 'Trabajo', addedAt: Date.now() }
           ]));
+          // Un aviso activo: es la unica tarjeta que ensena el recuento de
+          // paradas, y sin el las capturas no dicen nada de esa funcion.
+          // La 222 con la linea 4 tiene un solo sentido completo, asi que el
+          // sentido se resuelve sin ambiguedad y la busqueda puede hacerse.
+          localStorage.setItem('salbus.trackings', JSON.stringify([
+            { id: '222|4', stopId: '222', stopName: 'C/ Gran Vía, 38', lineId: '4',
+              directionKey: '4|dos', active: true, startedAt: Date.now(),
+              lastMinutes: null, lastNotifiedAt: 0, armed: false, missingStreak: 0,
+              busesSeen: 0, warnedAt3: false }
+          ]));
+          // El recorrido va en pausa: solo una funcion se mantiene actualizada
+          // a la vez, y la que interesa ver trabajando aqui es el aviso.
           localStorage.setItem('salbus.follows', JSON.stringify([
             { id: '222|4|4|dos', stopId: '222', stopName: 'C/ Gran Vía, 38',
-              lineId: '4', directionKey: '4|dos', createdAt: Date.now() }
+              lineId: '4', directionKey: '4|dos', active: false, createdAt: Date.now() }
           ]));
           localStorage.setItem('salbus.monitors', JSON.stringify([
             { id: '222|4|4|dos|420|480', stopId: '222', stopName: 'C/ Gran Vía, 38',
@@ -181,7 +201,7 @@ async function main() {
 
     await cdp.send('Page.navigate', { url })
     // Margen para el splash (1,5 s) y para que la cola de peticiones traiga datos.
-    await delay(args.includes('--seed') ? 16000 : 3500)
+    await delay(Number.isFinite(waitMs) ? waitMs : args.includes('--seed') ? 16000 : 3500)
 
     const screens = [
       { tab: 'inicio', name: 'inicio' },
@@ -190,6 +210,12 @@ async function main() {
       { tab: 'monitor', name: 'puntualidad' },
       { tab: 'ajustes', name: 'ajustes' },
     ]
+
+    if (withMaps) {
+      // Va antes de Ajustes en la barra, pero se captura al final: entrar en
+      // ella pide la ubicacion, y el dialogo del permiso taparia lo demas.
+      screens.splice(screens.length - 1, 0, { tab: 'mapas', name: 'mapas' })
+    }
 
     for (const screen of screens) {
       await cdp.evaluate(
@@ -294,9 +320,21 @@ async function main() {
 
       // El mapa lo pinta Leaflet dentro del DOM: el repintado no debe tocarlo.
       await cdp.evaluate(`document.querySelector('[data-action="search-mode"][data-mode="mapa"]')?.click(); true`)
-      await delay(1500)
+      await delay(2500)
 
-      // Sin sentido elegido no hay recorrido: ni trazado ni chinchetas que mirar.
+      // Sin linea ni sentido elegidos el mapa NO se queda vacio: enseña las 349
+      // paradas de la red para poder tocar directamente la que se busca.
+      const allStops = JSON.parse(await cdp.evaluate(`(() => JSON.stringify({
+        pins: document.querySelectorAll('#stop-map .map-pin').length,
+        plain: document.querySelectorAll('#stop-map .map-pin.is-plain').length,
+        lines: document.querySelectorAll('#stop-map path.leaflet-interactive').length
+      }))()`))
+
+      report('sin linea elegida el mapa enseña toda la red', allStops.pins > 300,
+        `${allStops.pins} chinchetas`)
+      report('esas chinchetas van sin numero de orden', allStops.plain === allStops.pins)
+      report('sin recorrido elegido no se traza ninguna linea', allStops.lines === 0)
+
       await cdp.evaluate(`(() => {
         const select = document.querySelector('[data-action="pick-search-direction"]');
         select.value = select.options[1].value;

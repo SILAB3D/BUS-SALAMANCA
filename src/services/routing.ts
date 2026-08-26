@@ -170,6 +170,17 @@ export interface WalkLeg {
   toName: string
   meters: number
   minutes: number
+  /**
+   * Recorrido real por las calles, cuando el callejero esta cargado.
+   *
+   * Opcional a proposito: el calculo tiene que seguir dando una ruta completa
+   * sin el, y `streets.json` puede no estar generado. Cuando esta, ademas de
+   * poder dibujarse, los metros del tramo son los de este recorrido y no los de
+   * la linea recta.
+   */
+  path?: GeoPoint[]
+  /** El tramo se ha medido por el callejero y no en linea recta. */
+  onStreets?: boolean
 }
 
 export interface BusLeg {
@@ -588,6 +599,57 @@ function walkOnly(request: PlanRequest, meters: number): Itinerary | null {
       },
     ],
   }
+}
+
+/* ------------------------------------------------------------------ *
+ * Afinado con el callejero                                             *
+ * ------------------------------------------------------------------ */
+
+/**
+ * Vuelve a medir los tramos a pie por donde de verdad se anda.
+ *
+ * SE HACE DESPUES y no dentro del calculo, por una razon de coste: el Dijkstra
+ * evalua paseos entre cientos de pares de paradas, y resolver cada uno sobre un
+ * callejero de cien mil nodos dejaria la pantalla congelada varios segundos. Un
+ * itinerario ya elegido tiene dos o tres tramos a pie; esos si se pueden medir
+ * exactos, y son los que se leen y se andan.
+ *
+ * La contrapartida esta dicha: la ELECCION de por donde ir se toma con
+ * distancias en linea recta, que se quedan cortas siempre. Por eso el afinado
+ * devuelve minutos nuevos y quien llama vuelve a ordenar con ellos: una ruta
+ * que ganaba por medio minuto puede dejar de ganar cuando se descubre que su
+ * paseo cruza una manzana entera.
+ *
+ * `resolve` se inyecta para que este modulo siga siendo puro y comprobable sin
+ * red ni ficheros.
+ */
+export function refineWalking(
+  itinerary: Itinerary,
+  resolve: (from: GeoPoint, to: GeoPoint) => { meters: number, points: GeoPoint[] } | null,
+): Itinerary {
+  let changed = false
+
+  const legs = itinerary.legs.map((leg) => {
+    if (leg.kind !== 'walk') {
+      return leg
+    }
+
+    const path = resolve(leg.from, leg.to)
+    if (!path) {
+      return leg
+    }
+
+    changed = true
+    return {
+      ...leg,
+      meters: Math.round(path.meters),
+      minutes: walkMinutes(path.meters),
+      path: path.points,
+      onStreets: true,
+    }
+  })
+
+  return changed ? summarise(legs) : itinerary
 }
 
 function cheapestUnsettled(labels: Map<string, Label>, settled: Set<string>): string | null {

@@ -28,6 +28,17 @@ export interface TrackingJob {
   stopName: string
   lineId: string
   /**
+   * Sentido por el que viene el autobus, para poder decir a cuantas paradas
+   * esta ademas de cuantos minutos faltan.
+   *
+   * Es `null` cuando la red no permite deducirlo sin inventar: por esa parada
+   * pasa mas de un sentido de la misma linea (el 5 % de los casos) y la fuente
+   * oficial solo dice "Linea N", nunca hacia donde va. Sin sentido, el aviso
+   * funciona igual pero no cuenta paradas: mejor no decirlo que decirlo mal,
+   * porque el numero llevaria a mirar a la calle equivocada.
+   */
+  directionKey: string | null
+  /**
    * Un aviso creado puede estar en reposo: sigue existiendo y se puede reactivar
    * de un toque, pero no consulta la fuente ni publica notificacion.
    */
@@ -106,6 +117,30 @@ export interface MonitorPass {
 
 export type MonitorPasses = Record<string, MonitorPass[]>
 
+/**
+ * Una linea del registro de un control de puntualidad.
+ *
+ * La pantalla de puntualidad se llenaba —o no— sin decir por que. Un control
+ * puede pasarse una franja entera sin anotar una sola hora por motivos que no
+ * se ven desde fuera: la parada no devuelve esa linea, la fuente esta
+ * limitando, el movil durmio entre consulta y consulta, o el paso se detecto
+ * pero el horario oficial no tenia ninguna salida cerca. Cada consulta deja
+ * aqui lo que vio y lo que decidio, y eso es lo que ensena la tarjeta.
+ */
+export interface MonitorTrace {
+  at: number
+  /** Minutos que devolvio la fuente para esa linea, o `null` si no figuraba. */
+  minutes: number | null
+  /** Estaba el control con un autobus "entrando" cuando se observo. */
+  armed: boolean
+  /** Que ocurrio, ya redactado para leerse. */
+  note: string
+  level: 'info' | 'warn' | 'error'
+}
+
+/** Lineas de registro que se conservan por control. */
+export const MAX_TRACE_PER_MONITOR = 60
+
 /** Cuantos pasos se conservan por control (unos dos meses de una franja diaria). */
 export const MAX_PASSES_PER_MONITOR = 400
 
@@ -133,10 +168,65 @@ export const MAX_FOLLOW_JOBS = 2
 
 /**
  * Funciones que pueden estar ACTIVAS a la vez, sumando las dos modalidades.
- * Cada una consulta la fuente oficial por su cuenta y esta limita por IP: por
- * encima de dos, todas empiezan a refrescarse tarde.
+ *
+ * Es UNA. Cada funcion consulta la fuente oficial por su cuenta y esa fuente
+ * limita por IP: con dos a la vez, el recorrido (ocho paradas por ciclo) y el
+ * aviso se quitaban el turno en la cola y las dos llegaban tarde. Reanudar una
+ * funcion pausa automaticamente la otra, asi que no hay nada que administrar:
+ * lo que se acaba de tocar es lo que se esta mirando.
  */
-export const MAX_ACTIVE_JOBS = 2
+export const MAX_ACTIVE_JOBS = 1
+
+/* ------------------------------------------------------------------ *
+ * Ritmo de refresco                                                    *
+ * ------------------------------------------------------------------ */
+
+/**
+ * Cada cuanto se reevalua QUE hay que refrescar. No es cuanto se le pide a la
+ * web: eso lo marca la cola de `arrivals.ts`, que separa las peticiones 2 s.
+ */
+export const TICK_MS = 1_000
+
+/** Cadencia minima entre lotes automaticos completos. */
+export const AUTO_CYCLE_MS = 20_000
+
+/** Ciclo del servicio nativo para un aviso de proximo bus. */
+export const TRACKING_INTERVAL_SECONDS = 15
+
+/**
+ * Frescura objetivo de una parada segun el uso que se le este dando.
+ *
+ * Una parada solo se vuelve a pedir cuando su dato pasa de estos milisegundos,
+ * asi que esto ES la frecuencia de actualizacion de cada funcion. Viven aqui y
+ * no en `main.ts` porque Ajustes las enseña: un numero contado en dos sitios
+ * acaba diciendo dos cosas distintas.
+ */
+export const FRESHNESS = {
+  /** Parada abierta en pantalla (desplegada, ficha del buscador, aviso activo). */
+  focused: 15_000,
+  /** Resto de paradas guardadas visibles. Hoy solo se usa en el repaso de arranque. */
+  visible: 45_000,
+  /** Cada parada del recorrido de un "ver por donde viene" activo. */
+  follow: 20_000,
+  /**
+   * Paradas anteriores que mira un aviso de proximo bus para saber por donde
+   * viene.
+   *
+   * Mas espaciado que un recorrido completo (20 s) porque es informacion
+   * secundaria: lo que el aviso tiene que clavar es el tiempo de SU parada, y
+   * esa va aparte a 15 s. Un autobus urbano tarda minuto y medio en pasar de
+   * una parada a la siguiente, asi que medio minuto de retraso en el recuento
+   * no llega a valer media parada.
+   */
+  trackingRoute: 30_000,
+  /** Parada de un control de puntualidad dentro de su franja. */
+  monitor: 30_000,
+}
+
+/* La deteccion de por donde viene el autobus vive en
+   `src/services/bus-position.ts`: es logica pura, se comparte entre "ver por
+   donde viene" y el aviso de proximo bus, y esta portada a Java en el servicio
+   nativo. Tenerla aparte es lo que permite comprobarla desde Node. */
 
 /**
  * Fase de refresco de una parada concreta. Las consultas van SIEMPRE en serie
@@ -219,12 +309,28 @@ export interface AppState {
   arrivalsExpanded: Record<string, boolean>
 
   trackings: TrackingJob[]
+  /**
+   * A cuantas paradas viene el autobus de cada aviso, segun el SERVICIO nativo.
+   *
+   * Mientras el servicio vive es el unico que mira las paradas anteriores: que
+   * lo hicieran los dos serian el doble de peticiones contra una fuente que
+   * limita por IP, y ademas dos recuentos que podrian discrepar. Con la app en
+   * el navegador —o sin servicio— esto queda vacio y el recuento se calcula
+   * aqui, con los datos que ya hay en `feeds`.
+   *
+   * No se guarda en disco: una posicion de hace horas no es una posicion.
+   */
+  trackingStopsAway: Record<string, { stopsAway: number, at: number }>
   monitors: MonitorJob[]
   monitorPasses: MonitorPasses
   monitorRuntime: Record<string, MonitorRuntime>
   monitorDayView: Record<string, ServiceDayType>
   /** Ultima vez que cada control miro su parada; alimenta el estado en pantalla. */
   monitorSeenAt: Record<string, number>
+  /** Registro de lo que ve y decide cada control, para poder explicar un hueco. */
+  monitorTrace: Record<string, MonitorTrace[]>
+  /** Controles cuyo registro esta desplegado en la pantalla de puntualidad. */
+  monitorTraceOpen: Record<string, boolean>
   follows: FollowJob[]
 
   sheet:
@@ -300,6 +406,18 @@ export interface MapsState {
   locating: boolean
   /** Motivo por el que no hay ubicacion, ya redactado para leerse en pantalla. */
   locationError: string | null
+  /**
+   * Que falta exactamente para poder localizar.
+   *
+   * Desde la pagina los dos fallos se ven igual —la geolocalizacion no
+   * responde— pero se arreglan en pantallas distintas: 'service' es el
+   * interruptor de ubicacion del telefono, 'permission' es el permiso de
+   * SALBUS. Decir "activa la ubicacion" sin decir donde no ayuda a nadie.
+   */
+  locationBlocked: 'service' | 'permission' | null
+
+  /** El mapa de la pestaña, a pantalla completa. */
+  expanded: boolean
 
   origin: RoutePoint | null
   destination: RoutePoint | null
@@ -319,6 +437,8 @@ export function emptyMapsState(): MapsState {
     location: null,
     locating: false,
     locationError: null,
+    locationBlocked: null,
+    expanded: false,
     origin: null,
     destination: null,
     picking: null,
@@ -389,6 +509,7 @@ const KEYS = {
   monitorStats: 'salbus.monitorStats',
   monitorPasses: 'salbus.monitorPasses',
   monitorRuntime: 'salbus.monitorRuntime',
+  monitorTrace: 'salbus.monitorTrace',
   follows: 'salbus.follows',
   logs: 'salbus.logs',
   tab: 'salbus.tab',
@@ -416,6 +537,10 @@ function readTrackings(): TrackingJob[] {
     .slice(0, MAX_TRACKING_JOBS)
     .map((job) => ({
       ...job,
+      // Los avisos guardados antes de que existiera el recuento de paradas no
+      // traen sentido; `resolveTrackingDirection` se lo pone al arrancar, que
+      // es cuando la red ya esta cargada.
+      directionKey: typeof job.directionKey === 'string' ? job.directionKey : null,
       busesSeen: typeof job.busesSeen === 'number' ? job.busesSeen : 0,
       warnedAt3: job.warnedAt3 === true,
       // Un aviso guardado con el formato antiguo estaba activo por definicion.
@@ -463,6 +588,7 @@ export const state: AppState = {
 
   // busesSeen no existia en versiones anteriores: un aviso guardado sin el empieza a contar de cero.
   trackings: readTrackings(),
+  trackingStopsAway: {},
   monitors: readJson<MonitorJob[]>(KEYS.monitors, [])
     .filter((item) => typeof item?.id === 'string')
     .map((item) => ({ ...item, directionKey: item.directionKey ?? null })),
@@ -470,6 +596,8 @@ export const state: AppState = {
   monitorRuntime: readJson<Record<string, MonitorRuntime>>(KEYS.monitorRuntime, {}),
   monitorDayView: {},
   monitorSeenAt: {},
+  monitorTrace: readJson<Record<string, MonitorTrace[]>>(KEYS.monitorTrace, {}),
+  monitorTraceOpen: {},
   follows: readJson<FollowJob[]>(KEYS.follows, [])
     .filter((item) => typeof item?.id === 'string')
     .map(normalizeFollow),
@@ -579,6 +707,36 @@ export function addMonitorPass(monitorId: string, pass: MonitorPass): void {
     .slice(-MAX_PASSES_PER_MONITOR)
 
   persistMonitorPasses()
+}
+
+export function persistMonitorTrace(): void {
+  writeJson(KEYS.monitorTrace, state.monitorTrace)
+}
+
+/**
+ * Anota lo observado por un control.
+ *
+ * Se guarda en disco porque la franja se mide tambien con la app cerrada: al
+ * volver a abrirla, el registro es lo unico que puede contar que ocurrio
+ * mientras nadie miraba. Se descarta la repeticion inmediata del mismo mensaje
+ * para que media hora de "la linea no figura" no tape las tres lineas que
+ * importan.
+ */
+export function addMonitorTrace(monitorId: string, entry: MonitorTrace): void {
+  const list = state.monitorTrace[monitorId] ?? []
+  const last = list[list.length - 1]
+
+  if (last && last.note === entry.note && last.minutes === entry.minutes && entry.at - last.at < 120_000) {
+    return
+  }
+
+  state.monitorTrace[monitorId] = [...list, entry].slice(-MAX_TRACE_PER_MONITOR)
+  persistMonitorTrace()
+}
+
+export function clearMonitorTrace(monitorId: string): void {
+  delete state.monitorTrace[monitorId]
+  persistMonitorTrace()
 }
 
 export function localDateKey(at: number | Date): string {
@@ -786,6 +944,17 @@ export function minutesOfDay(reference = new Date()): number {
 export function isWithinWindow(job: MonitorJob, reference = new Date()): boolean {
   const now = minutesOfDay(reference)
   return now >= job.startMinutes && now < job.endMinutes
+}
+
+/**
+ * Hay algun control de puntualidad dentro de su franja ahora mismo.
+ *
+ * Mientras lo haya, medir manda: la pestana Seguir se apaga entera y su turno
+ * en la cola de consultas se lo queda la parada que se esta midiendo. Una
+ * franja dura minutos; un recorrido puede esperar.
+ */
+export function anyMonitorWindowOpen(reference = new Date()): boolean {
+  return state.monitors.some((monitor) => isWithinWindow(monitor, reference))
 }
 
 export function formatMinutesClock(dayMinutes: number): string {

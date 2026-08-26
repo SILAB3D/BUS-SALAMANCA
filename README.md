@@ -18,12 +18,15 @@ src/
     arrivals.ts            Cliente de llegadas con cola y control de ritmo
     arrival-parser.ts      Lectura del panel oficial (sin red: se puede probar)
     punctuality.ts         Detección de pasos reales y desvío frente al horario
+    bus-position.ts        En qué parada está el autobús (regla compartida)
     routing.ts             Paradas cercanas y cálculo de rutas (experimental)
+    streets.ts             Callejero peatonal: por dónde se anda de verdad
     network.ts             Red oficial de líneas, sentidos y paradas
     schedule.ts            Horario programado a partir del GTFS estático
     notifications.ts       Notificaciones locales
 public/data/
   network.json             Red oficial generada (27 líneas · 80 sentidos)
+  streets.json             Callejero peatonal de OpenStreetMap (carga diferida)
   gtfs.zip                 GTFS estático (solo horario teórico)
 android/                   Proyecto nativo, servicio en primer plano incluido
   app/src/main/java/com/icuas/salbus/
@@ -52,6 +55,7 @@ Todo procede de **Salamanca de Transportes**:
 | Llegadas en tiempo real | `salamancadetransportes.com/tiempos-de-llegada/?ref=<parada>` | En vivo |
 | Líneas, sentidos y paradas | `salamancadetransportes.com/informacion-de-lineas/lineas/` | `npm run data:network` |
 | Horario programado | `public/data/gtfs.zip` (GTFS estático) | Manual |
+| Calles para los paseos | OpenStreetMap vía Overpass | `npm run data:streets` |
 
 La página de líneas incrusta, por cada línea, los atributos
 `data-paradas-trayecto-{uno..cuatro}` con la **secuencia ordenada de paradas de
@@ -94,7 +98,57 @@ leyenda de colores:
 El estado por parada vive en `state.stopSync`; lo alimentan `onStart`/`onFeed` de
 `fetchStopsSequentially`.
 
+### Qué se actualiza, cada cuánto y con qué condición
+
+Todas estas frecuencias salen de repartir **una sola cola** —una petición cada
+2 s— entre funciones que la quieren a la vez. Por eso la columna que manda no es
+«cada cuánto» sino «cuándo»: casi todo está apagado la mayor parte del tiempo, y
+eso es lo que permite que lo encendido llegue a tiempo.
+
+| Qué | Cada cuánto | Cuándo |
+| --- | --- | --- |
+| Paradas guardadas | una vez al abrir la app | Una pasada por todas, en serie |
+| Parada desplegada | 15 s | Solo la que esté abierta (una a la vez) |
+| Ficha de una parada | 15 s | Buscador y mapa; el globo del mapa ya la adelanta |
+| Aviso de próximo bus | 15 s | Solo si está activo; con la app cerrada, el servicio nativo |
+| Por dónde viene el aviso | 30 s | Solo con el autobús a menos de 20 min, y solo hasta donde puede estar |
+| Ver por dónde viene | 20 s por parada | Solo activo, en su pestaña y con la app delante |
+| Puntualidad | 30 s (15 s con bus entrando) | Solo dentro de la franja del control |
+
+Los números viven **una sola vez**, en `FRESHNESS` de `src/state.ts`. Ajustes →
+*Frecuencias de actualización* los lee de ahí: contarlos en dos sitios acaba
+siempre con dos cifras distintas, y la que se enseña es la que no se cumple.
+
+Un dato se pinta como **«al día» durante 40 s** (`SYNC_FRESH_MS` en `src/ui.ts`).
+Son el doble del ciclo de un recorrido activo, así que verde significa «entró en
+uno de los dos últimos ciclos». Con el minuto de antes, una parada podía haberse
+saltado dos ciclos enteros y seguir pintada de verde.
+
+### El repaso de arranque
+
+Al abrir la app se hace **una** pasada en serie por todas las paradas guardadas
+(`primeFavourites`). No es un capricho: la fuente tarda lo suyo y solo admite una
+consulta cada dos segundos, así que la primera parada que se desplegaba se
+quedaba mirando un esqueleto. Esa espera se adelanta al arranque, donde ya hay
+una pantalla de bienvenida y una lista que mirar.
+
+Es **una sola vez por sesión**. A partir de ahí, en vivo solo se mantiene la
+parada desplegada: plegada no enseña ni un tiempo, y refrescar diez paradas para
+no mirar ninguna es gastar la cola contra una fuente que limita por IP.
+
 ## Buscar por mapa
+
+**Sin línea ni sentido elegidos el mapa no está vacío: enseña las 349 paradas de
+la red**, como puntos sin número, y se puede tocar cualquiera. Es la forma
+natural de usar un mapa —«esta es mi calle, esta es mi parada»— y antes obligaba
+a saber de antemano qué línea pasa por ella. El botón «Ampliar» funciona también
+ahí, que es justo donde más falta hace para acertarle con el dedo.
+
+Al abrir el globo de una parada **se lanza ya la consulta de sus tiempos**, antes
+de pulsar «Ver tiempos». Quien abre el globo casi siempre acaba pulsando el
+botón, y esa consulta tarda: adelantándola, para cuando se pulsa el dato suele
+estar puesto. «Ver tiempos» ya no fuerza otra consulta si la que se adelantó
+sigue fresca (`ensureStopFresh`), que era lo que anulaba la ventaja.
 
 Al elegir línea y sentido el mapa pasa a **pantalla completa**, y se vuelve al
 buscador con la ✕ de la esquina superior derecha. El contenedor `#stop-map` no
@@ -110,6 +164,30 @@ alejado, y ahí treinta chinchetas se solapan, el tamaño se escala con el zoom
 parada se abre un globo con su nombre, su código y las líneas que pasan por ella;
 los tiempos no van en el globo, porque abrirían una consulta por cada parada que
 se tocara.
+
+## La tarjeta de una parada guardada
+
+Dos exigencias que no caben juntas en una cabecera: enseñar **todas** las líneas
+que pasan por la parada —son lo que la identifica de un vistazo— y que **todas
+las tarjetas plegadas midan lo mismo**, o la lista se lee como si estuviera rota.
+
+Entre el código, el nombre y los botones, a los distintivos les quedaban unos
+90 px. La parada más concurrida de la red tiene **trece** líneas: ahí solo podían
+salir cortados o con barra de desplazamiento. Por eso bajan a una **franja propia
+de ancho completo**, con hueco fijo para dos filas: los trece entran con sitio de
+sobra, y una parada de una sola línea ocupa exactamente lo mismo que una de
+trece. Ese hueco de más es el precio de que la lista no suba y baje de escalón en
+escalón.
+
+La otra mitad del problema era el nombre. El bloque de texto reserva **dos
+líneas**, que bastan para las 349 paradas de la red (la más larga son 47
+caracteres y entra justa) y también para una parada renombrada, que enseña el
+alias arriba y el nombre oficial debajo. Es un **mínimo, no un recorte**: en una
+pantalla muy estrecha un nombre que necesite tres líneas se sigue leyendo entero,
+porque plantarse en la acera equivocada es peor que una tarjeta desigual.
+
+El botón de actualizar solo aparece **desplegada**. Plegada no se enseña ni un
+tiempo, así que refrescar era pedirle a la fuente un dato que nadie iba a ver.
 
 ## Repintado de la interfaz
 
@@ -155,6 +233,34 @@ si lo hicieran la misma parada mediría distinto según quién la estuviera mira
 `npm run test:punctuality -- --stop 222 --line 4 --minutes 90` graba la fuente
 real con el mismo parser y la misma lógica que la app, y escribe lo observado.
 
+### Por qué a veces no se apunta ninguna hora
+
+Una tabla vacía no dice nada de por qué está vacía, y los motivos son varios y
+ninguno se ve desde fuera: la línea no figura en el panel de esa parada, la
+fuente está limitando por IP, el móvil se durmió entre consulta y consulta, o el
+paso **sí** se detectó pero el horario oficial no tenía ninguna salida cerca a la
+que atribuirlo.
+
+Por eso cada control lleva su **registro** (`state.monitorTrace`, desplegable en
+su tarjeta). Cada consulta deja anotado lo que vio y lo que decidió con ello:
+«faltan 5 min, todavía por encima de los 3 a los que se vigila», «la línea deja
+de figurar, 1 de 2 consultas», «paso anotado a las 07:35, programado 07:32,
++3 min». Se guarda en disco, porque la franja se mide también con la app cerrada
+y al volver a abrirla el registro es lo único que puede contar qué pasó.
+
+Encima de eso hay un **vigilante** (`superviseMonitors`, un latido por segundo)
+que hace lo que la detección de pasos no puede hacer sola, porque esa solo se
+ejecuta cuando *llega* un dato:
+
+- anota cuándo empieza y cuándo termina cada franja;
+- **avisa cuando una franja abierta lleva más de 3 minutos sin una sola consulta
+  buena**. Ese era el caso que dejaba la pantalla vacía sin explicación;
+- sostiene una **notificación persistente mientras se mide**, con la línea, la
+  parada, la hora de fin y los pasos anotados hoy. No es decorativa: declara al
+  sistema que hay trabajo en curso, y sobre todo le dice a quien lleva el móvil
+  por qué la app sigue despierta. La publica solo la web, y solo para los
+  controles que **no** lleva el servicio nativo, que ya publica la suya.
+
 ## Funciones de seguimiento
 
 Hay dos modalidades y las dos tienen tope, porque cada una consulta por su cuenta
@@ -166,20 +272,126 @@ ninguna era gastar cola contra una fuente que limita por IP.
 
 | | Máximo creadas | Notas |
 | --- | --- | --- |
-| Aviso de próximo bus | 2 | notificación persistente; termina tras ver pasar los autobuses que se elijan en Ajustes (1 a 3, uno por defecto) |
-| Ver por dónde viene | 2 | recorrido parada a parada; se **pausa solo** al salir de la pestaña Seguir o al irse la app a segundo plano |
-| **Activas a la vez** | **2 en total** | de cualquier modalidad |
+| Aviso de próximo bus | 2 | notificación persistente con los minutos y a cuántas paradas viene; termina tras ver pasar los autobuses que se elijan en Ajustes (1 a 3, uno por defecto) |
+| Ver por dónde viene | 2 | recorrido parada a parada, una consulta cada 20 s por parada |
+| **Actualizándose a la vez** | **1 en total** | de cualquier modalidad |
 
 Al crear una por encima del tope de su modalidad se pregunta **cuál se
-sustituye**, en vez de rechazar la acción. Al pasar de dos activas se **pausa la
-más antigua**: lo que se acaba de tocar es siempre lo que se quiere mirar ahora.
-Una función en pausa se conserva entera, no consulta ni avisa, y se reactiva con
-el botón de su tarjeta.
+sustituye**, en vez de rechazar la acción.
 
-Los avisos de próximo bus NO se pausan: un aviso creado está siempre en marcha,
-porque pausarlo no se distinguía de quitarlo. Los recorridos sí, y además solos:
-consultan ocho paradas por ciclo, así que fuera de su pestaña dejan de mirar y
-le ceden el sitio en la cola al aviso, que es lo que tiene que llegar a tiempo.
+**Solo una función se mantiene actualizada a la vez**, sea de la modalidad que
+sea. Con dos, el recorrido —ocho paradas por ciclo— y el aviso se quitaban el
+turno en una cola que admite una petición cada dos segundos, y las dos llegaban
+tarde. **Reanudar una pausa automáticamente la otra**: no hay nada que elegir ni
+ningún error que leer, y el botón lo avisa antes de pulsarlo.
+
+Las dos modalidades se pausan y se reanudan. Un aviso en pausa se conserva
+entero —parada, línea, autobuses ya vistos— y vuelve de un toque; lo que sí
+desaparece al pausarlo es **su notificación**, y por eso desaparece: una
+notificación persistente que ya no se actualiza es peor que ninguna, porque se
+queda enseñando una hora que dejó de ser verdad.
+
+Se pausa solo, sin tocar nada, en tres situaciones:
+
+| Situación | Qué sigue vivo |
+| --- | --- |
+| Se sale de la pestaña Seguir | solo el aviso de próximo bus que estuviera activo |
+| La app pasa a segundo plano | ídem: el aviso es justo lo que tiene sentido fuera de la pantalla |
+| Hay una franja de puntualidad abierta | nada: la pestaña entera se apaga |
+
+La tercera es la más severa a propósito. Medir a qué hora pasa de verdad un
+autobús exige no perderse una sola consulta de **esa** parada; un recorrido pide
+ocho por ciclo. Entre las dos cosas, la que tiene una hora que perder es el
+recorrido: la franja dura minutos y no se repite hasta mañana. Mientras dure, la
+pestaña Seguir lo dice donde se ve y sus botones de reanudar están apagados.
+
+## En qué parada está el autobús
+
+**La fuente no lo dice.** La web oficial no publica posiciones ni identificadores
+de vehículo: por cada parada dice «línea N, M minutos» y nada más. Lo único que
+delata una presencia física es que ese contador caiga a cero o uno, o que la
+fuente escriba «LLEGANDO A PARADA». Todo lo demás es deducción, y vive en
+`src/services/bus-position.ts`.
+
+La deducción es esta: se mira ese mismo indicio en las paradas **anteriores** del
+recorrido —que salen de `network.json` en el orden real del trayecto, no por
+cercanía geométrica— y se toma **la más avanzada** que lo cumpla.
+
+Lo de «la más avanzada» no es un detalle de estilo. Las paradas se consultan en
+serie, una cada dos segundos, así que los datos de una ventana **no son del
+mismo instante**: puede quedar un «llegando» rezagado de hace medio minuto y
+otro más adelante recién traído. Como un autobús solo avanza, el índice mayor es
+siempre la verdad más nueva. Por eso cada parada de «ver por dónde viene» lleva
+su punto de color: la diferencia de medio minuto entre dos renglones es el precio
+de una fuente que no deja preguntar más deprisa, no un error.
+
+Es **una sola implementación** para las dos funciones que cuentan paradas. Dos
+acabarían situando el mismo autobús en dos sitios distintos con los mismos datos
+delante.
+
+### El aviso de próximo bus también cuenta paradas
+
+La notificación dice, a continuación del tiempo, a cuántas paradas viene:
+
+```
+Línea 4 · En 7 min · a 4 paradas
+Línea 4 · Llegando · en tu parada
+```
+
+Los minutos dicen cuándo llega; las paradas dicen si ese número se puede creer.
+Un «en 2 min · a 5 paradas» avisa de que el contador va a dar un salto.
+
+Buscar cuesta peticiones contra una fuente que solo admite una cada dos
+segundos, y salen del mismo turno que necesita el tiempo de **tu** parada. Tres
+reglas lo mantienen barato:
+
+- **Se busca de tu parada hacia atrás y se para en la primera que lo tenga
+  encima.** Siendo la más cercana de las que lo tienen, es la más avanzada. Ese
+  orden es lo que hace la búsqueda barata: con el autobús cerca —justo cuando el
+  dato sirve— se encuentra a la primera o a la segunda consulta.
+- **No se mira más atrás de donde puede estar** (`routeScanDepth`): con cinco
+  minutos por delante no tiene sentido consultar la parada de hace diez.
+- **Por encima de 20 minutos no se busca.** El autobús puede ni haber salido, «a
+  trece paradas» no cambia lo que nadie va a hacer, y costaría el máximo de
+  peticiones justo cuando menos falta hace.
+
+Un 429 **interrumpe** la búsqueda en vez de seguir hacia atrás: dar por
+descartada una parada que no se ha llegado a mirar dejaría el autobús «más lejos»
+de lo que está. Y la localización caduca a los dos minutos: un autobús en marcha
+deja de estar donde estaba, así que se calla en vez de envejecer el número.
+
+**Hace falta saber el sentido**, porque las paradas anteriores solo existen
+dentro de un recorrido concreto, y la fuente nunca dice hacia dónde va el
+autobús. Sale de dos sitios, en este orden:
+
+1. **De la red oficial**, cuando la respuesta es única. Por el **93 %** de los
+   pares parada-línea pasa un solo sentido y no hay nada que decidir. Los
+   trayectos parciales no cuentan como duda: son variantes del mismo sentido.
+2. **De quien crea el aviso**, cuando no lo es. En el 5 % de paradas por las que
+   la línea pasa en los dos sentidos, la hoja de «Avisarme del próximo bus»
+   añade el desplegable de sentido. Deducirlo ahí sería jugárselo a cara o cruz
+   y mandar a mirar a la acera de enfrente; preguntarlo no cuesta nada, porque
+   **quien está esperando ya sabe cuál es su autobús** —es el que quiere coger—.
+
+Ese desplegable **solo aparece cuando hay algo que elegir**: preguntarlo en el
+93 % restante sería una pregunta sin respuestas. Y el sentido elegido no filtra
+el aviso, solo sirve para contar paradas: la fuente publica «Línea 4, 7 minutos»
+sin decir hacia dónde va, así que la notificación suena con cualquier autobús de
+la línea. La hoja lo dice donde se elige, para que nadie cuente con un filtro que
+no existe.
+
+Los avisos guardados de antes reciben el sentido al arrancar solo si no admite
+duda (`backfillTrackingDirections`). Los de una parada con dos sentidos se quedan
+sin él: nadie llegó a elegirlo, y ponerlo entonces sería adivinar. Se arreglan
+volviendo a crear el aviso, que ya lo pregunta.
+
+Con la app cerrada quien busca es el servicio nativo, que lleva la regla portada
+a mano en `BusTrackingService.sweepRoute` (barre cada 30 s, no en cada ciclo) y
+recibe el recorrido ya resuelto en `BusTracking.sync`: la red de líneas es un
+JSON que solo existe en la parte web. Mientras el servicio vive, la web **no**
+busca en paralelo —serían el doble de peticiones y dos recuentos capaces de
+discrepar— y se limita a reflejar el suyo. `npm test` comprueba que las
+constantes de las dos copias no se separen.
 
 ## Mapas (experimental)
 
@@ -204,6 +416,20 @@ El mapa dibuja el punto con su círculo de precisión —enseñar un punto exact
 cuando el sistema dice "en algún sitio de estos 300 m" es mentir— y las seis
 paradas más próximas numeradas.
 
+Los dos mapas de la pestaña llevan **botón de ampliar**, igual que el del
+buscador y por el mismo mecanismo: el contenedor no se mueve del árbol, solo
+cambia cómo se coloca, porque moverlo obligaría a reconstruir Leaflet.
+
+Cuando la ubicación no llega, la app **distingue qué falta y lleva hasta allí**.
+El interruptor general de ubicación del teléfono y el permiso de SALBUS son dos
+cosas distintas que desde la página se ven igual —la geolocalización no
+responde— y se arreglan en pantallas distintas del sistema. Se le pregunta al
+sistema en vez de suponerlo (`DeviceSettings.isLocationEnabled`), porque un GPS
+que tarda bajo techo da exactamente el mismo error que uno apagado, y el botón
+que aparece abre la pantalla concreta: los ajustes de ubicación, o la ficha de
+permisos de la app. Decir «activa la ubicación» sin llevar hasta donde se activa
+deja el problema donde estaba.
+
 **Rutas.** Origen y destino se eligen entre "mi ubicación" y las paradas de la
 red; no hay buscador de calles porque no hay geocodificador sin conexión. El
 cálculo (`src/services/routing.ts`) es un Dijkstra sobre las paradas donde el
@@ -220,6 +446,48 @@ del horario cuando lo hay, como frecuencia (mediana de los huecos entre salidas
 de la franja, dividida entre dos) y no como "la próxima salida a las 08:12": una
 hora concreta de un feed caducado acaba siendo mentira, una frecuencia envejece
 mucho mejor.
+
+### Los paseos van por las calles
+
+El cálculo medía los tramos a pie **en línea recta**. En una ciudad eso no es una
+aproximación: entre dos puntos separados 200 m en el mapa puede haber un río, una
+vía de tren o una manzana entera, y el error iba **siempre** en la misma
+dirección —a menos—, porque la recta es el camino más corto que existe.
+
+`public/data/streets.json` es el callejero peatonal de Salamanca sacado de
+OpenStreetMap (`npm run data:streets`): unos 100.000 nodos y 123.000 tramos, ~2 MB.
+Van en enteros de millonésimas de grado y **diferenciales** respecto al nodo
+anterior, con los nodos ordenados por posición, así que casi todos los números
+son de tres o cuatro cifras en vez de ocho. El JSON crudo de Overpass eran varias
+decenas de megas.
+
+**No se carga al arrancar.** Lo pide `src/services/streets.ts` la primera vez que
+se entra en «Rutas», una sola vez por sesión. Que una función en pruebas
+encareciera el arranque de toda la app sería lo contrario de lo que se busca. Si
+el fichero no está, la ruta sale igual con la estimación en recta y lo dice: cada
+tramo a pie que no se haya medido por las calles lleva la coletilla «en línea
+recta».
+
+El camino se resuelve con un **A\*** sobre listas de adyacencia planas y un
+montículo binario. Con cien mil nodos, una cola que se reordena en cada inserción
+convertía un cálculo de milisegundos en varios segundos con la pantalla
+congelada; y la estimación (distancia en recta) nunca puede pasarse, que es la
+condición para que el primer camino encontrado sea de verdad el más corto.
+
+**El afinado se hace después de elegir la ruta, no dentro del cálculo.** Es una
+cuestión de coste: el Dijkstra de `planRoute` evalúa paseos entre cientos de
+pares de paradas, y resolver cada uno sobre el callejero dejaría la pantalla
+parada varios segundos. Un itinerario ya elegido tiene dos o tres tramos a pie, y
+esos sí se miden exactos —son los que se leen y se andan—. La contrapartida está
+dicha y se compensa: como la recta se queda corta siempre, una ruta podía ganar
+por medio minuto gracias a un paseo que en realidad cruzaba una manzana; por eso
+`refineWalking` devuelve minutos nuevos y **se vuelve a ordenar con ellos**. Si la
+alternativa pasa a ser mejor, es la alternativa la que se recomienda.
+
+Los transbordos ya se valoraban y se siguen valorando igual: penalización fija de
+4 minutos además de la espera real (cambiar de autobús cansa y se falla) y tope
+de dos. Lo que cambia es que ahora el paseo del transbordo se mide por donde se
+cruza de verdad.
 
 > Lo experimental no le quita recursos a lo demás: esta pestaña **no consulta ni
 > un solo tiempo de llegada**. Esa fuente limita por IP y su cola es para el
@@ -248,9 +516,13 @@ quitar.
 Cuando faltan 3 minutos el móvil da una **vibración corta**, una sola vez por
 autobús (se rearma cuando ese autobús pasa). Se desactiva desde Ajustes.
 
-La notificación del aviso enseña **cuatro datos y ninguno repetido**: la línea y
-el tiempo que falta en el título, la dirección y la hora de la última
-actualización en el cuerpo. El aviso de «ya ha pasado» lo publica **solo** el
+La notificación del aviso enseña **cinco datos y ninguno repetido**: la línea, el
+tiempo que falta y a cuántas paradas viene el autobús en el título, la dirección
+y la hora de la última actualización en el cuerpo. El recuento de paradas
+aparece solo cuando consta (ver [En qué parada está el
+autobús](#en-qué-parada-está-el-autobús)): la fuente no publica posiciones, así
+que unas veces se deduce y otras no, y un hueco en blanco haría pensar que la app
+se ha quedado colgada. El aviso de «ya ha pasado» lo publica **solo** el
 servicio; la web se lo salta cuando el cierre viene de él (`finishTracking(id,
 true)`), porque publicando los dos salían dos notificaciones idénticas.
 
@@ -416,6 +688,7 @@ npm run ui:stability   # el refresco no destruye la interfaz
 npm run test:punctuality -- --stop 222 --line 4   # graba la fuente real
 
 npm run data:network   # regenera public/data/network.json
+npm run data:streets   # regenera public/data/streets.json (OpenStreetMap)
 npm run assets:icons   # regenera iconos y splash desde public/favicon.svg
 
 npm run android:sync   # build + cap sync
@@ -426,6 +699,8 @@ npm run android:open   # abre Android Studio
 ## Mantenimiento
 
 - **Red de líneas**: `npm run data:network` cuando cambien recorridos o paradas.
+- **Callejero**: `npm run data:streets` de tanto en tanto; OpenStreetMap cambia
+  poco y una calle nueva solo afecta a la pestaña experimental.
 - **Horario programado**: sustituir `public/data/gtfs.zip` por un feed vigente.
 - **Icono**: editar `public/favicon.svg` y `public/icon-mono.svg`, después
   `npm run assets:icons`.

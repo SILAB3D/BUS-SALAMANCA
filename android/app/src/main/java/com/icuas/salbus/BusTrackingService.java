@@ -160,6 +160,34 @@ public class BusTrackingService extends Service {
     /** Ciclos seguidos sin ver la linea, tras haberla tenido encima, para darla por pasada. */
     private static final int MISSING_STREAK_TO_PASS = 2;
 
+    /**
+     * Paradas anteriores como mucho que se miran para localizar el autobus.
+     *
+     * Cada una es una peticion mas contra una fuente que solo admite una cada
+     * dos segundos, y salen del mismo turno que necesita el tiempo de la parada
+     * del aviso. Coincide con ROUTE_SCAN_MAX_STOPS de src/state.ts.
+     */
+    private static final int ROUTE_SCAN_MAX_STOPS = 6;
+
+    /** Por encima de estos minutos no se busca: el autobus puede ni haber salido. */
+    private static final int ROUTE_SCAN_MAX_MINUTES = 20;
+
+    /** Minutos que tarda de media un autobus urbano de una parada a la siguiente. */
+    private static final double MINUTES_PER_STOP = 1.5;
+
+    /**
+     * Cada cuanto se vuelve a buscar por donde viene.
+     *
+     * No en cada ciclo: el ciclo son 15 s y la busqueda puede costar seis
+     * peticiones. A este ritmo el coste maximo es de ~8 peticiones por medio
+     * minuto —una cada cuatro segundos— muy por debajo del limite de la fuente,
+     * y treinta segundos de retraso no llegan a valer media parada.
+     */
+    private static final long ROUTE_SWEEP_MS = 30_000L;
+
+    /** Pasado este tiempo, la ultima localizacion deja de ensenarse. */
+    private static final long ROUTE_FIX_MAX_AGE_MS = 120_000L;
+
     /** Minutos restantes a partir de los cuales se avisa con una vibracion corta. */
     private static final int VIBRATION_THRESHOLD_MINUTES = 3;
 
@@ -245,12 +273,45 @@ public class BusTrackingService extends Service {
         /** La ultima consulta de este aviso se topo con el limite de la fuente. */
         boolean throttled = false;
 
+        /**
+         * Paradas anteriores del recorrido, de la mas cercana a la mas lejana.
+         *
+         * Llegan ya resueltas desde la web: la red de lineas es un JSON que solo
+         * existe alli, y el servicio tiene que poder contar paradas sin ella.
+         * Vacio cuando por la parada del aviso pasa mas de un sentido de la
+         * linea y no se puede saber por cual viene.
+         */
+        String[] route = new String[0];
+
+        /** Paradas anteriores a las que consta el autobus, o -1 si no consta. */
+        int stopsAway = -1;
+        /** Cuando se averiguo, para poder callarse cuando envejezca. */
+        long stopsAwayAt = 0L;
+        /** Ultima busqueda, se salde con hallazgo o no. */
+        long routeSweptAt = 0L;
+
         Job(String id, String stopId, String stopName, String lineId, String destination) {
             this.id = id;
             this.stopId = stopId;
             this.stopName = stopName;
             this.lineId = lineId;
             this.destination = destination;
+        }
+
+        /** La localizacion sigue siendo defendible. */
+        boolean hasFreshFix(long now) {
+            return stopsAway >= 0 && now - stopsAwayAt <= ROUTE_FIX_MAX_AGE_MS;
+        }
+
+        /** "en tu parada" / "a 1 parada" / "a 4 paradas", o vacio si no consta. */
+        String whereText(long now) {
+            if (!hasFreshFix(now)) {
+                return "";
+            }
+            if (stopsAway == 0) {
+                return "en tu parada";
+            }
+            return stopsAway == 1 ? "a 1 parada" : "a " + stopsAway + " paradas";
         }
     }
 
@@ -587,12 +648,13 @@ public class BusTrackingService extends Service {
                 break;
             }
 
-            String[] parts = raw.split(Pattern.quote(FIELD_SEPARATOR), 6);
+            String[] parts = raw.split(Pattern.quote(FIELD_SEPARATOR), 7);
             if (parts.length < 5) {
                 continue;
             }
 
             Job job = new Job(parts[0], parts[1], parts[2], parts[3], parts[4]);
+            job.route = parseRoute(parts, 6);
             Job previous = findJob(parts[0]);
 
             if (previous != null) {
@@ -601,6 +663,13 @@ public class BusTrackingService extends Service {
                 job.missingStreak = previous.missingStreak;
                 job.busesSeen = previous.busesSeen;
                 job.warnedAt3 = previous.warnedAt3;
+                // La localizacion tambien se conserva: la web reenvia la lista
+                // entera cada vez que cambia cualquier cosa (un ajuste, el otro
+                // aviso), y empezar de cero en cada sincronizacion borraria el
+                // recuento cada pocos segundos.
+                job.stopsAway = previous.stopsAway;
+                job.stopsAwayAt = previous.stopsAwayAt;
+                job.routeSweptAt = previous.routeSweptAt;
             } else {
                 // Se acota al ultimo autobus pendiente: crear el aviso significa
                 // que aun queda alguno por ver, y con la cuenta ya completa nunca
@@ -614,6 +683,30 @@ public class BusTrackingService extends Service {
         jobs.clear();
         jobs.addAll(next);
         cancelSpareNotifications();
+    }
+
+    /**
+     * Recorrido de un aviso: ids de parada separados por comas.
+     *
+     * Los ids son numericos, asi que la coma no puede aparecer dentro de uno y
+     * no hace falta otro separador de control.
+     */
+    private static String[] parseRoute(String[] parts, int index) {
+        if (parts.length <= index || parts[index].isEmpty()) {
+            return new String[0];
+        }
+
+        String[] raw = parts[index].split(",");
+        List<String> stops = new ArrayList<>();
+
+        for (String stopId : raw) {
+            String trimmed = stopId.trim();
+            if (!trimmed.isEmpty() && stops.size() < ROUTE_SCAN_MAX_STOPS) {
+                stops.add(trimmed);
+            }
+        }
+
+        return stops.toArray(new String[0]);
     }
 
     private static int parseInt(String[] parts, int index) {
@@ -890,9 +983,19 @@ public class BusTrackingService extends Service {
 
             job.lastMinutes = minutes;
 
+            // Por donde viene, con la misma deteccion que "ver por donde viene".
+            sweepRoute(job, minutes, cycle);
+
+            String where = job.whereText(System.currentTimeMillis());
             String title = minutes <= 0
                 ? "Línea " + job.lineId + " · Llegando"
                 : "Línea " + job.lineId + " · En " + minutes + " min";
+
+            // A continuacion del tiempo: los minutos dicen cuando llega y las
+            // paradas dicen si ese numero se puede creer.
+            if (!where.isEmpty()) {
+                title = title + " · " + where;
+            }
 
             update(job, slot, title, body(job));
             notifyUi(job, result.status, minutes, arrival.arriving);
@@ -920,6 +1023,82 @@ public class BusTrackingService extends Service {
     }
 
     /**
+     * Busca en que parada anterior esta el autobus.
+     *
+     * La fuente oficial NUNCA dice donde esta un autobus: por cada parada solo
+     * publica "linea N, M minutos". Lo unico que delata una presencia es que ese
+     * contador caiga a cero o uno. Asi que se mira eso mismo en las paradas
+     * anteriores del recorrido, que llegan ordenadas de la mas cercana a la mas
+     * lejana, y se para en LA PRIMERA que lo cumpla: siendo la mas cercana de
+     * las que lo tienen, es la mas avanzada, y un autobus solo avanza.
+     *
+     * Ese orden no es cosmetico, es lo que hace la busqueda barata. Cuando el
+     * autobus esta cerca —justo cuando el dato sirve para algo— se encuentra a
+     * la primera o a la segunda consulta. Y no se mira mas atras de donde puede
+     * estar segun lo que falta: con cinco minutos por delante no tiene sentido
+     * consultar la parada de hace diez.
+     */
+    private void sweepRoute(Job job, int minutes, Cycle cycle) {
+        long now = System.currentTimeMillis();
+
+        if (job.route.length == 0) {
+            return;
+        }
+
+        // Lejos no se busca: "a trece paradas" no cambia lo que nadie va a
+        // hacer, y costaria el maximo de peticiones cuando menos falta hace.
+        if (minutes < 0 || minutes > ROUTE_SCAN_MAX_MINUTES) {
+            job.stopsAway = -1;
+            return;
+        }
+
+        if (now - job.routeSweptAt < ROUTE_SWEEP_MS) {
+            return;
+        }
+
+        job.routeSweptAt = now;
+
+        int depth = Math.min(
+            job.route.length,
+            Math.min(ROUTE_SCAN_MAX_STOPS, (int) Math.ceil(minutes / MINUTES_PER_STOP) + 1)
+        );
+
+        for (int index = 0; index < depth; index += 1) {
+            if (!running) {
+                return;
+            }
+
+            ArrivalsClient.Result result = cycle.get(job.route[index]);
+
+            // Un 429 o un error de red no dicen nada de esa parada: seguir
+            // buscando hacia atras daria por descartada una parada que no se ha
+            // llegado a mirar, y el autobus acabaria "mas lejos" de lo que esta.
+            if (result.status == ArrivalsClient.STATUS_THROTTLED) {
+                backoffMs = Math.min(BACKOFF_MAX_MS, backoffMs * 2);
+                return;
+            }
+
+            if (result.status != ArrivalsClient.STATUS_OK) {
+                continue;
+            }
+
+            ArrivalsClient.Arrival arrival = result.findLine(job.lineId);
+            if (arrival != null && (arrival.arriving || arrival.minutes <= 1)) {
+                // La primera que lo tiene encima es la mas avanzada: +1 porque
+                // route[0] es la parada ANTERIOR a la del aviso.
+                job.stopsAway = index + 1;
+                job.stopsAwayAt = now;
+                return;
+            }
+        }
+
+        // No consta en ninguna de las miradas. Puede estar mas atras del tope,
+        // entre dos paradas sin llegar a "llegando", o la fuente puede no estar
+        // publicando esa linea ahora. Se calla en vez de repetir lo anterior.
+        job.stopsAway = -1;
+    }
+
+    /**
      * Da por pasado un autobus y prepara el siguiente.
      *
      * @return true si con este ya se han visto los {@link #targetBuses} y el
@@ -931,6 +1110,11 @@ public class BusTrackingService extends Service {
         job.lastMinutes = -1;
         job.missingStreak = 0;
         job.warnedAt3 = false;
+        // La localizacion era la del autobus que acaba de pasar. Arrastrarla al
+        // siguiente diria "a 1 parada" de un autobus que aun no ha salido.
+        job.stopsAway = -1;
+        job.stopsAwayAt = 0L;
+        job.routeSweptAt = 0L;
 
         if (job.busesSeen >= targetBuses) {
             finish(job, slot);
@@ -1011,8 +1195,12 @@ public class BusTrackingService extends Service {
     private void notifyUi(Job job, int status, int minutes, boolean arriving, boolean finished) {
         BusTrackingPlugin plugin = listener;
         if (plugin != null) {
+            // La localizacion se manda solo mientras vale: envejecida es peor
+            // que ninguna, porque la pantalla no tendria como saber que lo esta.
+            int stopsAway = job.hasFreshFix(System.currentTimeMillis()) ? job.stopsAway : -1;
             plugin.emitArrivalUpdate(
-                job.id, job.stopId, job.lineId, minutes, arriving, status, job.busesSeen, finished);
+                job.id, job.stopId, job.lineId, minutes, arriving, status, job.busesSeen, finished,
+                stopsAway);
         }
     }
 

@@ -81,7 +81,8 @@ public class BusTrackingPlugin extends Plugin {
                         clean(job.optString("stopName", stopId)),
                         lineId,
                         clean(job.optString("destination", "")),
-                        String.valueOf(job.optInt("busesSeen", 0))));
+                        String.valueOf(job.optInt("busesSeen", 0)),
+                        joinStops(job.optJSONArray("routeStops"))));
                 }
             } catch (Exception error) {
                 call.reject("Lista de avisos no valida: " + error.getMessage());
@@ -231,7 +232,8 @@ public class BusTrackingPlugin extends Plugin {
         boolean arriving,
         int status,
         int busesSeen,
-        boolean finished
+        boolean finished,
+        int stopsAway
     ) {
         JSObject payload = new JSObject();
         payload.put("jobId", jobId);
@@ -242,6 +244,8 @@ public class BusTrackingPlugin extends Plugin {
         payload.put("status", statusName(status));
         payload.put("busesSeen", busesSeen);
         payload.put("finished", finished);
+        // -1 es "no consta", y es distinto de 0, que es "en tu parada".
+        payload.put("stopsAway", stopsAway);
         payload.put("at", System.currentTimeMillis());
         notifyListeners("arrivalUpdate", payload);
     }
@@ -266,6 +270,33 @@ public class BusTrackingPlugin extends Plugin {
     }
 
     /** El separador de campos del intent no puede colarse dentro de un campo. */
+    /**
+     * Recorrido de un aviso: ids de parada separados por comas.
+     *
+     * Los ids de parada son numericos, asi que la coma no puede aparecer dentro
+     * de uno y no hace falta gastar otro caracter de control en separarlos.
+     */
+    private static String joinStops(JSONArray stops) {
+        if (stops == null) {
+            return "";
+        }
+
+        StringBuilder joined = new StringBuilder();
+
+        for (int index = 0; index < stops.length(); index += 1) {
+            String stopId = stops.optString(index, "").trim();
+            if (stopId.isEmpty()) {
+                continue;
+            }
+            if (joined.length() > 0) {
+                joined.append(',');
+            }
+            joined.append(stopId);
+        }
+
+        return joined.toString();
+    }
+
     private static String clean(String value) {
         return value == null ? "" : value.replace(BusTrackingService.FIELD_SEPARATOR, " ");
     }

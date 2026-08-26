@@ -10,16 +10,21 @@ import {
   fetchStopsSequentially,
   MIN_REQUEST_SPACING_MS,
 } from './services/arrivals'
+import { routeScanDepth, ROUTE_SCAN_MAX_STOPS } from './services/bus-position'
 import { loadNetwork } from './services/network'
 import { checkForUpdate, isNativeAndroid, readInstalledVersion, Updater } from './services/updates'
-import { matchSlot, observe } from './services/punctuality'
+import { ARM_MINUTES, matchSlot, MISSING_STREAK, observe } from './services/punctuality'
 import {
   DEFAULT_WAIT_MINUTES,
   isValidPoint,
   nearestStops,
   planRoute,
+  refineWalking,
   type GeoPoint,
+  type Itinerary,
+  type PlanOutcome,
 } from './services/routing'
+import { loadStreetGraph, peekStreetGraph, walkPath } from './services/streets'
 import { currentDayType, loadSchedule } from './services/schedule'
 import {
   cancelNotification,
@@ -27,12 +32,20 @@ import {
   isNative,
   notificationId,
   showArrivalAlert,
+  showOngoingNotification,
   showTrackingNotification,
 } from './services/notifications'
 import {
   addMonitorPass,
+  addMonitorTrace,
+  anyMonitorWindowOpen,
   APP_VERSION_CODE,
+  AUTO_CYCLE_MS,
+  FRESHNESS,
+  TICK_MS,
+  TRACKING_INTERVAL_SECONDS,
   clearLogs,
+  clearMonitorTrace,
   enforceActiveLimit,
   formatMinutesClock,
   isFavourite,
@@ -57,7 +70,6 @@ import {
   trackingBusTarget,
   TRACKING_WARN_MINUTES,
   markTourSeen,
-  MAX_ACTIVE_JOBS,
   MAX_FOLLOW_JOBS,
   MAX_TRACKING_JOBS,
   type MonitorJob,
@@ -68,7 +80,15 @@ import {
 import type { StopFeed } from './types'
 import { patch } from './dom'
 import { esc, liveMinutes, readableTextColor } from './ui'
-import { describeArrival, renderApp, stopName, TOUR_STEPS } from './views'
+import {
+  describeArrival,
+  describeStopsAway,
+  renderApp,
+  stopName,
+  TOUR_STEPS,
+  trackingDirectionOptions,
+  trackingStopsAway,
+} from './views'
 
 /* ------------------------------------------------------------------ *
  * Plugins nativos                                                      *
@@ -91,6 +111,12 @@ interface TrackingUpdate {
   busesSeen: number
   /** El aviso ha completado los tres autobuses y se esta cerrando. */
   finished: boolean
+  /**
+   * Paradas anteriores a las que viene el autobus segun el servicio, o -1 si no
+   * consta. Cero es "en tu parada", que es un dato y no una ausencia de dato:
+   * por eso el "no se sabe" es -1 y no 0.
+   */
+  stopsAway: number
   at: number
 }
 
@@ -110,6 +136,8 @@ interface TrackingJobPayload {
   lineId: string
   destination: string
   busesSeen: number
+  /** Paradas anteriores del recorrido, de la mas cercana a la mas lejana. */
+  routeStops: string[]
 }
 
 /** Un control de puntualidad tal y como lo entiende el servicio nativo. */
@@ -163,33 +191,31 @@ interface BusTrackingPlugin {
   ): Promise<{ remove: () => Promise<void> }>
 }
 
+/**
+ * Pantallas de ajustes del sistema.
+ *
+ * El interruptor general de ubicacion del telefono y el permiso de SALBUS son
+ * dos cosas distintas que desde la pagina se ven igual: la geolocalizacion no
+ * responde. Este plugin es lo que permite distinguirlas y llevar a quien mira
+ * hasta la pantalla concreta donde se arregla.
+ */
+interface DeviceSettingsPlugin {
+  isLocationEnabled(): Promise<{ enabled: boolean }>
+  openLocationSettings(): Promise<void>
+  openAppSettings(): Promise<void>
+}
+
 const BatteryOptimization = registerPlugin<BatteryOptimizationPlugin>('BatteryOptimization')
+const DeviceSettings = registerPlugin<DeviceSettingsPlugin>('DeviceSettings')
 const BusTracking = registerPlugin<BusTrackingPlugin>('BusTracking')
 
 /* ------------------------------------------------------------------ *
  * Constantes de refresco                                               *
  * ------------------------------------------------------------------ */
 
-/** Cada cuanto se reevalua que hay que refrescar (no cuanto se pide a la web). */
-const TICK_MS = 1_000
-
-/** Frescura objetivo segun el uso que se le esta dando a la parada. */
-const FRESHNESS = {
-  /** Parada abierta en pantalla. */
-  focused: 15_000,
-  /** Resto de paradas guardadas visibles. */
-  visible: 45_000,
-  /** Paradas del recorrido en seguimiento. */
-  follow: 40_000,
-  /** Paradas con control de puntualidad dentro de su franja. */
-  monitor: 30_000,
-}
-
-/** Cadencia minima entre lotes automaticos completos. */
-const AUTO_CYCLE_MS = 20_000
-
-/** Cuatro actualizaciones por minuto del aviso de proximo bus. */
-const TRACKING_INTERVAL_SECONDS = 15
+/* TICK_MS, AUTO_CYCLE_MS, FRESHNESS y TRACKING_INTERVAL_SECONDS viven en
+   `state.ts`: Ajustes los enseña en la tarjeta "Frecuencias de actualizacion" y
+   un numero contado en dos sitios acaba diciendo dos cosas distintas. */
 
 /**
  * Controles de puntualidad que el servicio nativo mide a la vez.
@@ -236,6 +262,17 @@ let refreshInFlight = false
 let toastTimer: number | null = null
 
 /**
+ * El repaso de arranque ya se ha hecho en esta sesion.
+ *
+ * Es UNA sola pasada por todas las paradas guardadas, en serie. Sirve para
+ * disimular el retardo propio de la fuente: cuando alguien despliega su parada
+ * el dato ya esta ahi, en vez de mirar dos segundos de esqueleto. Solo una:
+ * mantener las diez guardadas al dia en vivo gastaria la cola entera contra una
+ * fuente que limita por IP, y plegadas ni siquiera se enseñan tiempos.
+ */
+let bootPrimeDone = false
+
+/**
  * Elemento al que hay que desplazarse en el proximo repintado.
  *
  * El desplazamiento no puede hacerse en el manejador: el nodo destino todavia
@@ -279,6 +316,7 @@ async function bootstrap(): Promise<void> {
 
     state.ready = true
     dropStaleFavourites()
+    backfillTrackingDirections()
   } catch (error) {
     state.bootError = `No se pudo iniciar la aplicación: ${errorMessage(error)}`
     log('error', 'arranque', errorMessage(error))
@@ -315,6 +353,11 @@ async function bootstrap(): Promise<void> {
       void syncInstallPermission()
     }
   })
+
+  // Una sola pasada por todas las guardadas, en serie, para que la primera
+  // parada que se despliegue ya tenga sus tiempos. Despues manda el motor de
+  // refresco de siempre.
+  await primeFavourites()
 
   void refreshVisible('auto')
   void setupUpdates()
@@ -650,6 +693,39 @@ function buildRefreshPlan(): Array<{ stopId: string, maxAgeMs: number, priority:
     }
   }
 
+  // 1 bis. Y sus paradas ANTERIORES, para poder decir a cuántas viene el
+  // autobús además de cuántos minutos faltan. Van en prioridad normal y con
+  // menos frescura que la parada propia: si hay que elegir, el minuto de TU
+  // parada es lo que no puede llegar tarde.
+  //
+  // No se miran las ocho de un recorrido completo, sino solo hasta donde el
+  // autobús puede estar según lo que falta (routeScanDepth). Con el autobús
+  // cerca —que es cuando el dato sirve— eso son una o dos paradas.
+  for (const job of state.trackings) {
+    // Con el servicio nativo vivo, el rastreo es suyo: hacerlo también aquí
+    // sería el doble de peticiones y dos recuentos capaces de discrepar.
+    if (!job.active || !job.directionKey || trackingServiceActive) {
+      continue
+    }
+
+    const depth = routeScanDepth(nextArrivalMinutes(job.stopId, job.lineId))
+    if (depth === 0) {
+      continue
+    }
+
+    const window = state.network?.getDirectionWindow(
+      job.directionKey,
+      job.stopId,
+      ROUTE_SCAN_MAX_STOPS + 1,
+    ) ?? []
+
+    // De la parada propia hacia atrás: las más cercanas son las que primero
+    // delatan al autobús, y son las que antes conviene tener frescas.
+    for (const stop of window.slice(Math.max(0, window.length - 1 - depth), window.length - 1).reverse()) {
+      add(stop.stopId, FRESHNESS.trackingRoute)
+    }
+  }
+
   // 2. Controles de puntualidad dentro de su franja horaria. Con un autobús ya
   // entrando se aprieta el ritmo: es el momento en que se decide si ha pasado.
   for (const monitor of state.monitors) {
@@ -674,8 +750,13 @@ function buildRefreshPlan(): Array<{ stopId: string, maxAgeMs: number, priority:
 
   // 4. Recorridos en seguimiento: la parada propia primero, luego hacia atras.
   // Solo los activos: uno en reposo no gasta consultas de una fuente limitada.
+  // Y ninguno mientras haya una franja de puntualidad abierta: medir a que hora
+  // pasa de verdad un autobus exige no perderse una sola consulta de ESA parada,
+  // y un recorrido pide ocho por ciclo.
+  const measuring = anyMonitorWindowOpen()
+
   for (const follow of state.follows) {
-    if (follow.active) {
+    if (follow.active && !measuring) {
       const window = state.network?.getDirectionWindow(follow.directionKey, follow.stopId, 8) ?? []
       // Se recorre al reves para pedir antes las paradas mas cercanas al usuario.
       for (const stop of [...window].reverse()) {
@@ -692,6 +773,98 @@ function buildRefreshPlan(): Array<{ stopId: string, maxAgeMs: number, priority:
   })
 }
 
+/**
+ * Una pasada por TODAS las paradas guardadas al abrir la app.
+ *
+ * La fuente oficial tarda lo suyo y solo admite una consulta cada dos segundos,
+ * asi que la primera vez que se despliega una parada hay una espera que no
+ * depende de la app. Esta pasada la adelanta al arranque, mientras la pantalla
+ * de bienvenida y el primer vistazo a la lista ocupan a quien mira.
+ *
+ * Va en SERIE por la misma cola que todo lo demas (nunca en paralelo: eso es lo
+ * que provoca el bloqueo por IP) y se hace una sola vez por sesion. A partir de
+ * ahi, en vivo solo se mantiene la parada desplegada, que es la unica que
+ * enseña tiempos.
+ */
+async function primeFavourites(): Promise<void> {
+  if (bootPrimeDone || !state.ready) {
+    return
+  }
+
+  bootPrimeDone = true
+
+  // La desplegada primero, si la hay: es la unica cuyo dato se esta mirando ya.
+  const stopIds = [...state.favourites.map((favourite) => favourite.stopId)].sort((left, right) => {
+    if (left === state.expandedStopId) return -1
+    if (right === state.expandedStopId) return 1
+    return 0
+  })
+
+  if (stopIds.length === 0) {
+    return
+  }
+
+  // Ocupa la cola: sin esto el ciclo automatico entraria en medio y pediria las
+  // mismas paradas otra vez.
+  refreshInFlight = true
+  lastAutoCycleAt = Date.now()
+  state.refreshing = true
+
+  for (const stopId of stopIds) {
+    state.stopSync[stopId] = 'queued'
+  }
+
+  const seconds = Math.round(((stopIds.length - 1) * MIN_REQUEST_SPACING_MS) / 1000)
+  state.refreshQueueLabel =
+    stopIds.length > 1 ? `Preparando ${stopIds.length} paradas · ~${seconds} s` : null
+  render()
+
+  try {
+    let done = 0
+
+    await fetchStopsSequentially(stopIds, {
+      maxAgeMs: FRESHNESS.visible,
+      priority: 'normal',
+      onStart: (stopId) => {
+        state.stopSync[stopId] = 'loading'
+        render()
+      },
+      onFeed: (feed) => {
+        done += 1
+        delete state.stopSync[feed.stopId]
+        applyFeed(feed)
+        state.refreshQueueLabel =
+          stopIds.length > 1 && done < stopIds.length
+            ? `Preparando ${done + 1} de ${stopIds.length}…`
+            : null
+        render()
+      },
+    })
+
+    state.lastRefreshAt = Date.now()
+    log('info', 'arranque', `${stopIds.length} parada(s) guardada(s) precargadas al abrir la app.`)
+  } catch (error) {
+    log('warn', 'arranque', `No se pudo precargar las paradas guardadas: ${errorMessage(error)}`)
+  } finally {
+    refreshInFlight = false
+    state.refreshing = false
+    state.refreshQueueLabel = null
+    for (const stopId of stopIds) {
+      delete state.stopSync[stopId]
+    }
+    render()
+  }
+}
+
+/** Minutos que faltan para el próximo autobús de esa línea, o -1 si no consta. */
+function nextArrivalMinutes(stopId: string, lineId: string): number {
+  const arrival = state.feeds[stopId]?.arrivals
+    .filter((item) => item.lineId === lineId)
+    .sort((left, right) => liveMinutes(left) - liveMinutes(right))[0]
+
+  return arrival ? liveMinutes(arrival) : -1
+}
+
 function tick(): void {
   // Reloj y antigüedades se repintan siempre: el repintado es incremental
   // (`patch`), así que no cierra desplegables ni interrumpe lo que se esté
@@ -703,7 +876,17 @@ function tick(): void {
   // Con un control de puntualidad dentro de su franja se sigue consultando
   // aunque la pantalla no esté en primer plano: perder esas consultas es perder
   // justo el paso que se quería medir.
-  const measuring = state.monitors.some((monitor) => isWithinWindow(monitor))
+  const measuring = anyMonitorWindowOpen()
+
+  // Registro, aviso de silencio y notificación persistente de la medición.
+  superviseMonitors()
+
+  // Mientras se mide, la pestaña Seguir está apagada: la cola de consultas es
+  // para la parada que se está midiendo. Un recorrido pide ocho paradas por
+  // ciclo y se llevaría por delante justo el paso que se quiere anotar.
+  if (measuring) {
+    pauseFollows('hay un control de puntualidad midiendo')
+  }
 
   // Con el servicio nativo midiendo, los pasos aparecen en la pantalla de
   // puntualidad al ritmo al que él los detecta, no solo al reabrir la app.
@@ -885,6 +1068,10 @@ async function syncTrackingService(): Promise<void> {
         lineId: job.lineId,
         destination: describeArrival(job.stopId, job.lineId),
         busesSeen: job.busesSeen,
+        // Paradas anteriores del recorrido, de la más cercana a la más lejana.
+        // El servicio las recorre en ese orden y para en la primera que tenga
+        // el autobús encima: la más cercana que lo tenga es donde está.
+        routeStops: trackingRouteStops(job),
       })),
       monitors: monitors.map((monitor) => ({
         id: monitor.id,
@@ -920,6 +1107,32 @@ async function syncTrackingService(): Promise<void> {
 }
 
 /**
+ * Paradas anteriores de un aviso, de la más cercana a la más lejana.
+ *
+ * Es lo que el servicio nativo necesita para contar paradas con la app cerrada:
+ * allí no hay red de líneas cargada —el JSON de la red vive en la parte web— así
+ * que la secuencia se le manda ya resuelta y en el orden en que tiene que
+ * recorrerla. Vacía cuando el aviso no tiene sentido resuelto, y entonces el
+ * servicio se limita a contar minutos, como siempre.
+ */
+function trackingRouteStops(job: TrackingJob): string[] {
+  if (!job.directionKey || !state.network) {
+    return []
+  }
+
+  const window = state.network.getDirectionWindow(
+    job.directionKey,
+    job.stopId,
+    ROUTE_SCAN_MAX_STOPS + 1,
+  )
+
+  return window
+    .slice(0, -1)
+    .reverse()
+    .map((stop) => stop.stopId)
+}
+
+/**
  * Recoge los pasos que el servicio midió mientras la app no estaba delante.
  *
  * Llegan en bruto (control e instante): el emparejado con el horario oficial se
@@ -951,8 +1164,68 @@ async function drainNativePasses(): Promise<void> {
   }
 }
 
+/**
+ * Sentido por el que viene el autobús de un aviso.
+ *
+ * Hace falta para poder decir a cuántas paradas está, porque las paradas
+ * anteriores del recorrido solo existen dentro de un sentido concreto. La
+ * fuente oficial no ayuda: dice "Línea 4, 7 minutos" y nunca hacia dónde va.
+ *
+ * Se resuelve con la red oficial y solo cuando la respuesta es única. Por el
+ * 93 % de los pares parada-línea pasa un solo sentido y no hay nada que decidir;
+ * en el 5 % que admite dos, elegir uno sería jugárselo a cara o cruz y mandar a
+ * mirar a la acera de enfrente. Ahí se devuelve `null` y el aviso funciona como
+ * siempre, contando minutos pero no paradas.
+ */
+function resolveTrackingDirection(stopId: string, lineId: string, chosen?: string): string | null {
+  const options = trackingDirectionOptions(stopId, lineId)
+
+  // Lo elegido a mano manda: por esa parada pasaba la línea en los dos sentidos
+  // y quien espera sabe cuál de los dos es el suyo, que es justo lo que la
+  // fuente oficial no dice nunca.
+  if (chosen && options.some((direction) => direction.key === chosen)) {
+    return chosen
+  }
+
+  // Un solo recorrido posible: no hay nada que preguntar ni que deducir.
+  return options.length === 1 ? options[0].key : null
+}
+
+/**
+ * Pone el sentido a los avisos que se guardaron antes de que existiera el
+ * recuento de paradas. Se hace al arrancar, que es cuando la red ya está
+ * cargada y `state.trackings` viene de disco sin él.
+ *
+ * Solo rellena los que no admiten duda. Los de una parada con dos sentidos se
+ * quedan sin él: nadie llegó a elegirlo, y ponerlo ahora sería adivinar. Se
+ * resuelven volviendo a crear el aviso, que ya lo pregunta.
+ */
+function backfillTrackingDirections(): void {
+  let changed = false
+
+  for (const job of state.trackings) {
+    if (job.directionKey) {
+      continue
+    }
+
+    const directionKey = resolveTrackingDirection(job.stopId, job.lineId)
+    if (directionKey) {
+      job.directionKey = directionKey
+      changed = true
+    }
+  }
+
+  if (changed) {
+    persistTrackings()
+  }
+}
+
 /** Crea un aviso nuevo. Los límites ya se han comprobado antes de llegar aquí. */
-async function createTracking(stopId: string, lineId: string): Promise<void> {
+async function createTracking(
+  stopId: string,
+  lineId: string,
+  directionKey?: string,
+): Promise<void> {
   const id = `${stopId}|${lineId}`
 
   if (trackingById(id)) {
@@ -965,6 +1238,7 @@ async function createTracking(stopId: string, lineId: string): Promise<void> {
     stopId,
     stopName: stopName(stopId),
     lineId,
+    directionKey: resolveTrackingDirection(stopId, lineId, directionKey),
     active: true,
     startedAt: Date.now(),
     lastMinutes: null,
@@ -990,7 +1264,7 @@ async function createTracking(stopId: string, lineId: string): Promise<void> {
   )
 
   if (turnedOff.length > 0) {
-    showToast(`Se ha pausado otra función para no pasar de ${MAX_ACTIVE_JOBS} activas`, 'info')
+    showToast('Se ha pausado la otra función: solo una se mantiene actualizada a la vez', 'info')
   }
 
   await syncTrackingService()
@@ -1005,6 +1279,7 @@ async function removeTracking(id: string, notify = true): Promise<void> {
   }
 
   state.trackings = state.trackings.filter((item) => item.id !== id)
+  delete state.trackingStopsAway[id]
   persistTrackings()
 
   await cancelNotification(notificationId(id))
@@ -1035,6 +1310,13 @@ async function toggleJobActive(kind: 'tracking' | 'follow', id: string): Promise
     return
   }
 
+  // Mientras se mide la puntualidad no se reanuda nada: la cola de consultas es
+  // de la parada que se está midiendo. Pausar sí, siempre.
+  if (!job.active && anyMonitorWindowOpen()) {
+    showToast('Hay un control de puntualidad midiendo; la pestaña Seguir vuelve al terminar', 'error')
+    return
+  }
+
   job.active = !job.active
   const turnedOff = job.active ? enforceActiveLimit(id) : []
 
@@ -1042,13 +1324,16 @@ async function toggleJobActive(kind: 'tracking' | 'follow', id: string): Promise
   persistFollows()
 
   if (!job.active && kind === 'tracking') {
+    // En pausa nadie mira las paradas anteriores: el último recuento envejece
+    // sin que nada lo corrija, así que se tira en vez de dejarlo congelado.
+    delete state.trackingStopsAway[id]
     await cancelNotification(notificationId(id))
   }
 
   await syncTrackingService()
 
   if (turnedOff.length > 0) {
-    showToast(`Se ha pausado otra función para no pasar de ${MAX_ACTIVE_JOBS} activas`, 'info')
+    showToast('Se ha pausado la otra función: solo una se mantiene actualizada a la vez', 'info')
   } else {
     showToast(job.active ? 'Función activada' : 'Función en pausa', 'info')
   }
@@ -1098,6 +1383,14 @@ async function restoreTrackingService(): Promise<void> {
       if (job) {
         job.busesSeen = update.busesSeen
         persistTrackings()
+      }
+
+      // Mientras el servicio vive, el recuento de paradas es suyo: es el único
+      // que sigue mirando las paradas anteriores con la app en segundo plano.
+      if (typeof update.stopsAway === 'number' && update.stopsAway >= 0) {
+        state.trackingStopsAway[update.jobId] = { stopsAway: update.stopsAway, at: update.at }
+      } else {
+        delete state.trackingStopsAway[update.jobId]
       }
 
       if (update.finished) {
@@ -1243,6 +1536,7 @@ function evaluateTrackingJob(job: TrackingJob, feed: StopFeed): void {
       arriving: arrival.status === 'arriving' || minutes <= 0,
       updatedAt: new Date(feed.fetchedAt),
       stale: feed.status === 'throttled',
+      stopsAway: describeStopsAway(trackingStopsAway(job)),
     })
   }
 }
@@ -1353,6 +1647,16 @@ function evaluateMonitors(feed: StopFeed): void {
     // Un 429 o un error de red no dicen nada de la parada. Tratarlos como
     // "el autobús ya no aparece" inventaría pasos que nunca ocurrieron.
     if (feed.status !== 'ok' && feed.status !== 'empty') {
+      addMonitorTrace(monitor.id, {
+        at,
+        minutes: null,
+        armed: state.monitorRuntime[monitor.id]?.armed === true,
+        level: feed.status === 'throttled' ? 'warn' : 'error',
+        note:
+          feed.status === 'throttled'
+            ? 'La fuente limitó la consulta (429). Se descarta: un bloqueo no dice nada de la parada.'
+            : `No se pudo consultar la parada (${feed.message ?? 'error de red'}). Se descarta.`,
+      })
       continue
     }
 
@@ -1367,6 +1671,13 @@ function evaluateMonitors(feed: StopFeed): void {
         delete state.monitorRuntime[monitor.id]
         touched = true
       }
+      addMonitorTrace(monitor.id, {
+        at,
+        minutes: null,
+        armed: false,
+        level: 'info',
+        note: 'Lo mide el servicio en segundo plano; la app no detecta pasos de este control para no apuntarlos dos veces.',
+      })
       continue
     }
 
@@ -1374,13 +1685,33 @@ function evaluateMonitors(feed: StopFeed): void {
       .filter((item) => item.lineId === monitor.lineId)
       .sort((left, right) => liveMinutes(left) - liveMinutes(right))[0]
 
-    const detection = observe(state.monitorRuntime[monitor.id], {
-      minutes: arrival ? liveMinutes(arrival) : null,
-      at,
-    })
+    const before = state.monitorRuntime[monitor.id]
+    const minutes = arrival ? liveMinutes(arrival) : null
+
+    const detection = observe(before, { minutes, at })
 
     state.monitorRuntime[monitor.id] = detection.runtime
     touched = true
+
+    // El registro cuenta lo que se vio Y lo que se decidió con ello. Sin esta
+    // segunda mitad, una franja entera sin horas anotadas se ve exactamente
+    // igual que una franja en la que la app no llegó a consultar nada.
+    if (detection.passAt === null) {
+      addMonitorTrace(monitor.id, {
+        at,
+        minutes,
+        armed: detection.runtime.armed,
+        level: minutes === null && !detection.runtime.armed ? 'info' : 'info',
+        note:
+          minutes === null
+            ? before?.armed
+              ? `La línea ${monitor.lineId} deja de figurar (${detection.runtime.missingStreak} de ${MISSING_STREAK} consultas). Falta una más para dar el paso por bueno.`
+              : `La línea ${monitor.lineId} no figura ahora en el panel de la parada.`
+            : detection.runtime.armed
+              ? `Autobús entrando: faltan ${minutes} min. Se anota como hora estimada de paso.`
+              : `Faltan ${minutes} min; todavía por encima de los ${ARM_MINUTES} a los que se empieza a vigilar.`,
+      })
+    }
 
     if (detection.passAt !== null && detection.reason) {
       recordPass(monitor, detection.passAt, detection.reason)
@@ -1417,6 +1748,16 @@ function recordPass(monitor: MonitorJob, passAt: number, reason: 'jump' | 'gone'
     reason,
   })
 
+  addMonitorTrace(monitor.id, {
+    at: passAt,
+    minutes: 0,
+    armed: false,
+    level: match.slot ? 'info' : 'warn',
+    note: match.slot
+      ? `Paso anotado a las ${formatMinutesClock(observedMinutes)} (${reason === 'jump' ? 'el contador saltó al siguiente autobús' : 'la línea desapareció del panel'}); programado ${match.slot}, ${deltaText}.`
+      : `Paso anotado a las ${formatMinutesClock(observedMinutes)}, pero el horario oficial no tiene ninguna salida de esta línea a menos de 15 min: se guarda aparte, sin desvío.`,
+  })
+
   log(
     'info',
     'puntualidad',
@@ -1430,6 +1771,153 @@ function recordPass(monitor: MonitorJob, passAt: number, reason: 'jump' | 'gone'
   )
 
   render()
+}
+
+/* ------------------------------------------------------------------ *
+ * Vigilancia de las franjas de puntualidad                             *
+ * ------------------------------------------------------------------ */
+
+/** Notificacion persistente que declara "estoy midiendo". */
+const MONITOR_NOTIFICATION_ID = notificationId('salbus:monitor-window')
+
+/** Franjas abiertas ahora mismo, con el instante en que se abrieron. */
+const monitorWindowOpenedAt: Record<string, number> = {}
+
+/** Ultimo aviso de silencio de cada control, para no repetirlo cada segundo. */
+const monitorSilenceWarnedAt: Record<string, number> = {}
+
+/** Sin una consulta buena en este tiempo, algo va mal y hay que decirlo. */
+const MONITOR_SILENCE_MS = 3 * 60_000
+
+/** Cada cuanto se reescribe el texto de la notificacion persistente. */
+const MONITOR_NOTICE_REFRESH_MS = 30_000
+
+let monitorNoticeShownAt = 0
+
+/**
+ * Se ejecuta en cada latido del reloj y hace tres cosas que la deteccion de
+ * pasos no puede hacer por si sola, porque solo se ejecuta cuando LLEGA un dato:
+ *
+ *  1. Deja constancia de cuando empieza y termina cada franja.
+ *  2. Avisa en el registro cuando una franja abierta lleva minutos sin una sola
+ *     consulta. Ese es el caso que dejaba la pantalla de puntualidad vacia sin
+ *     que nada lo explicara: el movil durmiendose entre consulta y consulta.
+ *  3. Sostiene la notificacion persistente mientras se mide.
+ */
+function superviseMonitors(): void {
+  const now = Date.now()
+  const open = state.monitors.filter((monitor) => isWithinWindow(monitor))
+  const openIds = new Set(open.map((monitor) => monitor.id))
+
+  for (const monitor of state.monitors) {
+    const inWindow = openIds.has(monitor.id)
+
+    if (inWindow && !monitorWindowOpenedAt[monitor.id]) {
+      monitorWindowOpenedAt[monitor.id] = now
+      addMonitorTrace(monitor.id, {
+        at: now,
+        minutes: null,
+        armed: false,
+        level: 'info',
+        note: `Empieza la franja ${formatMinutesClock(monitor.startMinutes)}–${formatMinutesClock(
+          monitor.endMinutes,
+        )}. ${
+          nativeMonitorIds.has(monitor.id)
+            ? 'La mide el servicio en segundo plano.'
+            : 'La mide la app; necesita quedarse despierta.'
+        }`,
+      })
+      continue
+    }
+
+    if (!inWindow && monitorWindowOpenedAt[monitor.id]) {
+      delete monitorWindowOpenedAt[monitor.id]
+      delete monitorSilenceWarnedAt[monitor.id]
+      addMonitorTrace(monitor.id, {
+        at: now,
+        minutes: null,
+        armed: false,
+        level: 'info',
+        note: `Termina la franja. ${(state.monitorPasses[monitor.id] ?? []).filter(
+          (pass) => pass.date === localDateKey(now),
+        ).length} paso(s) anotados hoy.`,
+      })
+    }
+  }
+
+  for (const monitor of open) {
+    if (nativeMonitorIds.has(monitor.id)) {
+      continue
+    }
+
+    const since = state.monitorSeenAt[monitor.id] ?? monitorWindowOpenedAt[monitor.id] ?? now
+    const silent = now - since
+
+    if (silent < MONITOR_SILENCE_MS || now - (monitorSilenceWarnedAt[monitor.id] ?? 0) < MONITOR_SILENCE_MS) {
+      continue
+    }
+
+    monitorSilenceWarnedAt[monitor.id] = now
+    addMonitorTrace(monitor.id, {
+      at: now,
+      minutes: null,
+      armed: state.monitorRuntime[monitor.id]?.armed === true,
+      level: 'warn',
+      note: `${Math.round(silent / 60_000)} min sin una sola consulta buena de esta parada. Con la pantalla apagada Android congela la app: revisa el permiso de batería y deja la notificación de medición visible.`,
+    })
+    log(
+      'warn',
+      'puntualidad',
+      `El control de la línea ${monitor.lineId} en ${monitor.stopName} lleva ${Math.round(
+        silent / 60_000,
+      )} min sin datos.`,
+    )
+  }
+
+  syncMonitorNotification(open, now)
+}
+
+/**
+ * Notificacion persistente mientras dura la medicion.
+ *
+ * Solo para los controles que NO lleva el servicio nativo: el servicio ya
+ * publica la suya, y dos notificaciones diciendo lo mismo son una de mas.
+ */
+function syncMonitorNotification(open: MonitorJob[], now: number): void {
+  const mine = open.filter((monitor) => !nativeMonitorIds.has(monitor.id))
+
+  if (mine.length === 0) {
+    if (monitorNoticeShownAt > 0) {
+      monitorNoticeShownAt = 0
+      void cancelNotification(MONITOR_NOTIFICATION_ID)
+    }
+    return
+  }
+
+  if (now - monitorNoticeShownAt < MONITOR_NOTICE_REFRESH_MS) {
+    return
+  }
+
+  monitorNoticeShownAt = now
+
+  const first = mine[0]
+  const until = Math.max(...mine.map((monitor) => monitor.endMinutes))
+  const today = localDateKey(now)
+  const passes = mine.reduce(
+    (total, monitor) =>
+      total + (state.monitorPasses[monitor.id] ?? []).filter((pass) => pass.date === today).length,
+    0,
+  )
+
+  void showOngoingNotification(
+    MONITOR_NOTIFICATION_ID,
+    `Midiendo puntualidad · hasta las ${formatMinutesClock(until)}`,
+    mine.length === 1
+      ? `Línea ${first.lineId} en ${first.stopName}
+${passes} paso(s) anotados hoy`
+      : `${mine.length} controles en marcha
+${passes} paso(s) anotados hoy`,
+  )
 }
 
 /* ------------------------------------------------------------------ *
@@ -1573,8 +2061,8 @@ appRoot.addEventListener('change', (event) => {
   if (action === 'draft-line') {
     state.draft.lineId = target.value
     const stopId = target.dataset.stop ?? ''
-    state.draft.directionKey =
-      state.network?.getDirectionsThroughStop(stopId, target.value)[0]?.key ?? ''
+    const purpose = state.sheet?.kind === 'pick-line' ? state.sheet.purpose : 'follow'
+    state.draft.directionKey = defaultDirectionKey(stopId, target.value, purpose)
     render()
   }
 
@@ -1648,11 +2136,10 @@ async function handleAction(action: string, element: HTMLElement): Promise<void>
       return
     }
 
+    // Ampliar ya no exige haber elegido linea: sin ella el mapa enseña las
+    // paradas de toda la red, y precisamente ahi es donde mas falta hace verlo
+    // grande para acertarle a la parada con el dedo.
     case 'expand-map':
-      if (!state.search.lineId || !state.search.directionKey) {
-        showToast('Elige primero línea y sentido', 'info')
-        return
-      }
       state.search.mapExpanded = true
       render()
       return
@@ -1668,7 +2155,7 @@ async function handleAction(action: string, element: HTMLElement): Promise<void>
     case 'select-stop':
       state.search.selectedStopId = stopId
       render()
-      await refreshOneStop(stopId)
+      await ensureStopFresh(stopId)
       return
 
     case 'close-stop':
@@ -1827,6 +2314,11 @@ async function handleAction(action: string, element: HTMLElement): Promise<void>
 
     case 'maps-mode': {
       const mode = element.dataset.mode as 'cercanas' | 'rutas' | undefined
+      // El callejero son cien mil nodos: se pide al entrar en "Rutas", no al
+      // arrancar la app, y una sola vez por sesión.
+      if (mode === 'rutas') {
+        void loadStreetGraph()
+      }
       if (mode) {
         state.maps.mode = mode
         state.maps.picking = null
@@ -1838,6 +2330,35 @@ async function handleAction(action: string, element: HTMLElement): Promise<void>
 
     case 'maps-locate':
       locateMe()
+      return
+
+    // Lleva a la pantalla del sistema donde de verdad se arregla: el
+    // interruptor general de ubicación, o los permisos de SALBUS.
+    case 'open-location-settings':
+      try {
+        if (state.maps.locationBlocked === 'permission') {
+          await DeviceSettings.openAppSettings()
+        } else {
+          await DeviceSettings.openLocationSettings()
+        }
+      } catch (error) {
+        showToast(errorMessage(error), 'error')
+      }
+      return
+
+    // El mapa de la pestaña Mapas, a pantalla completa y de vuelta. Igual que
+    // el del buscador, el contenedor NO se mueve del árbol: solo cambia cómo se
+    // coloca, porque moverlo obligaría a reconstruir Leaflet cada vez.
+    case 'maps-expand':
+      state.maps.expanded = true
+      mapsSignature = ''
+      render()
+      return
+
+    case 'maps-collapse':
+      state.maps.expanded = false
+      mapsSignature = ''
+      render()
       return
 
     case 'maps-open-stop':
@@ -1956,6 +2477,8 @@ async function handleAction(action: string, element: HTMLElement): Promise<void>
       delete state.monitorPasses[monitorId]
       delete state.monitorRuntime[monitorId]
       delete state.monitorSeenAt[monitorId]
+      delete state.monitorTraceOpen[monitorId]
+      clearMonitorTrace(monitorId)
       persistMonitors()
       persistMonitorPasses()
       persistMonitorRuntime()
@@ -1981,6 +2504,25 @@ async function handleAction(action: string, element: HTMLElement): Promise<void>
       render()
       return
 
+    // Registro de un control de puntualidad: es la respuesta a "¿por qué no se
+    // está apuntando ninguna hora?", así que se abre y se cierra donde se hace
+    // la pregunta, dentro de la propia tarjeta.
+    case 'toggle-monitor-trace': {
+      const monitorId = element.dataset.monitor ?? ''
+      if (state.monitorTraceOpen[monitorId]) {
+        delete state.monitorTraceOpen[monitorId]
+      } else {
+        state.monitorTraceOpen[monitorId] = true
+      }
+      render()
+      return
+    }
+
+    case 'clear-monitor-trace':
+      clearMonitorTrace(element.dataset.monitor ?? '')
+      render()
+      return
+
     default:
       return
   }
@@ -1996,6 +2538,9 @@ async function handleAction(action: string, element: HTMLElement): Promise<void>
 async function goToTab(tab: TabId): Promise<void> {
   const previous = state.tab
 
+  // Al salir de Seguir se paran los recorridos. Los avisos de próximo bus NO:
+  // son la única función que tiene sentido fuera de su pestaña, porque lo que
+  // hacen es precisamente avisar cuando no se está mirando.
   if (previous === 'seguimiento' && tab !== 'seguimiento') {
     pauseFollows('se salió de la pestaña Seguir')
   }
@@ -2050,10 +2595,29 @@ function pauseFollows(reason: string): void {
 function openPickLine(stopId: string, purpose: 'tracking' | 'monitor' | 'follow'): void {
   const lines = state.network?.getLinesForStop(stopId) ?? []
   state.draft.lineId = lines[0]?.lineId ?? ''
-  state.draft.directionKey =
-    state.network?.getDirectionsThroughStop(stopId, state.draft.lineId)[0]?.key ?? ''
+  state.draft.directionKey = defaultDirectionKey(stopId, state.draft.lineId, purpose)
   state.sheet = { kind: 'pick-line', stopId, purpose }
   render()
+}
+
+/**
+ * Sentido con el que abre el desplegable.
+ *
+ * Un aviso solo ofrece los sentidos entre los que cabe elegir de verdad (los
+ * parciales son variantes del mismo, no otro), asi que su valor de partida
+ * tiene que salir de esa misma lista o el desplegable abriria con una opcion
+ * que no figura en el.
+ */
+function defaultDirectionKey(
+  stopId: string,
+  lineId: string,
+  purpose: 'tracking' | 'monitor' | 'follow',
+): string {
+  const options = purpose === 'tracking'
+    ? trackingDirectionOptions(stopId, lineId)
+    : state.network?.getDirectionsThroughStop(stopId, lineId) ?? []
+
+  return options[0]?.key ?? ''
 }
 
 /**
@@ -2079,7 +2643,9 @@ async function confirmSheet(
   if (purpose === 'tracking') {
     state.sheet = null
     render()
-    await createTracking(stopId, lineId)
+    // El sentido solo se ha preguntado cuando por la parada pasaban varios; si
+    // no, el borrador trae el único posible y da igual pasarlo.
+    await createTracking(stopId, lineId, state.draft.directionKey)
     state.tab = 'seguimiento'
     persistTab()
     showToast('Te avisaremos cuando se acerque', 'success')
@@ -2111,15 +2677,15 @@ async function confirmSheet(
         },
       ]
 
-      // El recien creado es el que interesa: si con el se pasa del tope de
-      // funciones activas, se apaga la mas antigua.
+      // El recien creado es el que interesa: solo una funcion se mantiene
+      // actualizada a la vez, asi que crear esta pausa la que hubiera.
       const turnedOff = enforceActiveLimit(id)
       persistFollows()
       persistTrackings()
 
       if (turnedOff.length > 0) {
         await syncTrackingService()
-        showToast(`Se ha pausado otra función para no pasar de ${MAX_ACTIVE_JOBS} activas`, 'info')
+        showToast('Se ha pausado la otra función: solo una se mantiene actualizada a la vez', 'info')
       }
     }
 
@@ -2210,10 +2776,17 @@ function syncMap(): void {
   }
 
   const direction = state.network.directionByKey.get(state.search.directionKey)
-  const stops = direction?.stops ?? []
+
+  // Sin linea ni sentido elegidos el mapa NO se queda vacio: enseña las 349
+  // paradas de la red para poder tocar directamente la que se busca. Es la
+  // forma natural de usar un mapa —"esta es mi calle, esta es mi parada"— y
+  // antes obligaba a saber de antemano que linea pasa por ella.
+  const showingAll = !direction
+  const stops = direction?.stops ?? state.network.stops
+
   // La pantalla completa entra en la firma: al cambiar de tamano hay que
   // reencuadrar el recorrido, no solo recalcular el lienzo.
-  const signature = `${state.search.directionKey}|${state.search.selectedStopId ?? ''}|${
+  const signature = `${state.search.directionKey || 'todas'}|${state.search.selectedStopId ?? ''}|${
     state.search.mapExpanded ? 'full' : 'inline'
   }`
 
@@ -2242,9 +2815,10 @@ function syncMap(): void {
     const selected = state.search.selectedStopId === stop.stopId
 
     // Marcador con icono propio en lugar de un circulo de 6 px: en un movil hay
-    // que poder verlo y acertarle con el dedo sin ampliar el mapa.
+    // que poder verlo y acertarle con el dedo sin ampliar el mapa. Sin recorrido
+    // elegido no hay "numero de orden" que poner, asi que van sin numero.
     const marker = L.marker([stop.lat, stop.lon], {
-      icon: buildStopIcon(stop.stopId, index + 1, color, selected),
+      icon: buildStopIcon(stop.stopId, showingAll ? null : index + 1, color, selected),
       keyboard: false,
       zIndexOffset: selected ? 1000 : 0,
     })
@@ -2257,13 +2831,20 @@ function syncMap(): void {
       autoPanPadding: [16, 16],
     })
 
+    // Abrir el globo YA lanza la consulta de tiempos. Quien lo abre casi siempre
+    // acaba pulsando "Ver tiempos", y esa consulta tarda lo suyo: la fuente no
+    // admite mas de una peticion cada dos segundos. Adelantandola aqui, para
+    // cuando se pulsa el boton el dato suele estar puesto.
+    marker.on('popupopen', () => prefetchStop(stop.stopId))
+
     if (mapLayer) {
       marker.addTo(mapLayer)
     }
   })
 
-  // El trazado une las paradas en el orden real del trayecto.
-  if (points.length > 1 && mapLayer) {
+  // El trazado une las paradas en el orden real del trayecto. Sin recorrido
+  // elegido no hay orden que unir: las paradas de la red no son una linea.
+  if (!showingAll && points.length > 1 && mapLayer) {
     L.polyline(points, { color, weight: 5, opacity: 0.7 }).addTo(mapLayer)
   }
 
@@ -2305,19 +2886,79 @@ function applyZoomScale(): void {
   container.classList.toggle('is-mid', zoom >= 14 && zoom < 15.5)
 }
 
-/** Chincheta de parada: circulo grande con el numero de orden en el recorrido. */
-function buildStopIcon(stopId: string, order: number, color: string, selected: boolean): L.DivIcon {
-  const size = selected ? 42 : 34
+/**
+ * Chincheta de parada: circulo grande con el numero de orden en el recorrido.
+ *
+ * Con `order` a `null` (el mapa de toda la red, sin linea elegida) va sin
+ * numero y mas pequeña: 349 chinchetas numeradas no se leen, y ese numero no
+ * significaria nada sin un recorrido al que pertenecer.
+ */
+function buildStopIcon(
+  stopId: string,
+  order: number | null,
+  color: string,
+  selected: boolean,
+): L.DivIcon {
+  const plain = order === null
+  const size = selected ? 42 : plain ? 22 : 34
 
   return L.divIcon({
     className: '',
-    html: `<span class="map-pin${selected ? ' is-selected' : ''}" style="--pin:${esc(
+    html: `<span class="map-pin${selected ? ' is-selected' : ''}${plain ? ' is-plain' : ''}" style="--pin:${esc(
       color,
-    )};--pin-text:${esc(readableTextColor(color))}" data-stop="${esc(stopId)}">${order}</span>`,
+    )};--pin-text:${esc(readableTextColor(color))}" data-stop="${esc(stopId)}">${
+      plain ? '' : order
+    }</span>`,
     iconSize: [size, size],
     iconAnchor: [size / 2, size / 2],
     popupAnchor: [0, -size / 2],
   })
+}
+
+/**
+ * Adelanta la consulta de una parada sin abrir su ficha.
+ *
+ * Va por la misma cola serializada que todo lo demas, con prioridad alta pero
+ * sin forzar: si el dato de esa parada aun esta fresco no se pide nada. Lo
+ * unico que cambia respecto a abrir la ficha es que aqui nadie esta esperando.
+ */
+function prefetchStop(stopId: string): void {
+  const feed = state.feeds[stopId]
+
+  if (state.stopSync[stopId] !== undefined) {
+    return
+  }
+
+  if (feed && Date.now() - feed.fetchedAt < FRESHNESS.focused) {
+    return
+  }
+
+  state.stopSync[stopId] = 'queued'
+  render()
+
+  void fetchStopArrivals(stopId, { maxAgeMs: FRESHNESS.focused, priority: 'high' })
+    .then((result) => applyFeed(result))
+    .catch(() => undefined)
+    .finally(() => {
+      delete state.stopSync[stopId]
+      render()
+    })
+}
+
+/**
+ * Abre la ficha con lo que ya haya y solo pide dato nuevo si hace falta.
+ *
+ * Antes se forzaba siempre una consulta, con lo que el adelanto del globo del
+ * mapa no servia de nada: se volvia a pedir lo mismo y se esperaba otra vez.
+ */
+async function ensureStopFresh(stopId: string): Promise<void> {
+  const feed = state.feeds[stopId]
+
+  if (feed && Date.now() - feed.fetchedAt < FRESHNESS.focused) {
+    return
+  }
+
+  await refreshOneStop(stopId)
 }
 
 /**
@@ -2517,6 +3158,7 @@ function acceptPosition(position: GeolocationPosition): void {
 
   state.maps.locating = false
   state.maps.locationError = null
+  state.maps.locationBlocked = null
 
   if (!better) {
     render()
@@ -2548,10 +3190,50 @@ function rejectPosition(error: GeolocationPositionError): void {
   if (!state.maps.location) {
     state.maps.locationError = describeGeolocationError(error)
     log('warn', 'mapas', state.maps.locationError)
+    void diagnoseLocationBlock(error)
   }
 
   if (error.code === error.PERMISSION_DENIED) {
     stopWatchingLocation()
+  }
+
+  render()
+}
+
+/**
+ * Averigua QUE falta para poder localizar y deja preparado el botón que lleva
+ * hasta allí.
+ *
+ * Sin esto, un teléfono con la ubicación apagada enseñaba "el sistema no ha
+ * podido calcular dónde estás" y quien lo leía se quedaba mirando: el mensaje
+ * era cierto y no servía para nada, porque el interruptor que hay que tocar no
+ * está en la app. Se pregunta al sistema en vez de suponerlo, porque un GPS que
+ * tarda bajo techo da exactamente el mismo error que uno apagado.
+ */
+async function diagnoseLocationBlock(error: GeolocationPositionError): Promise<void> {
+  if (error.code === error.PERMISSION_DENIED) {
+    state.maps.locationBlocked = 'permission'
+    render()
+    return
+  }
+
+  if (!isNative()) {
+    state.maps.locationBlocked = null
+    return
+  }
+
+  try {
+    const { enabled } = await DeviceSettings.isLocationEnabled()
+    state.maps.locationBlocked = enabled ? null : 'service'
+
+    if (!enabled) {
+      state.maps.locationError =
+        'La ubicación del teléfono está apagada. SALBUS no puede saber dónde estás hasta que la enciendas.'
+      log('warn', 'mapas', 'El servicio de ubicación del sistema está desactivado.')
+    }
+  } catch {
+    // No poder preguntarlo no es lo mismo que estar apagado.
+    state.maps.locationBlocked = null
   }
 
   render()
@@ -2629,7 +3311,10 @@ function planMapsRoute(): void {
       },
     })
 
-    state.maps.plan = plan
+    // Los tramos a pie se vuelven a medir por el callejero. Ahí es donde estaba
+    // el error grande: en línea recta, un paseo que rodea una manzana o cruza al
+    // otro lado del río se contaba como si se pudiera atravesar.
+    state.maps.plan = refinePlanOnStreets(plan)
     mapsSignature = ''
     // El itinerario aparece por debajo del formulario, fuera de la pantalla: sin
     // llevar la vista hasta él, calcular una ruta parecía no hacer nada.
@@ -2649,6 +3334,51 @@ function planMapsRoute(): void {
     state.maps.planning = false
     render()
   }
+}
+
+/**
+ * Vuelve a medir a pie lo que se anda, y reordena con el resultado.
+ *
+ * El cálculo de la ruta usa distancias en línea recta porque evalúa cientos de
+ * paseos y hacerlo sobre el callejero congelaría la pantalla. Pero la recta se
+ * queda corta SIEMPRE, así que una ruta podía ganar por medio minuto gracias a
+ * un paseo que en realidad cruzaba una manzana entera. Aquí se miden de verdad
+ * los dos o tres tramos del itinerario ya elegido y se vuelve a ordenar: si la
+ * alternativa pasa a ser mejor, es la alternativa la que se recomienda.
+ *
+ * Sin callejero cargado esto no hace nada y la ruta sigue siendo la de antes.
+ */
+function refinePlanOnStreets(plan: PlanOutcome): PlanOutcome {
+  const graph = peekStreetGraph()
+
+  if (!graph) {
+    // Aún no está en memoria: se pide para la próxima ruta. La primera consulta
+    // de la sesión sale con la estimación en línea recta, que es exactamente el
+    // comportamiento de siempre; a partir de la segunda, afinada.
+    void loadStreetGraph().then((loaded) => {
+      if (loaded) {
+        log('info', 'mapas', 'Callejero peatonal cargado; los paseos ya se miden por las calles.')
+      }
+    })
+    return plan
+  }
+
+  const resolve = (from: GeoPoint, to: GeoPoint) => walkPath(graph, from, to)
+
+  if (plan.status === 'walk') {
+    return { status: 'walk', walking: refineWalking(plan.walking, resolve) }
+  }
+
+  if (plan.status !== 'ok') {
+    return plan
+  }
+
+  const refined = [plan.best, ...plan.alternatives]
+    .map((itinerary) => refineWalking(itinerary, resolve))
+    .sort((left, right) => left.totalMinutes - right.totalMinutes)
+
+  const [best, ...alternatives] = refined as [Itinerary, ...Itinerary[]]
+  return { status: 'ok', best, alternatives }
 }
 
 /**
@@ -2742,6 +3472,7 @@ function syncMapsMap(): void {
     maps.destination ? `${maps.destination.lat},${maps.destination.lon}` : '',
     maps.plan?.status ?? '',
     maps.focusedLeg ?? '',
+    maps.expanded ? 'full' : 'inline',
   ].join('|')
 
   if (signature === mapsSignature) {
@@ -2881,11 +3612,15 @@ function paintRoute(bounds: Array<[number, number]>): void {
     const dimmed = maps.focusedLeg !== null && maps.focusedLeg !== index
 
     if (leg.kind === 'walk') {
-      const points: Array<[number, number]> = [
-        [leg.from.lat, leg.from.lon],
-        [leg.to.lat, leg.to.lon],
-      ]
-      points.forEach((point) => bounds.push(point))
+      // Con el callejero cargado el tramo se dibuja por las calles por las que
+      // de verdad se anda. La recta de antes no solo medía de menos: enseñaba
+      // una línea que atravesaba manzanas, y eso no se puede seguir.
+      const points: Array<[number, number]> = (leg.path ?? [leg.from, leg.to]).map(
+        (point) => [point.lat, point.lon] as [number, number],
+      )
+      // Al encuadre solo van los extremos: con el recorrido entero, una curva
+      // larga tiraba del mapa hacia atrás sin añadir nada.
+      bounds.push([leg.from.lat, leg.from.lon], [leg.to.lat, leg.to.lon])
 
       L.polyline(points, {
         color: '#6b7a90',

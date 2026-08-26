@@ -6,10 +6,21 @@ import {
   type NearbyStop,
   type RouteLeg,
 } from './services/routing'
+import {
+  describeStopsAway,
+  locateBus,
+  ROUTE_SCAN_MAX_MINUTES,
+  ROUTE_FIX_MAX_AGE_MS,
+  ROUTE_SCAN_MAX_STOPS,
+  stopsAwayFrom,
+} from './services/bus-position'
 import { currentDayType } from './services/schedule'
 import {
   activeJobCount,
+  anyMonitorWindowOpen,
   APP_VERSION,
+  AUTO_CYCLE_MS,
+  FRESHNESS,
   ARRIVALS_PREVIEW,
   favouriteLabel,
   formatMinutesClock,
@@ -19,6 +30,8 @@ import {
   MAX_FOLLOW_JOBS,
   MAX_TRACKING_JOBS,
   state,
+  TRACKING_INTERVAL_SECONDS,
+  type MonitorTrace,
   summariseMonitor,
   trackingBusTarget,
   TRACKING_BUS_TARGET_MAX,
@@ -92,6 +105,107 @@ export function describeArrival(stopId: string, lineId: string): string {
 function feedOf(stopId: string): StopFeed | undefined {
   return state.feeds[stopId]
 }
+
+/**
+ * Sentidos entre los que puede venir el autobús de un aviso en esa parada.
+ *
+ * Con uno solo no hay nada que preguntar. Con varios sí, y hay que preguntarlo:
+ * la fuente oficial dice "Línea 4, 7 minutos" y nunca hacia dónde va, así que la
+ * única forma de saber por qué recorrido viene es que lo diga quien está
+ * esperando —que lo sabe, porque es el autobús que quiere coger—.
+ *
+ * Los trayectos parciales son variantes del mismo sentido, no otro sentido: si
+ * al quitarlos queda uno solo, no hay ambigüedad ninguna.
+ */
+export function trackingDirectionOptions(stopId: string, lineId: string): LineDirection[] {
+  const through = state.network?.getDirectionsThroughStop(stopId, lineId) ?? []
+
+  if (through.length <= 1) {
+    return through
+  }
+
+  const complete = through.filter((direction) => !direction.partial)
+  return complete.length > 0 ? complete : through
+}
+
+/* ------------------------------------------------------------------ *
+ * Por donde viene el autobus                                           *
+ * ------------------------------------------------------------------ */
+
+/**
+ * En cual de las paradas de la ventana esta el autobus.
+ *
+ * La fuente oficial NUNCA dice donde esta un autobus: por cada parada solo
+ * publica "linea N, M minutos". Lo unico que delata una presencia es que ese
+ * contador caiga a cero o uno, o que la fuente diga "LLEGANDO A PARADA". Asi
+ * que se mira eso mismo en las paradas anteriores del recorrido —que vienen ya
+ * en el orden real del trayecto— y se toma la MAS AVANZADA que lo cumpla.
+ *
+ * Lo de "la mas avanzada" no es un detalle: las paradas se consultan en serie,
+ * una cada dos segundos, de modo que los datos de la ventana NO son del mismo
+ * instante. Puede quedar un "llegando" rezagado de hace medio minuto y otro mas
+ * adelante recien traido. Como un autobus solo avanza, el indice mayor es
+ * siempre la verdad mas nueva.
+ *
+ * Devuelve el indice dentro de `window`, o -1 si no consta en ninguna.
+ *
+ * Esta funcion es la que comparten "ver por donde viene" y el aviso de proximo
+ * bus. Tenerla una sola vez es lo que impide que las dos pantallas acaben
+ * diciendo que el autobus esta en dos sitios distintos.
+ */
+export function locateBusInWindow(window: NetworkStop[], lineId: string): number {
+  return locateBus(
+    window.map((stop) => {
+      const arrival = feedOf(stop.stopId)
+        ?.arrivals.filter((item) => item.lineId === lineId)
+        .sort((left, right) => liveMinutes(left) - liveMinutes(right))[0]
+
+      // `liveMinutes` envejece el contador con lo que ha pasado desde que se
+      // obtuvo: sin eso, la parada consultada hace catorce segundos seguiria
+      // diciendo el numero de hace catorce segundos.
+      return arrival ? liveMinutes(arrival) : null
+    }),
+  )
+}
+
+/**
+ * A cuantas paradas viene el autobus de un aviso.
+ *
+ * `null` cuando no se puede afirmar: el aviso no tiene sentido resuelto (por su
+ * parada pasa mas de un sentido de la linea), el autobus todavia esta lejos y no
+ * se le busca, o simplemente no consta en ninguna de las paradas miradas.
+ * Callarse es la respuesta correcta a las tres: un recuento inventado manda a
+ * mirar a la calle equivocada.
+ */
+export function trackingStopsAway(job: TrackingJob): number | null {
+  // Con la app cerrada quien mira las paradas anteriores es el servicio nativo,
+  // así que al volver a abrirla su recuento es más nuevo que cualquier cosa que
+  // se pueda deducir aquí. Se descarta en cuanto envejece: un autobús en marcha
+  // deja de estar donde estaba, y repetir "a dos paradas" pasado ese tiempo es
+  // afirmar algo que ya no consta.
+  const fromService = state.trackingStopsAway[job.id]
+  if (fromService && Date.now() - fromService.at <= ROUTE_FIX_MAX_AGE_MS) {
+    return fromService.stopsAway
+  }
+
+  if (!job.directionKey || !state.network) {
+    return null
+  }
+
+  const window = state.network.getDirectionWindow(
+    job.directionKey,
+    job.stopId,
+    ROUTE_SCAN_MAX_STOPS + 1,
+  )
+
+  if (window.length === 0) {
+    return null
+  }
+
+  return stopsAwayFrom(window.length, locateBusInWindow(window, job.lineId))
+}
+
+export { describeStopsAway } from './services/bus-position'
 
 /* ------------------------------------------------------------------ *
  * Cascarón                                                             *
@@ -434,9 +548,12 @@ function renderFavourites(): string {
 /**
  * Un aviso de proximo bus.
  *
- * No lleva interruptor de activar/pausar: un aviso creado esta siempre en
- * marcha. Pausarlo no significaba nada distinto de quitarlo —la notificacion
- * desaparecia igual— y era un boton mas que decidir en la tarjeta.
+ * Lleva interruptor de pausa. Pausar NO es lo mismo que quitar: el aviso se
+ * conserva entero —parada, línea, autobuses ya vistos— y vuelve de un toque,
+ * mientras que quitarlo obliga a montarlo otra vez desde la parada. Lo que sí
+ * desaparece al pausar es la notificación, y por eso desaparece: una
+ * notificación persistente que ya no se actualiza es peor que ninguna, porque
+ * se queda enseñando una hora que dejó de ser verdad.
  */
 function renderTrackingBanner(tracking: TrackingJob): string {
   const feed = feedOf(tracking.stopId)
@@ -448,18 +565,32 @@ function renderTrackingBanner(tracking: TrackingJob): string {
     ? `Autobús ${Math.min(tracking.busesSeen + 1, target)} de ${target} · `
     : ''
 
+  // Dónde viene el autobús, con la misma detección que "ver por dónde viene".
+  // Solo mientras el aviso trabaja: en pausa nadie está mirando las paradas
+  // anteriores, así que el número que hubiera es de hace rato.
+  const stopsAway = tracking.active ? describeStopsAway(trackingStopsAway(tracking)) : ''
+
   return `
-    <section class="card" data-key="tracking-${esc(tracking.id)}">
+    <section class="card${tracking.active ? '' : ' is-paused'}" data-key="tracking-${esc(tracking.id)}">
       <div class="card-head">
         ${lineChip(tracking.lineId, lineColor(tracking.lineId), 'lg')}
         <div class="card-head-copy">
           <h2 class="card-title">${esc(tracking.stopName)}</h2>
-          <p class="card-sub">${esc(progress + describeArrival(tracking.stopId, tracking.lineId))}</p>
+          <p class="card-sub${stopsAway ? ' is-wrap' : ''}">${esc(
+            progress + describeArrival(tracking.stopId, tracking.lineId),
+          )}${
+            stopsAway ? `<span class="stops-away">${icon('bus')}${esc(stopsAway)}</span>` : ''
+          }</p>
         </div>
         <div class="card-actions">
           <div class="arrival-eta">${
-            arrival ? renderEta(arrival) : '<span class="eta-unit">buscando…</span>'
+            !tracking.active
+              ? '<span class="eta-unit">en pausa</span>'
+              : arrival
+                ? renderEta(arrival)
+                : '<span class="eta-unit">buscando…</span>'
           }</div>
+          ${renderJobToggle('tracking', tracking.id, tracking.active)}
           <button class="mini-btn is-danger" type="button" data-action="stop-tracking" data-tracking="${esc(
             tracking.id,
           )}" aria-label="Detener el aviso">${icon('bellOff')}</button>
@@ -475,9 +606,16 @@ function renderTrackingBanner(tracking: TrackingJob): string {
  * Una función en reposo no se borra: sigue creada y con su configuración, pero
  * no consulta ni publica notificación. Es lo que permite alternar entre las
  * cuatro que se pueden crear sin volver a montarlas cada vez.
+ *
+ * Solo UNA se mantiene actualizada a la vez, sea de la modalidad que sea:
+ * reanudar una pausa automáticamente la otra. No hay nada que elegir ni ningún
+ * error que leer, y el botón lo avisa antes de pulsarlo.
  */
 function renderJobToggle(kind: 'tracking' | 'follow', id: string, active: boolean): string {
-  const full = !active && activeJobCount() >= MAX_ACTIVE_JOBS
+  const swaps = !active && activeJobCount() >= MAX_ACTIVE_JOBS
+  // Mientras se mide la puntualidad no se reanuda nada: esa cola es de la
+  // parada que se está midiendo.
+  const blocked = !active && anyMonitorWindowOpen()
 
   return `
     <button
@@ -486,8 +624,15 @@ function renderJobToggle(kind: 'tracking' | 'follow', id: string, active: boolea
       data-action="toggle-job"
       data-kind="${kind}"
       data-job="${esc(id)}"
-      aria-label="${active ? 'Pausar' : 'Activar'}"
-      title="${full ? `Se pausará la más antigua: solo ${MAX_ACTIVE_JOBS} pueden estar activas` : ''}"
+      ${blocked ? 'disabled' : ''}
+      aria-label="${active ? 'Pausar' : 'Reanudar'}"
+      title="${
+        blocked
+          ? 'Hay un control de puntualidad midiendo'
+          : swaps
+            ? 'Se pausará la otra: solo una se mantiene actualizada a la vez'
+            : ''
+      }"
     >${icon(active ? 'pause' : 'play')}</button>
   `
 }
@@ -656,11 +801,11 @@ function renderSearchByMap(): string {
     ${renderLineSelect()}
     ${renderDirectionSelect()}
 
-    ${renderMapShell(direction ? directionLabel(direction) : '')}
+    ${renderMapShell(direction ? directionLabel(direction) : 'Todas las paradas de la red')}
     <p class="text-tiny">
       ${
         !ready
-          ? 'Elige la línea y después el sentido: al completar los dos campos el mapa se abre a pantalla completa con el recorrido.'
+          ? 'El mapa enseña las paradas de toda la red: toca cualquiera para ver sus tiempos. Si eliges línea y sentido, se queda solo con ese recorrido y se abre a pantalla completa.'
           : expanded
             ? 'Toca una parada para ver su ficha; cierra el mapa con la ✕ para volver al buscador.'
             : 'Toca una parada del mapa para ver su ficha, o pulsa “Ampliar” para verlo a pantalla completa.'
@@ -688,9 +833,9 @@ function renderMapShell(caption: string): string {
           ${icon('close')}
         </button>
       `
-          : `<button class="map-expand" type="button" data-action="expand-map" ${
-              state.search.lineId && state.search.directionKey ? '' : 'disabled'
-            }>${icon('map')} Ampliar</button>`
+          : `<button class="map-expand" type="button" data-action="expand-map">${icon(
+              'map',
+            )} Ampliar</button>`
       }
     </div>
   `
@@ -786,9 +931,21 @@ function renderStopDialog(): string {
 /**
  * Una parada guardada.
  *
- * La cabecera lleva a la derecha actualizar / renombrar / quitar, no el tiempo
- * del proximo autobus: ese tiempo ya sale en la lista de llegadas al desplegar,
- * y ocupando la esquina obligaba a abrir la parada solo para poder gestionarla.
+ * Plegada tiene que enseñar TODAS las líneas que pasan por ella —son lo que
+ * identifica la parada de un vistazo— y todas las tarjetas plegadas tienen que
+ * medir lo mismo, o la lista se lee como si estuviera rota. Las dos cosas a la
+ * vez no caben en el hueco que dejaba la cabecera: entre el código, el nombre y
+ * los tres botones quedaban unos 90 px, y trece distintivos ahí solo podían
+ * salir cortados o con barra de desplazamiento.
+ *
+ * Por eso los distintivos bajan a una FRANJA PROPIA de ancho completo, con
+ * hueco fijo para dos filas: entran con sitio de sobra los trece de la parada
+ * más concurrida de la red, y una parada de una sola línea ocupa exactamente lo
+ * mismo que una de trece.
+ *
+ * El botón de actualizar solo aparece desplegada: plegada no se enseña ni un
+ * tiempo, así que refrescar era pedirle a la fuente —que limita por IP— un dato
+ * que nadie iba a ver.
  */
 function renderFavouriteCard(stopId: string): string {
   const feed = feedOf(stopId)
@@ -800,29 +957,26 @@ function renderFavouriteCard(stopId: string): string {
   const official = label === stopName(stopId) ? '' : stopName(stopId)
 
   return `
-    <section class="card">
-      <div class="card-head">
+    <section class="card stop-card">
+      <div class="card-head${expanded ? '' : ' is-tight'}">
         <button class="card-head-main" type="button" data-action="expand-stop" data-stop="${esc(
           stopId,
         )}" aria-expanded="${expanded}">
           <span class="stop-code">${esc(stopId)}</span>
           <span class="card-head-copy">
             <span class="card-title">${esc(label)}</span>
-            <span class="card-sub${expanded ? ' is-wrap' : ' is-chips'}">${
-              expanded
-                ? esc(official)
-                : lines
-                    .slice(0, 8)
-                    .map((line) => lineChip(line.lineId, line.color, 'sm'))
-                    .join('')
-            }</span>
+            ${official ? `<span class="card-sub is-wrap">${esc(official)}</span>` : ''}
           </span>
           ${icon(expanded ? 'chevronDown' : 'chevron')}
         </button>
         <span class="card-actions">
-          <button class="mini-btn${syncing ? ' is-spinning' : ''}" type="button" data-action="refresh-stop" data-stop="${esc(
-            stopId,
-          )}" aria-label="Actualizar esta parada">${icon('refresh')}</button>
+          ${
+            expanded
+              ? `<button class="mini-btn${syncing ? ' is-spinning' : ''}" type="button" data-action="refresh-stop" data-stop="${esc(
+                  stopId,
+                )}" aria-label="Actualizar esta parada">${icon('refresh')}</button>`
+              : ''
+          }
           <button class="mini-btn" type="button" data-action="rename-stop" data-stop="${esc(
             stopId,
           )}" aria-label="Cambiar nombre">${icon('pencil')}</button>
@@ -831,6 +985,8 @@ function renderFavouriteCard(stopId: string): string {
           )}" aria-label="Quitar parada">${icon('trash')}</button>
         </span>
       </div>
+
+      ${expanded ? '' : renderStopLines(stopId, lines)}
 
       ${
         expanded
@@ -849,6 +1005,33 @@ function renderFavouriteCard(stopId: string): string {
           : ''
       }
     </section>
+  `
+}
+
+/**
+ * Franja de líneas de una parada plegada.
+ *
+ * Es un botón, y no un simple bloque, porque ocupa el ancho entero justo debajo
+ * del nombre: tocar ahí y que no pase nada se lee como un fallo. Despliega la
+ * parada igual que la cabecera, y se queda fuera del recorrido del tabulador
+ * (`tabindex="-1"`) para no obligar a pasar dos veces por el mismo destino.
+ *
+ * El hueco es FIJO —dos filas— aunque sobre sitio. Es lo que hace que todas las
+ * tarjetas plegadas midan lo mismo, que era el problema: con la altura pegada al
+ * contenido, la lista de paradas guardadas subía y bajaba de escalón en escalón
+ * según cuántas líneas tuviera cada una.
+ */
+function renderStopLines(stopId: string, lines: TransitLine[]): string {
+  return `
+    <button class="stop-lines" type="button" data-action="expand-stop" data-stop="${esc(
+      stopId,
+    )}" aria-label="Desplegar la parada" tabindex="-1">
+      ${
+        lines.length === 0
+          ? '<span class="stop-lines-empty">Sin líneas registradas</span>'
+          : lines.map((line) => lineChip(line.lineId, line.color, 'sm')).join('')
+      }
+    </button>
   `
 }
 
@@ -932,6 +1115,13 @@ function renderArrivalRow(arrival: Arrival, stopId: string, showStop: boolean): 
  * limites, como funciona) esta en Ajustes; aqui solo estan las funciones.
  */
 function renderSeguimiento(): string {
+  // Mientras hay una franja de puntualidad abierta esta pestaña está apagada.
+  // No es una restricción de adorno: medir a qué hora pasa de verdad un autobús
+  // obliga a no perderse una sola consulta de ESA parada, y un recorrido pide
+  // ocho paradas por ciclo contra una fuente que admite una cada dos segundos.
+  // Entre las dos cosas, la que tiene una hora que perder es la medición.
+  const measuring = state.monitors.filter((monitor) => isWithinWindow(monitor))
+
   if (state.follows.length === 0 && state.trackings.length === 0) {
     return `
       <section class="card"><div class="card-body">
@@ -946,6 +1136,17 @@ function renderSeguimiento(): string {
   }
 
   return `
+    ${
+      measuring.length > 0
+        ? notice(
+            'warn',
+            `Hay ${measuring.length === 1 ? 'un control' : `${measuring.length} controles`} de puntualidad midiendo hasta las ${formatMinutesClock(
+              Math.max(...measuring.map((monitor) => monitor.endMinutes)),
+            )}. Mientras dure, esta pestaña está en pausa: las consultas van a la parada que se está midiendo.`,
+          )
+        : ''
+    }
+
     ${renderJobGroup(
       'Avisos de próximo bus',
       `${state.trackings.length} de ${MAX_TRACKING_JOBS}`,
@@ -996,18 +1197,16 @@ function renderFollowCard(followId: string): string {
   const windowStops = network.getDirectionWindow(follow.directionKey, follow.stopId, 8)
   const direction = network.directionByKey.get(follow.directionKey)
 
-  // Se marca como "bus aquí" la parada mas cercana al final de la ventana que
-  // tenga una llegada inminente de esta linea.
-  let busIndex = -1
-  const etas = windowStops.map((stop, index) => {
+  // Misma regla que usa el aviso de próximo bus para contar paradas: una sola
+  // implementación, o las dos pantallas acabarían situando el autobús en sitios
+  // distintos con los mismos datos delante.
+  const busIndex = locateBusInWindow(windowStops, follow.lineId)
+
+  const etas = windowStops.map((stop) => {
     const feed = feedOf(stop.stopId)
     const arrival = feed?.arrivals
       .filter((item) => item.lineId === follow.lineId)
       .sort((left, right) => liveMinutes(left) - liveMinutes(right))[0]
-
-    if (arrival && liveMinutes(arrival) <= 1 && index > busIndex) {
-      busIndex = index
-    }
 
     return { stop, arrival, feed }
   })
@@ -1204,6 +1403,8 @@ function renderMonitorCard(monitor: MonitorJob): string {
 
         ${renderMonitorPasses(summary.unmatched)}
 
+        ${renderMonitorTrace(monitor)}
+
         <p class="text-tiny">
           ${esc(monitorFootnote(monitor, summary.passes.length, summary.days, active))}
         </p>
@@ -1216,10 +1417,12 @@ function renderMonitorCard(monitor: MonitorJob): string {
 function monitorFootnote(monitor: MonitorJob, passes: number, days: number, active: boolean): string {
   if (passes === 0) {
     return active
-      ? 'Todavía sin pasos registrados. La app está consultando esta parada; cada autobús detectado aparecerá aquí.'
-      : `Todavía sin pasos registrados. La medición solo funciona con la app abierta entre las ${formatMinutesClock(
+      ? 'Todavía sin pasos registrados. La app está consultando esta parada cada 30 s; abre el registro para ver qué está encontrando.'
+      : `Todavía sin pasos registrados. La medición ocurre entre las ${formatMinutesClock(
           monitor.startMinutes,
-        )} y las ${formatMinutesClock(monitor.endMinutes)}.`
+        )} y las ${formatMinutesClock(
+          monitor.endMinutes,
+        )}; fuera de esa franja no se consulta nada.`
   }
 
   return `${passes} paso${passes === 1 ? '' : 's'} registrado${passes === 1 ? '' : 's'} en ${days} día${
@@ -1245,6 +1448,69 @@ function renderMonitorRow(row: MonitorRow): string {
       }</span></td>
       <td><span class="delta ${deltaClass}">${esc(deltaText)}</span></td>
     </tr>
+  `
+}
+
+/**
+ * Registro de un control: qué ha visto y qué ha decidido con ello.
+ *
+ * Es la respuesta a la única pregunta que se hace mirando una tabla vacía: por
+ * qué no se está apuntando ninguna hora. La fuente oficial no publica "el
+ * autobús ha pasado" —solo cuántos minutos faltan—, así que el paso se deduce, y
+ * una deducción que no llega a producirse no deja rastro por sí sola. Los
+ * motivos reales son varios y ninguno se ve desde fuera: la línea no figura en
+ * el panel de esa parada, la fuente está limitando por IP, el móvil se durmió
+ * entre consulta y consulta, o el paso sí se detectó pero el horario oficial no
+ * tenía ninguna salida cerca a la que atribuirlo.
+ *
+ * Va cerrado de fábrica: quien mira la pantalla quiere ver la tabla, no el
+ * registro. Se abre cuando la tabla no cuenta lo que se esperaba.
+ */
+function renderMonitorTrace(monitor: MonitorJob): string {
+  const trace = state.monitorTrace[monitor.id] ?? []
+  const open = state.monitorTraceOpen[monitor.id] === true
+
+  if (trace.length === 0 && !open) {
+    return ''
+  }
+
+  const warnings = trace.filter((entry) => entry.level !== 'info').length
+
+  return `
+    <div class="stack-sm">
+      <button class="btn btn-secondary btn-block btn-sm" type="button"
+        data-action="toggle-monitor-trace" data-monitor="${esc(monitor.id)}">
+        ${icon(open ? 'up' : 'down')} Registro de la medición (${trace.length}${
+          warnings > 0 ? ` · ${warnings} con aviso` : ''
+        })
+      </button>
+      ${
+        open
+          ? `<div class="trace-list">${[...trace]
+              .reverse()
+              .map((entry) => renderMonitorTraceRow(entry))
+              .join('')}</div>
+             <button class="btn btn-secondary btn-block btn-sm" type="button"
+               data-action="clear-monitor-trace" data-monitor="${esc(monitor.id)}">
+               ${icon('trash')} Vaciar el registro
+             </button>`
+          : ''
+      }
+    </div>
+  `
+}
+
+function renderMonitorTraceRow(entry: MonitorTrace): string {
+  return `
+    <div class="trace-item is-${entry.level}" data-key="trace-${entry.at}">
+      <span class="trace-time">${esc(formatClock(new Date(entry.at)))}</span>
+      <span class="trace-copy">
+        <span class="trace-note">${esc(entry.note)}</span>
+        <span class="trace-meta">${esc(
+          entry.minutes === null ? 'sin dato de esa línea' : `${entry.minutes} min`,
+        )}${entry.armed ? ' · autobús entrando' : ''}</span>
+      </span>
+    </div>
   `
 }
 
@@ -1437,7 +1703,10 @@ function renderMapas(): string {
           .join('')}
       </div>
 
-      <div class="map-shell maps-shell">
+      <!-- El contenedor es SIEMPRE el mismo nodo, encajado o a pantalla
+           completa: solo cambia cómo se coloca. Moverlo de sitio en el árbol
+           obligaría a reconstruir Leaflet en cada apertura. -->
+      <div class="map-shell maps-shell${maps.expanded ? ' is-expanded' : ''}">
         <!-- data-morph="skip": dentro manda Leaflet. Sin esto, el repintado
              incremental le borraba los hijos en cada latido del reloj y el mapa
              se quedaba en un rectangulo vacio. -->
@@ -1449,6 +1718,15 @@ function renderMapas(): string {
                  ${icon('crosshair')}
                </button>`
             : ''
+        }
+        ${
+          maps.expanded
+            ? `<button class="map-close" type="button" data-action="maps-collapse" aria-label="Cerrar el mapa">
+                 ${icon('close')}
+               </button>`
+            : `<button class="map-expand" type="button" data-action="maps-expand">
+                 ${icon('map')} Ampliar
+               </button>`
         }
       </div>
 
@@ -1472,6 +1750,12 @@ function renderNearbyPanel(): string {
   }
 
   if (!maps.location) {
+    // El interruptor de ubicación del teléfono y el permiso de SALBUS son dos
+    // cosas distintas que desde aquí se ven igual —no llega la posición— y se
+    // arreglan en pantallas distintas del sistema. Decir "activa la ubicación"
+    // sin llevar hasta donde se activa deja el problema donde estaba.
+    const blocked = maps.locationBlocked
+
     return `
       <section class="card"><div class="card-body">
         ${
@@ -1480,9 +1764,22 @@ function renderNearbyPanel(): string {
             : `<p class="card-sub is-wrap">Para enseñarte las paradas que tienes al lado, la aplicación
                  necesita saber dónde estás. La ubicación no sale del teléfono ni se guarda.</p>`
         }
-        <button class="btn btn-primary btn-block" type="button" data-action="maps-locate">
-          ${icon('crosshair')} Usar mi ubicación
-        </button>
+        ${
+          blocked
+            ? `<button class="btn btn-primary btn-block" type="button" data-action="open-location-settings">
+                 ${icon('pin')} ${
+                   blocked === 'service'
+                     ? 'Activar la ubicación del teléfono'
+                     : 'Abrir los permisos de SALBUS'
+                 }
+               </button>
+               <button class="btn btn-secondary btn-block" type="button" data-action="maps-locate">
+                 ${icon('crosshair')} Volver a intentarlo
+               </button>`
+            : `<button class="btn btn-primary btn-block" type="button" data-action="maps-locate">
+                 ${icon('crosshair')} Usar mi ubicación
+               </button>`
+        }
       </div></section>
     `
   }
@@ -1723,7 +2020,11 @@ function renderLeg(leg: RouteLeg, index: number): string {
         <span class="leg-mark">${icon('walk')}</span>
         <div class="leg-copy">
           <strong>${esc(verb)} ${esc(leg.toName)}</strong>
-          <span>${esc(formatMeters(leg.meters))} · ${esc(formatWalk(leg.minutes))}</span>
+          <span>${esc(formatMeters(leg.meters))} · ${esc(formatWalk(leg.minutes))}${
+            // Sin callejero el paseo se mide en linea recta y se queda corto
+            // siempre. Decirlo es la diferencia entre un dato y una promesa.
+            leg.onStreets ? '' : ' · en línea recta'
+          }</span>
         </div>
       </li>
     `
@@ -1825,6 +2126,8 @@ function renderAjustes(): string {
     </section>
 
     ${renderTrackingRulesCard()}
+
+    ${renderRefreshRulesCard()}
 
     ${renderExperimentalCard()}
 
@@ -1953,6 +2256,100 @@ function renderUpdateCard(): string {
 }
 
 /**
+ * Cada cuánto se actualiza cada cosa, y con qué condición.
+ *
+ * Ninguna de estas frecuencias es un capricho: todas salen de repartir una sola
+ * cola de consultas —una petición cada 2 s, que es el máximo que la fuente
+ * oficial sostiene sin bloquear por IP— entre funciones que la necesitan a la
+ * vez. Por eso la columna que de verdad importa no es "cada cuánto", sino
+ * "cuándo": casi todo lo que aquí aparece está apagado la mayor parte del
+ * tiempo, y ese es el motivo de que lo que queda encendido llegue a tiempo.
+ */
+function renderRefreshRulesCard(): string {
+  const seconds = (ms: number) => `${Math.round(ms / 1000)} s`
+
+  const rows: Array<[string, string, string]> = [
+    [
+      'Paradas guardadas',
+      'una vez al abrir la app',
+      'Una pasada por todas, en serie, para que la primera que despliegues ya tenga sus tiempos.',
+    ],
+    [
+      'Parada desplegada',
+      seconds(FRESHNESS.focused),
+      'Solo la que esté abierta, y solo mientras lo esté. Plegada no enseña tiempos: pedirlos sería gastar cola para nada.',
+    ],
+    [
+      'Ficha de una parada',
+      seconds(FRESHNESS.focused),
+      'La del buscador y la del mapa. Tocar una parada en el mapa ya lanza la consulta, antes de pulsar “Ver tiempos”.',
+    ],
+    [
+      'Aviso de próximo bus',
+      seconds(FRESHNESS.focused),
+      `Solo si está activo. Con la app cerrada lo lleva el servicio en segundo plano, que consulta cada ${TRACKING_INTERVAL_SECONDS} s.`,
+    ],
+    [
+      'Por dónde viene el aviso',
+      seconds(FRESHNESS.trackingRoute),
+      `Las paradas anteriores, para decir a cuántas está. Solo con el autobús a menos de ${ROUTE_SCAN_MAX_MINUTES} min, y solo hasta donde puede estar: se para en la primera que lo tenga encima.`,
+    ],
+    [
+      'Ver por dónde viene',
+      seconds(FRESHNESS.follow),
+      'Solo si está activo, dentro de la pestaña Seguir y con la app delante. Son ocho paradas por ciclo: se para solo al salir.',
+    ],
+    [
+      'Puntualidad',
+      seconds(FRESHNESS.monitor),
+      `Solo dentro de la franja del control. Con un autobús ya entrando se aprieta a ${seconds(
+        FRESHNESS.focused,
+      )}; fuera de la franja no se consulta nada.`,
+    ],
+  ]
+
+  return `
+    <section class="card">
+      <div class="card-head"><div class="card-head-copy">
+        <h3 class="card-title">Frecuencias de actualización</h3>
+        <p class="card-sub">Cada cuánto se pide cada cosa, y con qué condición</p>
+      </div></div>
+      <div class="card-body">
+        <div class="rule-list">
+          ${rows
+            .map(
+              ([title, rate, condition]) => `
+                <div class="rule-item">
+                  <div class="rule-head">
+                    <strong>${esc(title)}</strong>
+                    <span class="pill">${esc(rate)}</span>
+                  </div>
+                  <span class="rule-when">${esc(condition)}</span>
+                </div>
+              `,
+            )
+            .join('')}
+        </div>
+
+        <dl class="kv">
+          <dt>Entre peticiones</dt><dd>${(MIN_REQUEST_SPACING_MS / 1000).toFixed(0)} s, siempre en serie</dd>
+          <dt>Revisión del plan</dt><dd>cada segundo</dd>
+          <dt>Lote automático</dt><dd>como mucho uno cada ${Math.round(AUTO_CYCLE_MS / 1000)} s</dd>
+          <dt>“Al día” en pantalla</dt><dd>dato de hace menos de 40 s</dd>
+          <dt>App en segundo plano</dt><dd>solo siguen el aviso activo y la puntualidad en franja</dd>
+        </dl>
+
+        <p class="text-tiny">
+          Una parada solo se vuelve a pedir cuando su dato pasa del tiempo indicado, así que esos
+          segundos son un máximo, no un reloj: si la cola está ocupada por algo más urgente, se
+          espera. Lo que nunca ocurre es que dos consultas salgan a la vez.
+        </p>
+      </div>
+    </section>
+  `
+}
+
+/**
  * Cómo funcionan las funciones de seguimiento, en esquema.
  *
  * Los límites (dos por modalidad, dos activas) se notan al chocar con ellos, y
@@ -1988,10 +2385,20 @@ function renderTrackingRulesCard(): string {
         <dl class="kv">
           <dt>Avisos de próximo bus</dt><dd>máximo ${MAX_TRACKING_JOBS} creados</dd>
           <dt>Ver por dónde viene</dt><dd>máximo ${MAX_FOLLOW_JOBS} creados</dd>
-          <dt>Activas a la vez</dt><dd>${MAX_ACTIVE_JOBS} en total, de cualquier tipo</dd>
+          <dt>Actualizándose a la vez</dt><dd>${MAX_ACTIVE_JOBS}, de cualquier tipo</dd>
+          <dt>Al reanudar una</dt><dd>se pausa automáticamente la otra</dd>
           <dt>Al crear una de más</dt><dd>se pide sustituir una de esa modalidad</dd>
-          <dt>Al salir de la pestaña Seguir</dt><dd>los recorridos se pausan solos</dd>
+          <dt>Al salir de la pestaña Seguir</dt><dd>solo sigue el aviso de próximo bus</dd>
+          <dt>Midiendo puntualidad</dt><dd>la pestaña Seguir se pausa entera</dd>
         </dl>
+
+        <p class="text-tiny">
+          Un aviso activo mira también las paradas anteriores para decir a cuántas viene el
+          autobús, con la misma detección que “ver por dónde viene”. Para eso hace falta saber por
+          qué recorrido viene, y la fuente oficial nunca lo dice: cuando por tu parada pasa la
+          línea en los dos sentidos, se pregunta al crear el aviso. Por el resto de paradas pasa
+          uno solo y no hay nada que elegir.
+        </p>
 
         ${renderSettingRow(
           'vibrate',
@@ -2255,13 +2662,19 @@ function renderPickLineSheet(stopId: string, purpose: 'tracking' | 'monitor' | '
     </label>
 
     ${
-      purpose === 'tracking'
+      // El sentido se pregunta cuando de verdad hay algo que elegir. En un
+      // aviso no sirve para filtrar —la fuente no distingue sentidos, así que
+      // sonará con cualquier autobús de la línea— sino para saber por dónde
+      // viene y poder contar las paradas que faltan. Por el 93 % de las paradas
+      // pasa un solo sentido de cada línea: ahí preguntar sería una pregunta
+      // sin respuestas.
+      purpose === 'tracking' && trackingDirectionOptions(stopId, selectedLineId).length < 2
         ? ''
         : `
       <label class="field">
         <span>Sentido</span>
         <select class="select" data-action="draft-direction">
-          ${directions
+          ${(purpose === 'tracking' ? trackingDirectionOptions(stopId, selectedLineId) : directions)
             .map(
               (direction) =>
                 `<option value="${esc(direction.key)}" ${
@@ -2279,7 +2692,9 @@ function renderPickLineSheet(stopId: string, purpose: 'tracking' | 'monitor' | '
       ${
         purpose === 'monitor'
           ? '<span class="text-tiny">El horario programado se filtra por el sentido elegido; sin él las salidas de ida y vuelta se mezclan.</span>'
-          : ''
+          : purpose === 'tracking'
+            ? '<span class="text-tiny">Por esta parada pasa la línea en los dos sentidos. Sirve para decirte a cuántas paradas viene el autobús: el aviso sonará igual con cualquiera de los dos, porque la fuente oficial no los distingue.</span>'
+            : ''
       }
     `
     }

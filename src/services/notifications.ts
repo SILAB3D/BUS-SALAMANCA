@@ -76,6 +76,15 @@ export interface TrackingNotification {
   arriving: boolean
   updatedAt: Date
   stale: boolean
+  /**
+   * Por donde viene, ya redactado ("a 3 paradas", "en tu parada").
+   *
+   * Cadena vacia cuando no consta, y entonces no se escribe nada: la fuente no
+   * publica posiciones, asi que "por donde viene" es una deduccion que unas
+   * veces sale y otras no. Un hueco en blanco o un "—" harian pensar que la
+   * app se ha quedado colgada.
+   */
+  stopsAway?: string
 }
 
 export async function showTrackingNotification(payload: TrackingNotification): Promise<void> {
@@ -94,6 +103,10 @@ export async function showTrackingNotification(payload: TrackingNotification): P
         : `En ${payload.minutes} min`
 
   const suffix = payload.stale ? ' · dato no confirmado' : ''
+  // A continuacion del tiempo, en el titulo: los minutos dicen cuando llega y
+  // las paradas dicen si ese numero se puede creer. Un "en 2 min · a 5 paradas"
+  // avisa de que el contador va a dar un salto.
+  const where = payload.stopsAway ? ` · ${payload.stopsAway}` : ''
   const clock = payload.updatedAt.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })
 
   // Cuatro datos y ninguno repetido: linea y tiempo en el titulo, direccion y
@@ -104,7 +117,7 @@ export async function showTrackingNotification(payload: TrackingNotification): P
       notifications: [
         {
           id: payload.id,
-          title: `Línea ${payload.lineId} · ${eta}`,
+          title: `Línea ${payload.lineId} · ${eta}${where}`,
           body: `${payload.destination}\nActualizado a las ${clock}${suffix}`,
           channelId: CHANNEL_ID,
           smallIcon: SMALL_ICON,
@@ -165,6 +178,48 @@ export async function showArrivalAlert(
     })
   } catch {
     /* ignorado a proposito */
+  }
+}
+
+/**
+ * Notificacion persistente de "estoy midiendo la puntualidad".
+ *
+ * No es un adorno: durante una franja de control la app tiene que seguir
+ * consultando la parada cada pocos segundos, y Android congela los
+ * temporizadores de una pagina que nadie mira. Una notificacion `ongoing` es lo
+ * que declara al sistema que hay trabajo en curso —y, sobre todo, es lo unico
+ * que le dice a quien lleva el movil por que la app sigue despierta—. El
+ * servicio nativo publica la suya cuando esta al mando; esta es la de cuando no
+ * lo esta (navegador, o el control se quedo fuera de los que admite).
+ */
+export async function showOngoingNotification(
+  id: number,
+  title: string,
+  body: string,
+): Promise<void> {
+  if (!isNative()) {
+    return
+  }
+
+  await ensureChannel()
+
+  try {
+    await LocalNotifications.schedule({
+      notifications: [
+        {
+          id,
+          title,
+          body,
+          channelId: CHANNEL_ID,
+          smallIcon: SMALL_ICON,
+          ongoing: true,
+          autoCancel: false,
+          silent: true,
+        },
+      ],
+    })
+  } catch {
+    /* la notificacion es un extra: nunca debe romper el ciclo de refresco */
   }
 }
 

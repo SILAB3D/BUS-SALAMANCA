@@ -192,7 +192,15 @@ export function feedPill(feed: StopFeed | undefined): string {
  * ------------------------------------------------------------------ */
 
 /** A partir de aqui un dato "en vivo" ya no lo es: se marca como envejecido. */
-const SYNC_FRESH_MS = 60_000
+/**
+ * Hasta aqui un dato se considera "al dia".
+ *
+ * Cuarenta segundos: es el doble del ciclo de refresco de un recorrido activo
+ * (20 s), asi que una parada al dia es la que ha entrado en uno de los dos
+ * ultimos ciclos. Con el minuto de antes, una parada podia haberse saltado dos
+ * ciclos enteros y seguir pintada de verde.
+ */
+const SYNC_FRESH_MS = 40_000
 
 export type SyncTone = 'loading' | 'queued' | 'fresh' | 'aged' | 'idle' | 'warn' | 'error'
 

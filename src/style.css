@@ -1532,6 +1532,17 @@ button.card-head {
   line-height: 1;
 }
 
+/* Sin recorrido elegido el mapa enseña las 349 paradas de la red. A ese
+   numero, una chincheta del tamano normal tapa a la de al lado y ningun numero
+   de orden significaria nada: se dibujan como puntos, y solo la seleccionada
+   crece. */
+.map-pin.is-plain {
+  width: 22px;
+  height: 22px;
+  border-width: 2px;
+  font-size: 0;
+}
+
 .map-pin.is-selected {
   width: 42px;
   height: 42px;
@@ -2403,12 +2414,6 @@ button.card-head {
   background: var(--brand-600);
 }
 
-/* El boton de "Ampliar" del mapa sin recorrido elegido no hace nada: se ve
-   apagado en vez de responder con un aviso cada vez que se toca. */
-.map-expand:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
 
 
 /* ==================================================================
@@ -2824,4 +2829,201 @@ button.card-head {
 .leg-meta {
   color: var(--text-3) !important;
   font-size: 12px !important;
+}
+
+
+/* ==================================================================
+   Franja de líneas de una parada guardada
+   ==================================================================
+   Dos problemas a la vez: enseñar TODAS las líneas de la parada sin
+   cortes, y que todas las tarjetas plegadas midan lo mismo.
+
+   En la cabecera no cabían: entre el código, el nombre y los botones
+   quedaban unos 90 px, y trece distintivos ahí solo salían cortados.
+   Por eso bajan a una franja de ancho completo, y por eso esa franja
+   tiene ALTURA FIJA de dos filas aunque sobre sitio: con la altura
+   pegada al contenido, la lista subía y bajaba de escalón en escalón
+   según cuántas líneas tuviera cada parada. */
+
+/* Plegada, el nombre y la franja de líneas van pegados: el hueco de la
+   cabecera completa los separaba como si fueran de dos tarjetas. */
+.card-head.is-tight {
+  padding-bottom: 6px;
+}
+
+/* Hueco para dos líneas. Es la otra mitad de "todas miden lo mismo":
+   sin él, "Gran Vía" hacía la tarjeta más baja que "C/ Licenciado
+   Vidriera, s/n (Frente residencia)", y una parada renombrada —que
+   añade el nombre oficial debajo— más alta que las dos.
+
+   Dos líneas bastan para TODAS las paradas de la red: la más larga son
+   47 caracteres y entra justa. Y es un MÍNIMO, no un recorte: en una
+   pantalla estrecha, un nombre que necesite tres líneas se sigue
+   leyendo entero. Plantarse en la acera equivocada es peor que una
+   tarjeta desigual. */
+.stop-card .card-head.is-tight .card-head-copy {
+  min-height: 40px;
+  justify-content: center;
+}
+
+.stop-lines {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 6px;
+  width: 100%;
+  /* 2 filas de 22 px + 6 de hueco + 14 de margen inferior. */
+  height: 64px;
+  padding: 0 16px 14px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  color: inherit;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.stop-lines-empty {
+  font-size: 12.5px;
+  color: var(--text-3);
+}
+
+/* ==================================================================
+   Registro de un control de puntualidad
+   ==================================================================
+   La respuesta a "¿por qué no se apunta ninguna hora?". Se lee de
+   arriba abajo como una conversación con la fuente, así que la hora va
+   a la izquierda en columna fija y el texto envuelve a su derecha. */
+
+.trace-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 8px;
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+
+.trace-item {
+  display: flex;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: var(--r-sm);
+  border-left: 3px solid transparent;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-2);
+}
+
+.trace-item.is-warn {
+  border-left-color: var(--warn);
+  background: var(--warn-soft);
+}
+
+.trace-item.is-error {
+  border-left-color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.trace-time {
+  flex: none;
+  width: 44px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.trace-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.trace-note {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.trace-meta {
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+/* ==================================================================
+   Frecuencias de actualización (Ajustes)
+   ==================================================================
+   Cada fila es "qué · cada cuánto · con qué condición". La condición
+   ocupa una línea entera por debajo a propósito: es la parte que de
+   verdad explica el comportamiento, y en una tabla de dos columnas
+   quedaba recortada. */
+
+.rule-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.rule-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 12px;
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+
+.rule-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.rule-head strong {
+  font-size: 13.5px;
+  color: var(--text);
+}
+
+.rule-when {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-2);
+}
+
+
+/* ==================================================================
+   Por dónde viene el autobús de un aviso
+   ==================================================================
+   Va pegado a la dirección, no junto a los minutos, porque no es otra
+   cifra del mismo tipo: los minutos son lo que se espera y esto es de
+   dónde sale ese número. Aparece y desaparece según conste o no —la
+   fuente no publica posiciones, así que unas veces se deduce y otras
+   no—, y por eso el subtítulo pasa a poder envolver cuando está: si
+   se recortara con puntos suspensivos, faltar y estar cortado se
+   verían igual. */
+
+.stops-away {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+  padding: 1px 8px 1px 6px;
+  border-radius: var(--r-full);
+  background: var(--info-soft);
+  color: var(--brand-600);
+  font-weight: 700;
+  white-space: nowrap;
+  vertical-align: 1px;
+}
+
+.stops-away svg {
+  width: 13px;
+  height: 13px;
+  flex: none;
 }
