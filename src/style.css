@@ -1098,6 +1098,142 @@ button.card-head {
   }
 }
 
+/* Llegadas en camino ------------------------------------------------ *
+ *
+ * Las consultas van de una en una contra una fuente que admite una cada dos
+ * segundos, asi que entre pedir los tiempos y verlos pasa un rato. Sin decirlo,
+ * ese rato se lee como que la app se ha quedado colgada; y con un dato viejo en
+ * pantalla, peor todavia, porque parece definitivo.
+ *
+ * La barra recorre el ancho de la lista: dice "esto se esta moviendo" sin
+ * tapar nada de lo que ya hay puesto, que sigue siendo lo mejor que se sabe
+ * hasta que llegue lo nuevo.
+ */
+
+.arrivals-loading {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 5px;
+}
+
+.arrivals-loading .text-tiny {
+  text-align: center;
+}
+
+.arrivals-loading-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  border-radius: var(--r-full);
+  overflow: hidden;
+  background: color-mix(in srgb, var(--brand-500) 16%, transparent);
+}
+
+.arrivals-loading-bar::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 40%;
+  border-radius: var(--r-full);
+  background: var(--brand-500);
+  animation: arrivals-sweep 1.15s ease-in-out infinite;
+}
+
+/* La lista con dato puesto se atenua un punto mientras llega el nuevo: sigue
+   siendo legible —es el mejor dato que hay— pero deja de leerse como firme. */
+.arrivals.is-busy {
+  position: relative;
+  padding-top: 9px;
+  opacity: 0.78;
+}
+
+@keyframes arrivals-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(250%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .arrivals-loading-bar::after {
+    animation: none;
+    width: 100%;
+    opacity: 0.55;
+  }
+}
+
+/* Filtro de linea del buscador -------------------------------------- *
+ *
+ * Plegado ocupa una linea y dice en ella que filtro hay puesto, asi que nunca
+ * se filtra sin saberlo. Desplegado siempre, los dos desplegables se comian el
+ * sitio de los resultados en la busqueda mas comun, que es escribir un nombre.
+ */
+
+.line-filter {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+
+.line-filter-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 11px 13px;
+  border: 0;
+  border-radius: var(--r-md);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  font-size: 13.5px;
+  font-weight: 620;
+  color: var(--text-2);
+}
+
+.line-filter-head > svg {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  color: var(--text-3);
+}
+
+.line-filter-head > svg:last-child {
+  margin-left: auto;
+  transition: transform 0.18s ease;
+}
+
+.line-filter.is-open .line-filter-head > svg:last-child {
+  transform: rotate(180deg);
+}
+
+.line-filter-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Con filtro puesto se marca: es la diferencia entre "no hay resultados" y
+   "no hay resultados EN ESTA LINEA". */
+.line-filter-label.is-on {
+  color: var(--brand-500);
+}
+
+.line-filter-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0 13px 13px;
+}
+
 /* Aviso flotante ---------------------------------------------------- */
 
 .toast {
@@ -1410,13 +1546,37 @@ button.card-head {
   flex: none;
 }
 
+/*
+ * El mapa es un MUNDO APARTE en cuanto a capas, y eso es lo que arregla
+ * `isolation`.
+ *
+ * Dentro del mapa hay cosas que flotan muy alto: los mandos de Leaflet (800),
+ * sus globos (700) y los botones propios de ampliar y centrar (1200). Sin
+ * aislar, esos números competían con los del resto de la página, así que la
+ * ficha de una parada (620) se abría POR DEBAJO del mapa sobre el que se
+ * acababa de tocar: se veía media ventana con los botones del mapa encima.
+ *
+ * Con `isolation: isolate` todos esos números pasan a valer solo puertas
+ * adentro, y el mapa entero se ordena frente al resto de la página como un
+ * bloque: por debajo de la ficha, siempre.
+ */
 .map-shell {
   position: relative;
+  isolation: isolate;
+  z-index: 0;
   height: 46dvh;
   min-height: 260px;
   border-radius: var(--r-lg);
   overflow: hidden;
   border: 1px solid var(--border);
+}
+
+/* Con la ficha abierta, los mandos del mapa además se apagan: el mapa sigue
+   ahí detrás, pero sus botones ya no piden ser tocados. */
+.map-shell.is-behind-dialog .map-expand,
+.map-shell.is-behind-dialog .map-locate,
+.map-shell.is-behind-dialog .leaflet-control-container {
+  visibility: hidden;
 }
 
 /* Pantalla completa. El nodo del mapa NO se mueve del arbol (Leaflet vive
@@ -1512,6 +1672,35 @@ button.card-head {
   width: 16px;
   height: 16px;
   flex: none;
+}
+
+/* Grupos de paradas ------------------------------------------------- *
+ *
+ * Alejado, la red entera son 349 chinchetas superpuestas: ilegibles, y sobre
+ * todo carisimas de mover: cada arrastre del dedo obliga a recolocarlas todas y
+ * el telefono se atasca. Agrupadas son unas decenas de circulos que dicen
+ * cuantas paradas llevan dentro, y se van partiendo solos al acercarse.
+ */
+
+/* Colores fijos, no los del tema: las teselas de OpenStreetMap son SIEMPRE
+   claras, también con la aplicación en modo oscuro. */
+.map-cluster {
+  display: grid;
+  place-items: center;
+  width: var(--cluster-size, 40px);
+  height: var(--cluster-size, 40px);
+  border-radius: var(--r-full);
+  border: 2px solid #fff;
+  background: #1e4fd8;
+  color: #fff;
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 800;
+  box-shadow: 0 2px 8px rgba(6, 12, 26, 0.35);
+  cursor: pointer;
+  /* El halo dice "aquí dentro hay más": es el mismo lenguaje que usa cualquier
+     mapa con paradas agrupadas, así que no hay que explicarlo. */
+  outline: 4px solid rgba(30, 79, 216, 0.28);
 }
 
 /* Chinchetas de parada ---------------------------------------------- */
@@ -2548,32 +2737,6 @@ button.card-head {
   }
 }
 
-/* Las teselas de OpenStreetMap son SIEMPRE claras, también con la aplicación en
-   modo oscuro. Por eso lo que va encima del mapa lleva colores fijos y no los
-   tokens del tema: con var(--surface) las chinchetas salían azul oscuro sobre
-   azul oscuro y no se leía el número. */
-.map-near {
-  display: grid;
-  place-items: center;
-  width: 32px;
-  height: 32px;
-  border-radius: var(--r-full);
-  background: #fff;
-  border: 2.5px solid #1e4fd8;
-  color: #12306f;
-  font-size: 13.5px;
-  font-weight: 800;
-  box-shadow: 0 2px 8px rgba(6, 12, 26, 0.35);
-}
-
-/* La más cercana es la respuesta a la pregunta que se estaba haciendo: va
-   maciza y algo más grande para que se distinga sin leer el número. */
-.map-near.is-first {
-  background: #1e4fd8;
-  color: #fff;
-  transform: scale(1.14);
-}
-
 /* Extremos de una ruta: salida hueca, llegada maciza. */
 .map-end {
   display: block;
@@ -2605,72 +2768,26 @@ button.card-head {
   background: var(--dot, #1e4fd8);
 }
 
-/* ---- Lista de paradas cercanas ---- */
-
-.nearby-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.nearby-item {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  width: 100%;
-  padding: 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  background: var(--surface-2);
-  color: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.nearby-item:hover {
-  border-color: var(--border-strong);
-}
+/* ---- Lista de paradas cercanas ---- *
+ *
+ * Vive dentro de Buscar y reutiliza .result-item, que es la fila de resultado
+ * de todo el buscador: una parada cercana no es otra cosa que una parada
+ * encontrada, y tener dos filas parecidas con dos aspectos distintos hacia que
+ * la misma lista se leyera de dos maneras. Lo unico propio es el numero de
+ * orden, que dice de un vistazo cual tienes mas cerca.
+ */
 
 .nearby-rank {
   flex: none;
   display: grid;
   place-items: center;
-  width: 32px;
-  height: 32px;
+  width: 30px;
+  height: 30px;
   border-radius: var(--r-full);
   background: var(--brand-500);
   color: #fff;
-  font-size: 14px;
+  font-size: 13.5px;
   font-weight: 800;
-}
-
-.nearby-copy {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-
-/* Igual que en las tarjetas: el nombre de una parada NO se recorta, que es
-   justo lo que hace confundir dos aceras de la misma calle. */
-.nearby-name {
-  font-size: 14.5px;
-  font-weight: 650;
-  line-height: 1.25;
-  overflow-wrap: anywhere;
-}
-
-.nearby-meta {
-  font-size: 12.5px;
-  color: var(--text-2);
-}
-
-.nearby-item > svg {
-  width: 18px;
-  height: 18px;
-  flex: none;
-  color: var(--text-3);
 }
 
 /* ---- Formulario de ruta ---- */

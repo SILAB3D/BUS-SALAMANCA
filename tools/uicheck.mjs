@@ -264,10 +264,13 @@ async function main() {
     if (checkStability) {
       console.log('\nEstabilidad del refresco (el repintado no debe destruir la interfaz)')
 
-      // Pantalla con desplegables reales.
+      // Pantalla con desplegables reales: el filtro de linea del buscador, que
+      // ahora vive plegado dentro del modo "Parada".
       await cdp.evaluate(`document.querySelector('[data-action="tab"][data-tab="buscar"]')?.click(); true`)
       await delay(400)
-      await cdp.evaluate(`document.querySelector('[data-action="search-mode"][data-mode="linea"]')?.click(); true`)
+      await cdp.evaluate(`document.querySelector('[data-action="search-mode"][data-mode="parada"]')?.click(); true`)
+      await delay(400)
+      await cdp.evaluate(`document.querySelector('[data-action="toggle-line-filter"]')?.click(); true`)
       await delay(600)
 
       await cdp.evaluate(`(() => {
@@ -326,18 +329,42 @@ async function main() {
       await cdp.evaluate(`document.querySelector('[data-action="search-mode"][data-mode="mapa"]')?.click(); true`)
       await delay(2500)
 
-      // Sin linea ni sentido elegidos el mapa NO se queda vacio: enseña las 349
-      // paradas de la red para poder tocar directamente la que se busca.
+      // Sin linea ni sentido elegidos el mapa NO se queda vacio, pero tampoco
+      // suelta las 349 chinchetas de golpe: alejado van AGRUPADAS, y cada grupo
+      // dice cuantas paradas lleva dentro. Dibujarlas todas dejaba el mapa
+      // arrastrandose en cada gesto, que es lo que se estaba arreglando.
       const allStops = JSON.parse(await cdp.evaluate(`(() => JSON.stringify({
         pins: document.querySelectorAll('#stop-map .map-pin').length,
         plain: document.querySelectorAll('#stop-map .map-pin.is-plain').length,
+        clusters: document.querySelectorAll('#stop-map .map-cluster').length,
+        dentro: Array.from(document.querySelectorAll('#stop-map .map-cluster'))
+          .reduce((total, el) => total + Number(el.textContent), 0),
         lines: document.querySelectorAll('#stop-map path.leaflet-interactive').length
       }))()`))
 
-      report('sin linea elegida el mapa enseña toda la red', allStops.pins > 300,
-        `${allStops.pins} chinchetas`)
-      report('esas chinchetas van sin numero de orden', allStops.plain === allStops.pins)
+      const formas = allStops.pins + allStops.clusters
+
+      report('sin linea elegida el mapa enseña la red, agrupada', allStops.clusters > 0,
+        `${allStops.clusters} grupos + ${allStops.pins} chinchetas`)
+      report('agrupar deja el mapa muy por debajo de las 349 formas', formas < 120,
+        `${formas} formas para ${allStops.dentro + allStops.pins} paradas`)
+      report('los grupos dicen cuantas paradas llevan dentro', allStops.dentro > 100,
+        `${allStops.dentro} paradas agrupadas`)
+      report('las chinchetas sueltas van sin numero de orden',
+        allStops.plain === allStops.pins)
       report('sin recorrido elegido no se traza ninguna linea', allStops.lines === 0)
+
+      // Tocar un grupo lo desgrana: encuadra lo que lleva dentro y, ya cerca,
+      // las paradas salen una a una.
+      await cdp.evaluate(`document.querySelector('#stop-map .map-cluster')?.click(); true`)
+      await delay(1800)
+      const trasAbrir = JSON.parse(await cdp.evaluate(`(() => JSON.stringify({
+        pins: document.querySelectorAll('#stop-map .map-pin').length,
+        clusters: document.querySelectorAll('#stop-map .map-cluster').length
+      }))()`))
+      report('tocar un grupo desgrana las paradas que lleva dentro',
+        trasAbrir.pins > allStops.pins,
+        `${trasAbrir.pins} chinchetas, ${trasAbrir.clusters} grupos`)
 
       await cdp.evaluate(`(() => {
         const select = document.querySelector('[data-action="pick-search-direction"]');

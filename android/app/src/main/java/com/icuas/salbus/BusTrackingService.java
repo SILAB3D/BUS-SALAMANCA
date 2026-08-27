@@ -161,19 +161,23 @@ public class BusTrackingService extends Service {
     private static final int MISSING_STREAK_TO_PASS = 2;
 
     /**
-     * Paradas anteriores como mucho que se miran para localizar el autobus.
+     * Paradas anteriores que se miran para localizar el autobus.
      *
-     * Cada una es una peticion mas contra una fuente que solo admite una cada
-     * dos segundos, y salen del mismo turno que necesita el tiempo de la parada
-     * del aviso. Coincide con ROUTE_SCAN_MAX_STOPS de src/state.ts.
+     * Son las OCHO anteriores a la del aviso, la misma ventana que dibuja la
+     * pestana Seguir. Coincide con ROUTE_WINDOW_STOPS de src/services/bus-position.ts.
+     *
+     * Que sean ocho no significa ocho peticiones: la busqueda va de la parada
+     * del aviso hacia atras y se PARA en la primera que tenga el autobus
+     * encima, que es lo unico que hace falta saber para decir "a N paradas".
+     * Cuando esta cerca —justo cuando el dato sirve para algo— se encuentra a
+     * la primera o a la segunda. El tope de ocho solo dice hasta donde se puede
+     * llegar buscando cuando viene de lejos; antes eran seis y por eso el aviso
+     * se quedaba sin saber por donde venia justo en esos casos.
      */
-    private static final int ROUTE_SCAN_MAX_STOPS = 6;
+    private static final int ROUTE_WINDOW_STOPS = 8;
 
     /** Por encima de estos minutos no se busca: el autobus puede ni haber salido. */
     private static final int ROUTE_SCAN_MAX_MINUTES = 20;
-
-    /** Minutos que tarda de media un autobus urbano de una parada a la siguiente. */
-    private static final double MINUTES_PER_STOP = 1.5;
 
     /**
      * Cada cuanto se vuelve a buscar por donde viene.
@@ -701,7 +705,7 @@ public class BusTrackingService extends Service {
 
         for (String stopId : raw) {
             String trimmed = stopId.trim();
-            if (!trimmed.isEmpty() && stops.size() < ROUTE_SCAN_MAX_STOPS) {
+            if (!trimmed.isEmpty() && stops.size() < ROUTE_WINDOW_STOPS) {
                 stops.add(trimmed);
             }
         }
@@ -1058,10 +1062,13 @@ public class BusTrackingService extends Service {
 
         job.routeSweptAt = now;
 
-        int depth = Math.min(
-            job.route.length,
-            Math.min(ROUTE_SCAN_MAX_STOPS, (int) Math.ceil(minutes / MINUTES_PER_STOP) + 1)
-        );
+        // Se recorre la ventana ENTERA hacia atras. No se recorta por los
+        // minutos que faltan: ese calculo daba por sentado un ritmo fijo entre
+        // paradas, y en cuanto el autobus acumulaba retraso o trafico la
+        // busqueda se paraba antes de llegar a el, con lo que el aviso se
+        // quedaba sin decir por donde venia justo cuando mas se preguntaba. El
+        // coste real lo pone el bucle, que sale en cuanto lo encuentra.
+        int depth = job.route.length;
 
         for (int index = 0; index < depth; index += 1) {
             if (!running) {

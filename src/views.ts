@@ -21,6 +21,7 @@ import {
   AUTO_CYCLE_MS,
   FRESHNESS,
   ARRIVALS_PREVIEW,
+  ARRIVALS_STALE_MS,
   favouriteLabel,
   formatMinutesClock,
   isFavourite,
@@ -770,22 +771,22 @@ function renderBuscar(): string {
   return `
     <div class="screen-intro">
       <h2>Buscar parada</h2>
-      <p>Encuentra una parada por su nombre, recorriendo una línea o desde el mapa.</p>
+      <p>Por su nombre o su línea, por cercanía a donde estás, o señalándola en el mapa.</p>
     </div>
 
     <div class="segmented" role="tablist">
-      ${renderSegment('nombre', 'Nombre')}
-      ${renderSegment('linea', 'Línea')}
-      ${renderSegment('mapa', 'Mapa')}
+      ${renderSegment('parada', 'Parada', 'search')}
+      ${renderSegment('cerca', 'Cerca', 'pin')}
+      ${renderSegment('mapa', 'Mapa', 'map')}
     </div>
 
-    ${state.search.mode === 'nombre' ? renderSearchByName() : ''}
-    ${state.search.mode === 'linea' ? renderSearchByLine() : ''}
+    ${state.search.mode === 'parada' ? renderSearchByStop() : ''}
+    ${state.search.mode === 'cerca' ? renderSearchNearby() : ''}
     ${state.search.mode === 'mapa' ? renderSearchByMap() : ''}
   `
 }
 
-function renderSegment(mode: string, label: string): string {
+function renderSegment(mode: string, label: string, iconName: string): string {
   return `
     <button
       class="segmented-item"
@@ -794,17 +795,33 @@ function renderSegment(mode: string, label: string): string {
       data-action="search-mode"
       data-mode="${mode}"
       aria-selected="${state.search.mode === mode}"
-    >${esc(label)}</button>
+    >${icon(iconName)}<span>${esc(label)}</span></button>
   `
 }
 
-function renderSearchByName(): string {
+/**
+ * El buscador de paradas, con el texto y la línea en la MISMA pantalla.
+ *
+ * Antes eran dos modos separados, "Nombre" y "Línea", y había que decidir cuál
+ * antes de escribir nada: quien sabía el nombre no podía acotar por línea, y
+ * quien elegía línea se comía el recorrido entero sin poder filtrarlo. Son la
+ * misma búsqueda —encontrar una parada— así que ahora es una sola y los dos
+ * campos se combinan:
+ *
+ *  - Solo texto → paradas de toda la red que casan con lo escrito.
+ *  - Solo línea (y sentido) → su recorrido, numerado en orden.
+ *  - Los dos → ese recorrido, filtrado por el texto y CONSERVANDO el número de
+ *    orden real, que es lo que dice si la parada va antes o después.
+ */
+function renderSearchByStop(): string {
   const network = state.network
   if (!network) {
     return ''
   }
 
-  const results = network.findStops(state.search.query, 40)
+  const query = state.search.query.trim()
+  const line = network.lineById.get(state.search.lineId) ?? null
+  const direction = line?.directions.find((item) => item.key === state.search.directionKey) ?? null
 
   return `
     <label class="field">
@@ -820,40 +837,242 @@ function renderSearchByName(): string {
       />
     </label>
 
-    <div class="result-list">
+    ${renderLineFilter(line, direction)}
+    ${renderSearchResults(query, line, direction)}
+  `
+}
+
+/**
+ * El filtro de línea, plegado mientras no se use.
+ *
+ * Desplegado siempre eran dos desplegables ocupando sitio por delante de los
+ * resultados para la búsqueda más común, que es escribir un nombre. Plegado
+ * ocupa una línea y dice en ella qué filtro hay puesto, así que nunca se filtra
+ * sin saberlo.
+ *
+ * Que esté abierto o cerrado lo lleva el estado y no un `<details>` del
+ * navegador: el repintado es incremental y quita los atributos que ya no están
+ * en el HTML nuevo, así que un `open` puesto por el navegador se perdía en el
+ * siguiente latido del reloj y el panel se cerraba solo cada segundo.
+ */
+function renderLineFilter(line: TransitLine | null, direction: LineDirection | null): string {
+  const open = state.search.lineFilterOpen || Boolean(line)
+  const summary = direction
+    ? `Línea ${line?.lineId ?? ''} · ${directionLabel(direction)}`
+    : line
+      ? `Línea ${line.lineId} · elige sentido`
+      : 'Acotar por línea'
+
+  return `
+    <div class="line-filter${open ? ' is-open' : ''}">
+      <button class="line-filter-head" type="button" data-action="toggle-line-filter" aria-expanded="${open}">
+        ${icon('route')}
+        <span class="line-filter-label${line ? ' is-on' : ''}">${esc(summary)}</span>
+        ${icon('chevronDown')}
+      </button>
       ${
-        results.length === 0
-          ? emptyState('search', 'Sin resultados', 'Prueba con otro nombre o con el número de parada.')
-          : results.map((stop) => renderStopResult(stop)).join('')
+        open
+          ? `<div class="line-filter-body">
+              ${renderLineSelect()}
+              ${renderDirectionSelect()}
+              ${
+                line
+                  ? `<button class="btn btn-secondary btn-sm btn-block" type="button" data-action="clear-line-filter">
+                       ${icon('close')} Quitar el filtro de línea
+                     </button>`
+                  : ''
+              }
+            </div>`
+          : ''
       }
     </div>
   `
 }
 
-function renderSearchByLine(): string {
+/** Lo que sale de combinar el texto escrito con la línea y el sentido elegidos. */
+function renderSearchResults(
+  query: string,
+  line: TransitLine | null,
+  direction: LineDirection | null,
+): string {
   const network = state.network
   if (!network) {
     return ''
   }
 
-  const selectedLine = network.lineById.get(state.search.lineId) ?? null
-  const direction = selectedLine?.directions.find((item) => item.key === state.search.directionKey) ?? null
+  // Con sentido elegido manda el ORDEN del recorrido, y el número de parada se
+  // conserva aunque el texto deje huecos: ese "12" es justamente lo que dice si
+  // el autobús pasa por ahí antes o después.
+  if (direction) {
+    const matches = direction.stops
+      .map((stop, index) => ({ stop, order: index + 1 }))
+      .filter((entry) => stopMatches(entry.stop, query))
+
+    return matches.length === 0
+      ? emptyState(
+          'search',
+          'Sin resultados en este recorrido',
+          'Ninguna parada de este sentido casa con lo que has escrito. Prueba con otro texto o quita el filtro de línea.',
+        )
+      : `<div class="result-list">${matches
+          .map((entry) => renderStopResult(entry.stop, entry.order))
+          .join('')}</div>`
+  }
+
+  // Línea elegida pero sin sentido: valen las paradas de cualquiera de sus
+  // sentidos, y sin numerar, porque dos recorridos no comparten un mismo orden.
+  if (line) {
+    const seen = new Set<string>()
+    const stops: NetworkStop[] = []
+
+    for (const item of line.directions) {
+      for (const stop of item.stops) {
+        if (!seen.has(stop.stopId) && stopMatches(stop, query)) {
+          seen.add(stop.stopId)
+          stops.push(stop)
+        }
+      }
+    }
+
+    return stops.length === 0
+      ? emptyState('search', 'Sin resultados en esta línea', 'Prueba con otro texto o quita el filtro de línea.')
+      : `<div class="result-list">${stops.map((stop) => renderStopResult(stop)).join('')}</div>`
+  }
+
+  const results = network.findStops(query, 40)
+
+  return results.length === 0
+    ? emptyState('search', 'Sin resultados', 'Prueba con otro nombre o con el número de parada.')
+    : `<div class="result-list">${results.map((stop) => renderStopResult(stop)).join('')}</div>`
+}
+
+/** Sin texto casan todas: entonces el filtro de línea manda por sí solo. */
+function stopMatches(stop: NetworkStop, query: string): boolean {
+  if (query.length === 0) {
+    return true
+  }
+
+  const needle = query.toLowerCase()
+  return stop.stopId.toLowerCase().includes(needle) || stop.stopName.toLowerCase().includes(needle)
+}
+
+/**
+ * Paradas cercanas, ya dentro de Buscar.
+ *
+ * Antes vivía en la pestaña experimental Mapas, encajada bajo un mapa que
+ * ocupaba media pantalla: al tocar una parada su ficha se abría por encima y
+ * los mandos del mapa —ampliar, centrar, el zoom de Leaflet— se le montaban
+ * encima, porque flotan sobre el mapa y no sabían nada de la ficha. Aquí no hay
+ * mapa que estorbe, y además es la pantalla donde se busca una parada, que es
+ * exactamente lo que se está haciendo.
+ */
+function renderSearchNearby(): string {
+  const geo = state.geo
+
+  if (geo.locating && !geo.location) {
+    return `
+      <section class="card"><div class="card-body">
+        <div class="skeleton skeleton-row"></div>
+        <div class="skeleton skeleton-row"></div>
+        <p class="text-tiny">Buscando tu ubicación…</p>
+      </div></section>
+    `
+  }
+
+  if (!geo.location) {
+    return renderLocationPrompt()
+  }
+
+  const nearby = nearestStopsForView()
+
+  if (nearby.length === 0) {
+    return `
+      <section class="card"><div class="card-body">
+        ${emptyState(
+          'pin',
+          'Ninguna parada cerca',
+          'No hay paradas de la red a menos de 900 m de donde estás.',
+        )}
+      </div></section>
+    `
+  }
 
   return `
-    ${renderLineSelect()}
-    ${renderDirectionSelect()}
+    <div class="section-head">
+      <h2>Paradas más cercanas</h2>
+      <button class="btn btn-secondary btn-sm" type="button" data-action="locate">
+        ${icon('crosshair')} ${geo.locating ? 'Localizando…' : 'Actualizar'}
+      </button>
+    </div>
+    <p class="text-tiny">${esc(locationAgeLabel())}</p>
 
-    ${
-      direction
-        ? `<div class="result-list">
-            ${direction.stops.map((stop, index) => renderStopResult(stop, index + 1)).join('')}
-          </div>`
-        : emptyState(
-            'route',
-            'Elige línea y sentido',
-            'Los dos campos empiezan en “Seleccionar”: al completarlos aparecerán aquí las paradas en el orden del recorrido.',
-          )
-    }
+    <div class="result-list">
+      ${nearby
+        .map((entry, index) => {
+          const lines = state.network?.getLinesForStop(entry.stop.stopId) ?? []
+          return `
+            <button class="result-item" type="button" data-action="select-stop" data-stop="${esc(
+              entry.stop.stopId,
+            )}" aria-selected="${state.search.selectedStopId === entry.stop.stopId}">
+              <span class="nearby-rank">${index + 1}</span>
+              <span class="result-copy">
+                <span class="result-name">${esc(entry.stop.stopName)}</span>
+                <span class="result-meta">${esc(formatMeters(entry.meters))} · ${esc(
+                  formatWalk(entry.minutes),
+                )} andando · parada ${esc(entry.stop.stopId)}</span>
+                <span class="chip-row">
+                  ${lines
+                    .slice(0, 8)
+                    .map((line) => lineChip(line.lineId, line.color, 'sm'))
+                    .join('')}
+                </span>
+              </span>
+              ${icon('chevron')}
+            </button>
+          `
+        })
+        .join('')}
+    </div>
+  `
+}
+
+/**
+ * Qué hacer cuando no hay ubicación.
+ *
+ * El interruptor de ubicación del teléfono y el permiso de SALBUS son dos cosas
+ * distintas que desde aquí se ven igual —no llega la posición— y se arreglan en
+ * pantallas distintas del sistema. Decir "activa la ubicación" sin llevar hasta
+ * donde se activa deja el problema donde estaba.
+ */
+function renderLocationPrompt(): string {
+  const geo = state.geo
+  const blocked = geo.blocked
+
+  return `
+    <section class="card"><div class="card-body">
+      ${
+        geo.error
+          ? notice('error', geo.error)
+          : `<p class="card-sub is-wrap">Para enseñarte las paradas que tienes al lado, la aplicación
+               necesita saber dónde estás. La ubicación no sale del teléfono ni se guarda.</p>`
+      }
+      ${
+        blocked
+          ? `<button class="btn btn-primary btn-block" type="button" data-action="open-location-settings">
+               ${icon('pin')} ${
+                 blocked === 'service'
+                   ? 'Activar la ubicación del teléfono'
+                   : 'Abrir los permisos de SALBUS'
+               }
+             </button>
+             <button class="btn btn-secondary btn-block" type="button" data-action="locate">
+               ${icon('crosshair')} Volver a intentarlo
+             </button>`
+          : `<button class="btn btn-primary btn-block" type="button" data-action="locate">
+               ${icon('crosshair')} Usar mi ubicación
+             </button>`
+      }
+    </div></section>
   `
 }
 
@@ -925,7 +1144,7 @@ function renderSearchByMap(): string {
     <p class="text-tiny">
       ${
         !ready
-          ? 'El mapa enseña las paradas de toda la red: toca cualquiera para ver sus tiempos. Si eliges línea y sentido, se queda solo con ese recorrido y se abre a pantalla completa.'
+          ? 'Las paradas de la red van AGRUPADAS: cada círculo dice cuántas hay dentro y se abre al tocarlo o al acercar el mapa. Dibujar las 349 de golpe dejaba el mapa arrastrándose al moverlo.'
           : expanded
             ? 'Toca una parada para ver su ficha; cierra el mapa con la ✕ para volver al buscador.'
             : 'Toca una parada del mapa para ver su ficha, o pulsa “Ampliar” para verlo a pantalla completa.'
@@ -943,8 +1162,12 @@ function renderMapShell(caption: string): string {
   const expanded = state.search.mapExpanded
 
   return `
-    <div class="map-shell${expanded ? ' is-expanded' : ''}">
+    <div class="map-shell${expanded ? ' is-expanded' : ''}${
+      state.search.selectedStopId ? ' is-behind-dialog' : ''
+    }">
       <div id="stop-map" data-morph="skip"></div>
+      <button class="map-locate${state.geo.locating ? ' is-busy' : ''}" type="button"
+        data-action="locate" aria-label="Centrar en mi ubicación">${icon('crosshair')}</button>
       ${
         expanded
           ? `
@@ -1159,9 +1382,44 @@ function renderStopLines(stopId: string, lines: TransitLine[]): string {
  * Lista de llegadas reutilizable                                       *
  * ------------------------------------------------------------------ */
 
+/**
+ * ¿Hay que enseñar que se está trabajando en esta parada?
+ *
+ * Sí en dos casos, y los dos significan lo mismo para quien mira: lo que hay en
+ * pantalla no es lo definitivo.
+ *
+ *  - La parada está en la cola de consultas (esperando turno o ya pidiendo).
+ *    Las consultas van de una en una contra una fuente que admite una cada dos
+ *    segundos, así que "esperando turno" puede durar bastante y sin decirlo
+ *    parece que la app se ha quedado colgada.
+ *  - El dato en pantalla ya tiene más de un minuto. Un tiempo de hace minuto y
+ *    medio ya no es el tiempo: toca refresco, y avisarlo antes de que llegue
+ *    evita leer como bueno un número que está a punto de cambiar.
+ */
+function arrivalsBusy(stopId: string, feed: StopFeed | undefined): boolean {
+  if (state.stopSync[stopId] !== undefined) {
+    return true
+  }
+
+  return Boolean(feed) && Date.now() - (feed as StopFeed).fetchedAt >= ARRIVALS_STALE_MS
+}
+
 function renderArrivals(stopId: string, feed: StopFeed | undefined): string {
+  const busy = arrivalsBusy(stopId, feed)
+
   if (!feed) {
-    return `<div class="skeleton skeleton-row"></div><div class="skeleton skeleton-row"></div>`
+    return `
+      <div class="arrivals-loading" role="status" aria-live="polite">
+        <span class="arrivals-loading-bar"></span>
+        <div class="skeleton skeleton-row"></div>
+        <div class="skeleton skeleton-row"></div>
+        <p class="text-tiny">${esc(
+          state.stopSync[stopId] === 'queued'
+            ? 'Esperando turno en la cola de consultas…'
+            : 'Consultando los tiempos de esta parada…',
+        )}</p>
+      </div>
+    `
   }
 
   if (feed.status === 'error') {
@@ -1178,14 +1436,16 @@ function renderArrivals(stopId: string, feed: StopFeed | undefined): string {
 
   const staleClass = feed.status === 'throttled' ? ' stale' : ''
 
-  // Solo las primeras ARRIVALS_PREVIEW. Una parada con doce líneas llenaba la
-  // pantalla entera y empujaba fuera de la vista los botones de la tarjeta.
-  const expanded = state.arrivalsExpanded[stopId] === true
+  // Solo las primeras ARRIVALS_PREVIEW, y la vista compacta VUELVE SOLA: hay un
+  // único hueco de "desplegada" en todo el estado, así que desplegar una parada
+  // no deja desplegadas las que se abran después.
+  const expanded = state.arrivalsExpandedStopId === stopId
   const hidden = feed.arrivals.length - ARRIVALS_PREVIEW
   const visible = expanded ? feed.arrivals : feed.arrivals.slice(0, ARRIVALS_PREVIEW)
 
   return `
-    <div class="arrivals${staleClass}">
+    <div class="arrivals${staleClass}${busy ? ' is-busy' : ''}">
+      ${busy ? '<span class="arrivals-loading-bar" role="status" aria-label="Actualizando los tiempos"></span>' : ''}
       ${visible.map((arrival) => renderArrivalRow(arrival, stopId, false)).join('')}
     </div>
     ${
@@ -1606,7 +1866,7 @@ const TOUR: TourStep[] = [
   {
     iconName: 'search',
     title: 'Buscar',
-    body: 'Encuentra una parada por su nombre, recorriendo una línea o tocándola en el mapa.',
+    body: 'Encuentra una parada por su nombre o su línea, por las que tienes más cerca, o tocándola en el mapa.',
   },
   {
     iconName: 'bell',
@@ -1701,12 +1961,15 @@ function renderTour(): string {
  * ================================================================== */
 
 /**
- * Pestaña experimental: paradas cercanas y rutas.
+ * Pestaña experimental: el planificador de rutas.
  *
  * Vive aparte del resto a propósito. No consulta la fuente oficial de llegadas
  * (esa fuente limita por IP y su cola es para el aviso de próximo bus), no
  * guarda nada en disco y no toca el estado de ninguna otra pantalla. Lo único
- * que comparte es la red de líneas ya cargada y la ficha de parada.
+ * que comparte es la red de líneas ya cargada y la ubicación.
+ *
+ * Las paradas cercanas ya no están aquí: se buscan en Buscar, junto al resto de
+ * formas de encontrar una parada.
  */
 function renderMapas(): string {
   const maps = state.maps
@@ -1720,26 +1983,6 @@ function renderMapas(): string {
         </div>
       </div>
 
-      <div class="segmented" role="tablist" aria-label="Modo del mapa">
-        ${[
-          { id: 'cercanas', label: 'Paradas cercanas', iconName: 'pin' },
-          { id: 'rutas', label: 'Rutas', iconName: 'route' },
-        ]
-          .map(
-            (item) => `
-              <button
-                class="segmented-item"
-                type="button"
-                role="tab"
-                aria-selected="${maps.mode === item.id}"
-                data-action="maps-mode"
-                data-mode="${item.id}"
-              >${icon(item.iconName)}<span>${esc(item.label)}</span></button>
-            `,
-          )
-          .join('')}
-      </div>
-
       <!-- El contenedor es SIEMPRE el mismo nodo, encajado o a pantalla
            completa: solo cambia cómo se coloca. Moverlo de sitio en el árbol
            obligaría a reconstruir Leaflet en cada apertura. -->
@@ -1748,14 +1991,6 @@ function renderMapas(): string {
              incremental le borraba los hijos en cada latido del reloj y el mapa
              se quedaba en un rectangulo vacio. -->
         <div id="maps-map" data-morph="skip"></div>
-        ${
-          maps.mode === 'cercanas'
-            ? `<button class="map-locate${maps.locating ? ' is-busy' : ''}" type="button"
-                 data-action="maps-locate" aria-label="Centrar en mi ubicación">
-                 ${icon('crosshair')}
-               </button>`
-            : ''
-        }
         ${
           maps.expanded
             ? `<button class="map-close" type="button" data-action="maps-collapse" aria-label="Cerrar el mapa">
@@ -1767,110 +2002,7 @@ function renderMapas(): string {
         }
       </div>
 
-    ${maps.mode === 'cercanas' ? renderNearbyPanel() : renderRoutePanel()}
-  `
-}
-
-/* ------------------------------ Cercanas ------------------------------ */
-
-function renderNearbyPanel(): string {
-  const maps = state.maps
-
-  if (maps.locating && !maps.location) {
-    return `
-      <section class="card"><div class="card-body">
-        <div class="skeleton skeleton-row"></div>
-        <div class="skeleton skeleton-row"></div>
-        <p class="text-tiny">Buscando tu ubicación…</p>
-      </div></section>
-    `
-  }
-
-  if (!maps.location) {
-    // El interruptor de ubicación del teléfono y el permiso de SALBUS son dos
-    // cosas distintas que desde aquí se ven igual —no llega la posición— y se
-    // arreglan en pantallas distintas del sistema. Decir "activa la ubicación"
-    // sin llevar hasta donde se activa deja el problema donde estaba.
-    const blocked = maps.locationBlocked
-
-    return `
-      <section class="card"><div class="card-body">
-        ${
-          maps.locationError
-            ? notice('error', maps.locationError)
-            : `<p class="card-sub is-wrap">Para enseñarte las paradas que tienes al lado, la aplicación
-                 necesita saber dónde estás. La ubicación no sale del teléfono ni se guarda.</p>`
-        }
-        ${
-          blocked
-            ? `<button class="btn btn-primary btn-block" type="button" data-action="open-location-settings">
-                 ${icon('pin')} ${
-                   blocked === 'service'
-                     ? 'Activar la ubicación del teléfono'
-                     : 'Abrir los permisos de SALBUS'
-                 }
-               </button>
-               <button class="btn btn-secondary btn-block" type="button" data-action="maps-locate">
-                 ${icon('crosshair')} Volver a intentarlo
-               </button>`
-            : `<button class="btn btn-primary btn-block" type="button" data-action="maps-locate">
-                 ${icon('crosshair')} Usar mi ubicación
-               </button>`
-        }
-      </div></section>
-    `
-  }
-
-  const nearby = nearestStopsForView()
-
-  if (nearby.length === 0) {
-    return `
-      <section class="card"><div class="card-body">
-        ${emptyState(
-          'pin',
-          'Ninguna parada cerca',
-          'No hay paradas de la red a menos de 900 m de donde estás.',
-        )}
-      </div></section>
-    `
-  }
-
-  return `
-    <section class="card">
-      <div class="card-head"><div class="card-head-copy">
-        <h2 class="card-title">Paradas más cercanas</h2>
-        <p class="card-sub">${esc(locationAgeLabel())}</p>
-      </div></div>
-      <div class="card-body">
-        <div class="nearby-list">
-          ${nearby
-            .map((entry, index) => {
-              const lines = state.network?.getLinesForStop(entry.stop.stopId) ?? []
-              return `
-                <button class="nearby-item" type="button" data-action="maps-open-stop" data-stop="${esc(
-                  entry.stop.stopId,
-                )}">
-                  <span class="nearby-rank">${index + 1}</span>
-                  <span class="nearby-copy">
-                    <span class="nearby-name">${esc(entry.stop.stopName)}</span>
-                    <span class="nearby-meta">${esc(formatMeters(entry.meters))} · ${esc(
-                      formatWalk(entry.minutes),
-                    )} andando</span>
-                    <span class="chip-row">
-                      ${lines
-                        .slice(0, 8)
-                        .map((line) => lineChip(line.lineId, line.color, 'sm'))
-                        .join('')}
-                    </span>
-                  </span>
-                  ${icon('chevron')}
-                </button>
-              `
-            })
-            .join('')}
-        </div>
-      </div>
-    </section>
+    ${renderRoutePanel()}
   `
 }
 
@@ -2089,16 +2221,16 @@ function renderLeg(leg: RouteLeg, index: number): string {
 /* ---------------------------- Ayudas de la pestaña -------------------- */
 
 export function nearestStopsForView(): NearbyStop[] {
-  const location = state.maps.location
+  const location = state.geo.location
   if (!location || !state.network) {
     return []
   }
 
-  return nearestStops(location.point, state.network.stops, 6)
+  return nearestStops(location.point, state.network.stops, 8)
 }
 
 function locationAgeLabel(): string {
-  const location = state.maps.location
+  const location = state.geo.location
   if (!location) {
     return ''
   }
@@ -2470,7 +2602,7 @@ function renderExperimentalCard(): string {
         ${renderSettingRow(
           'map',
           'Pestaña Mapas',
-          'Paradas cercanas a tu ubicación y cálculo de rutas en autobús. Apagada no consume nada.',
+          'Cálculo de rutas en autobús entre dos puntos. Apagada no consume nada.',
           state.settings.experimentalMaps,
           'toggle-maps',
         )}

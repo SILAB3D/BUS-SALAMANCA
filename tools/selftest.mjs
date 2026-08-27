@@ -407,7 +407,7 @@ async function main() {
   const { parseTag, readRelease, isNewer } = await import(
     pathToUrl(path.join(build, 'release-parser.js'))
   )
-  const { resolveVersion, VERSION_CODE_BASE } = await import(
+  const { resolveVersion, VERSION_CODE_BASE, versionFromSubject, commitVersionName } = await import(
     pathToUrl(path.join(projectRoot, 'tools', 'version.mjs'))
   )
 
@@ -428,8 +428,23 @@ async function main() {
     String(VERSION_CODE_BASE))
   check('Gradle cuenta los commits para el versionCode',
     gradle.includes("'rev-list', '--count', 'HEAD'"))
-  check('Gradle toma el versionName de package.json',
-    gradle.includes('readPackageVersion(rootProject.projectDir)'))
+  // El nombre de la version es el del commit que la marca ("v5.1"). Escribirlo
+  // ademas en package.json era escribir lo mismo dos veces, y las dos copias
+  // acabaron diciendo cosas distintas.
+  check('Gradle toma el versionName del commit, con package.json de reserva',
+    gradle.includes('gitVersionName(providers) ?: readPackageVersion(rootProject.projectDir)')
+      && gradle.includes("'log', '-200', '--pretty=%s'"))
+
+  check('un commit con nombre de version da el nombre',
+    versionFromSubject('v5.1') === '5.1'
+      && versionFromSubject('v5') === '5'
+      && versionFromSubject(' 4.9 ') === '4.9')
+  check('un commit normal no renombra la version',
+    versionFromSubject('arreglar el mapa') === null
+      && versionFromSubject('v5.1 y algo mas') === null
+      && versionFromSubject('') === null)
+  check('el nombre sale de la historia real del repositorio',
+    commitVersionName() === version.versionName, String(commitVersionName()))
 
   // Las versiones anteriores a este sistema llegaron a mano hasta la 430: por
   // debajo de ese numero el movil no reconoceria la release como actualizacion.
@@ -465,6 +480,29 @@ async function main() {
   check('solo se ofrece un versionCode estrictamente mayor', isNewer(parsed, 1009) === true)
   check('un versionCode igual no se ofrece', isNewer(parsed, 1010) === false)
   check('un versionCode menor no se ofrece', isNewer(parsed, 1011) === false)
+
+  // Lo que hace que CUALQUIER version instalada salte directamente a la ultima:
+  // no hay cadena de actualizaciones que seguir. Se consulta SIEMPRE la ultima
+  // release publicada y se compara con el versionCode que dice el sistema, sea
+  // el que sea. Una version de hace veinte publicaciones se actualiza en un
+  // paso, igual que la de ayer.
+  check('desde cualquier version se salta directamente a la ultima',
+    isNewer(parsed, 1) === true && isNewer(parsed, 431) === true)
+
+  const latestOnly = await fs.readFile(
+    path.join(projectRoot, 'src', 'services', 'updates.ts'), 'utf8')
+  check('siempre se consulta la ultima release, no la siguiente',
+    latestOnly.includes('/releases/latest') && !latestOnly.includes('releases?page'))
+  check('la comparacion usa el versionCode que dice el sistema',
+    latestOnly.includes('const installed = await readInstalledVersion()')
+      && latestOnly.includes('isNewer(release, installed.versionCode)'))
+
+  // Con nombres de version libres ("5.1", "5") la etiqueta tiene que seguir
+  // leyendose: es de donde sale el versionCode publicado.
+  check('una etiqueta con nombre corto se lee igual',
+    parseTag('v5-b1020')?.versionName === '5' && parseTag('v5-b1020')?.versionCode === 1020)
+  check('una etiqueta con nombre de dos cifras se lee igual',
+    parseTag('v5.1-b1021')?.versionName === '5.1')
 
   const mainSourceForUpdates = await fs.readFile(
     path.join(projectRoot, 'src', 'main.ts'), 'utf8')
@@ -935,14 +973,25 @@ async function main() {
     check('"Mi ubicacion" rellena el campo en cuanto llega la posicion',
       mainSource.includes('let pendingLocationField')
         && mainSource.includes('pendingLocationField && state.maps.picking === pendingLocationField'))
+    // La ubicacion la usan dos pantallas (Buscar y Mapas), asi que no puede
+    // vivir dentro del estado de una de ellas: salir de Mapas lo vacia entero.
+    check('la ubicacion vive fuera de la pestana experimental',
+      mainSource.includes('state.geo.location')
+        && !mainSource.includes('state.maps.location'))
   }
 
-  // Solo se consulta la parada desplegada: pedir las diez guardadas dejaba sin
-  // turno al aviso de proximo bus contra una fuente que limita por IP.
-  check('en Inicio solo se actualiza la parada desplegada',
-    /if \(state\.tab === 'inicio' && state\.expandedStopId\) \{/.test(mainSourceForUpdates)
-      && !/for \(const favourite of state\.favourites\) \{\s*\n\s*add\(favourite\.stopId/
-        .test(mainSourceForUpdates))
+  // Al abrir Inicio se ponen al dia TODAS las guardadas: la que se despliegue
+  // tiene que abrirse con algo puesto, no en blanco esperando su turno.
+  check('al abrir Inicio se actualizan todas las paradas guardadas',
+    /for \(const favourite of state\.favourites\) \{\s*\n\s*add\(favourite\.stopId/
+      .test(mainSourceForUpdates))
+  // Pero con una desplegada manda ella sola: esperar turno detras de nueve
+  // paradas que nadie mira son veinte segundos mirando un hueco vacio.
+  check('la parada desplegada aparta el repaso de las demas',
+    /if \(state\.expandedStopId\) \{\s*\n\s*add\(state\.expandedStopId, FRESHNESS\.focused, 'high'\)/
+      .test(mainSourceForUpdates)
+      && mainSourceForUpdates.includes('cancelRefreshCycle()')
+      && mainSourceForUpdates.includes('shouldStop: () => refreshCycle !== cycle'))
 
   section('10 · Callejero peatonal')
 
@@ -1099,8 +1148,8 @@ async function main() {
     // pruebas. Se pide al entrar en "Rutas".
     {
       const mainSource = await fs.readFile(path.join(projectRoot, 'src', 'main.ts'), 'utf8')
-      check('el callejero se carga solo al entrar en Rutas',
-        mainSource.includes("if (mode === 'rutas') {")
+      check('el callejero se carga solo al entrar en la pestana Mapas',
+        mainSource.includes("if (tab === 'mapas' && previous !== 'mapas') {")
           && mainSource.includes('void loadStreetGraph()')
           && !mainSource.includes('await loadStreetGraph()'))
     }
@@ -1249,8 +1298,15 @@ async function main() {
     check('el recorrido entero solo se pide mirándolo',
       mainSource.includes("const watchingRoute = state.tab === 'seguimiento' && document.visibilityState === 'visible'")
         && mainSource.includes('watchingRoute ? FRESHNESS.routeVisible : FRESHNESS.routeBackground'))
-    check('fuera de la pestaña se busca solo hasta donde puede estar',
-      mainSource.includes('routeScanDepth(nextArrivalMinutes(job.stopId, job.lineId))'))
+    // La ventana es la misma mire quien mire: lo que cambia es hasta donde se
+    // llega dentro de ella. Fuera de la pestana se corta al encontrarlo.
+    check('la ventana de busqueda es siempre la misma',
+      mainSource.includes('ROUTE_WINDOW_STOPS + 1')
+        && !mainSource.includes('routeScanDepth'))
+    check('fuera de la pestaña la búsqueda para en el autobús',
+      mainSource.includes('located.add(scan.jobId)')
+        && mainSource.includes('shouldSkip: (stopId) =>')
+        && mainSource.includes('watchingRoute ? undefined : { jobId: job.id, lineId: job.lineId }'))
     check('salir de la pestaña Seguir ya no pausa nada',
       !mainSource.includes('pauseFollows'))
   }
@@ -1259,13 +1315,12 @@ async function main() {
     const {
       locateBus,
       stopsAwayFrom,
-      routeScanDepth,
+      shouldScanRoute,
       describeStopsAway,
       AT_STOP_MINUTES,
-      ROUTE_SCAN_MAX_STOPS,
+      ROUTE_WINDOW_STOPS,
       ROUTE_SCAN_MAX_MINUTES,
       ROUTE_FIX_MAX_AGE_MS,
-      MINUTES_PER_STOP,
     } = await import(pathToUrl(path.join(build, 'bus-position.js')))
 
     // La ventana va de la parada mas lejana a la propia, que es la ultima.
@@ -1300,25 +1355,24 @@ async function main() {
     check('varias van en plural', describeStopsAway(4) === 'a 4 paradas')
     check('sin dato no se escribe nada', describeStopsAway(null) === '')
 
-    // La profundidad de busqueda se ajusta a lo que falta: cerca cuesta una o
-    // dos consultas, y lejos ni se busca.
-    check('con el autobús encima basta con mirar una parada atrás',
-      routeScanDepth(0) === 1)
-    // 5 / 1,5 = 3,3 paradas, redondeado a 4, mas una de margen: la media entre
-    // paradas es eso, una media. Es el TOPE de la busqueda, no lo que cuesta:
-    // se para en la primera parada que tenga el autobus encima.
-    check('a cinco minutos se miran como mucho cinco paradas', routeScanDepth(5) === 5)
-    check('nunca se pasa del tope de paradas',
-      routeScanDepth(ROUTE_SCAN_MAX_MINUTES) === ROUTE_SCAN_MAX_STOPS)
-    check('lejos no se busca: costaría el máximo cuando menos sirve',
-      routeScanDepth(ROUTE_SCAN_MAX_MINUTES + 1) === 0)
-    check('sin dato de llegada no se busca', routeScanDepth(-1) === 0)
+    // Ya no se recorta la ventana por los minutos que faltan: eso suponia un
+    // ritmo fijo y dejaba de encontrar al autobus en cuanto llevaba retraso.
+    // Lo unico que decide el tiempo de espera es SI se busca.
+    check('con el autobús encima se busca', shouldScanRoute(0) === true)
+    check('a cinco minutos se busca', shouldScanRoute(5) === true)
+    check('en el límite todavía se busca',
+      shouldScanRoute(ROUTE_SCAN_MAX_MINUTES) === true)
+    check('lejos no se busca: costaría la ventana entera cuando menos sirve',
+      shouldScanRoute(ROUTE_SCAN_MAX_MINUTES + 1) === false)
+    check('sin dato de llegada no se busca', shouldScanRoute(-1) === false)
 
     // Buscar es caro: cada parada es una peticion contra una fuente que admite
-    // una cada dos segundos, y salen del turno que necesita TU parada.
-    check('el tope de paradas cabe en la cola de la fuente',
-      ROUTE_SCAN_MAX_STOPS * 2 <= 15,
-      `${ROUTE_SCAN_MAX_STOPS} paradas = ${ROUTE_SCAN_MAX_STOPS * 2} s`)
+    // una cada dos segundos, y salen del turno que necesita TU parada. Por eso
+    // la busqueda para en cuanto encuentra: la ventana entera solo se recorre
+    // con la pestana Seguir delante, que es cuando se dibuja.
+    check('la ventana entera cabe en un ciclo de refresco',
+      ROUTE_WINDOW_STOPS * 2 <= 20,
+      `${ROUTE_WINDOW_STOPS} paradas = ${ROUTE_WINDOW_STOPS * 2} s`)
 
     // La copia portada a Java tiene que decir lo mismo: si se separan, la misma
     // parada cuenta distinto segun si la app esta abierta o cerrada.
@@ -1332,13 +1386,14 @@ async function main() {
         return match ? Number(match[1].replace(/_/g, '')) : null
       }
 
-      check('el servicio mira el mismo número de paradas que la web',
-        constant('ROUTE_SCAN_MAX_STOPS') === ROUTE_SCAN_MAX_STOPS,
-        `java ${constant('ROUTE_SCAN_MAX_STOPS')} vs web ${ROUTE_SCAN_MAX_STOPS}`)
+      check('el servicio mira la misma ventana que la web',
+        constant('ROUTE_WINDOW_STOPS') === ROUTE_WINDOW_STOPS,
+        `java ${constant('ROUTE_WINDOW_STOPS')} vs web ${ROUTE_WINDOW_STOPS}`)
       check('deja de buscar a los mismos minutos',
         constant('ROUTE_SCAN_MAX_MINUTES') === ROUTE_SCAN_MAX_MINUTES)
-      check('supone el mismo tiempo entre paradas',
-        constant('MINUTES_PER_STOP') === MINUTES_PER_STOP)
+      check('el servicio recorre la ventana entera, sin recortarla por minutos',
+        /int depth = job\.route\.length;/.test(service)
+          && !service.includes('MINUTES_PER_STOP'))
       check('olvida la localización a la vez que la web',
         constant('ROUTE_FIX_MAX_AGE_MS') === ROUTE_FIX_MAX_AGE_MS)
       check('usa el mismo umbral de "el autobús está aquí"',

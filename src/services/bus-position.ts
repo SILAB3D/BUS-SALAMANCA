@@ -30,25 +30,20 @@
 export const AT_STOP_MINUTES = 1
 
 /**
- * Paradas anteriores que ensena el recorrido de un aviso.
+ * Paradas anteriores que se miran para localizar el autobus de un aviso.
  *
- * Es lo que se DIBUJA cuando alguien esta mirando la pestana, y por tanto lo
- * que se consulta entonces: ocho paradas son ~16 s de cola, sostenibles solo
- * con la pantalla delante. Fuera de ahi nadie mira el recorrido y basta con
- * buscar hasta ROUTE_SCAN_MAX_STOPS.
+ * Ocho, siempre las mismas: son las que DIBUJA la pestana Seguir y las que se
+ * recorren para el "a N paradas" de la notificacion. Una sola ventana, un solo
+ * recuento, digan lo que digan la pestana abierta o el servicio nativo.
+ *
+ * Ocho no significa ocho peticiones. Con la pestana delante si —hay que dibujar
+ * las ocho—, pero fuera de ella la busqueda va de tu parada hacia atras y PARA
+ * en la primera que tenga el autobus encima, que es lo unico que hace falta
+ * para decir a cuantas paradas viene. Cuando esta cerca, que es cuando el dato
+ * sirve para algo, cuesta una o dos consultas; el ocho solo dice hasta donde se
+ * puede llegar buscando cuando viene de lejos.
  */
 export const ROUTE_WINDOW_STOPS = 8
-
-/**
- * Paradas anteriores como mucho que se miran para localizar el autobus cuando
- * NO se esta mirando el recorrido.
- *
- * Cada una es una peticion contra una fuente que solo admite una cada dos
- * segundos, y esas peticiones salen del mismo turno que necesita el tiempo de
- * TU parada. Seis son ~12 s de cola: por encima de eso empieza a llegar tarde
- * justamente el dato por el que se creo el aviso.
- */
-export const ROUTE_SCAN_MAX_STOPS = 6
 
 /**
  * Por encima de estos minutos no se busca el autobus.
@@ -61,16 +56,6 @@ export const ROUTE_SCAN_MAX_STOPS = 6
 export const ROUTE_SCAN_MAX_MINUTES = 20
 
 /**
- * Minutos que tarda de media un autobus urbano entre dos paradas.
- *
- * Solo se usa para acotar hasta donde buscar: con cinco minutos de espera no
- * tiene sentido consultar la parada de hace diez. No es una estimacion que se
- * ensene en ninguna parte ni sustituye a la deteccion; si lo fuera, el recuento
- * seria una division y no haria falta consultar nada.
- */
-export const MINUTES_PER_STOP = 1.5
-
-/**
  * Antiguedad maxima de una localizacion antes de dejar de ensenarla.
  *
  * Un autobus en marcha deja de estar donde estaba: pasado este tiempo, repetir
@@ -81,21 +66,20 @@ export const MINUTES_PER_STOP = 1.5
 export const ROUTE_FIX_MAX_AGE_MS = 120_000
 
 /**
- * Cuantas paradas anteriores hay que mirar para un tiempo de espera dado.
+ * Hay que buscar por donde viene el autobus, para un tiempo de espera dado?
  *
- * Cero significa "no busques": o no hay dato de llegada, o el autobus esta
- * demasiado lejos como para que el recuento aporte algo.
+ * Con veinte minutos por delante no: el autobus puede ni haber salido, "a trece
+ * paradas" no cambia lo que nadie va a hacer, y la busqueda costaria la ventana
+ * entera justo cuando menos falta hace. El recuento aparece cuando empieza a
+ * servir para algo, o sea cuando hay que decidir si bajar ya a la parada.
  *
- * La busqueda va de la parada propia hacia atras y se para en la primera que
- * tenga el autobus encima, asi que cuando esta cerca —que es cuando el dato
- * importa— basta con una o dos consultas.
+ * Lo que NO se hace es recortar la ventana por los minutos que faltan. Eso daba
+ * por sentado que el autobus avanza a un ritmo fijo, y en cuanto acumulaba
+ * retraso la busqueda se paraba antes de llegar a el: el aviso se quedaba sin
+ * saber por donde venia precisamente cuando venia con retraso.
  */
-export function routeScanDepth(minutesUntil: number): number {
-  if (!Number.isFinite(minutesUntil) || minutesUntil < 0 || minutesUntil > ROUTE_SCAN_MAX_MINUTES) {
-    return 0
-  }
-
-  return Math.min(ROUTE_SCAN_MAX_STOPS, Math.ceil(minutesUntil / MINUTES_PER_STOP) + 1)
+export function shouldScanRoute(minutesUntil: number): boolean {
+  return Number.isFinite(minutesUntil) && minutesUntil >= 0 && minutesUntil <= ROUTE_SCAN_MAX_MINUTES
 }
 
 /**

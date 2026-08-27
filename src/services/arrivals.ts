@@ -160,19 +160,36 @@ export async function fetchStopArrivals(stopId: string, options: FetchOptions = 
  * completan a traves de `onFeed`, para que la interfaz pueda ir pintando sin
  * esperar al lote completo. `onStart` avisa de la parada que entra en turno,
  * para poder distinguir en pantalla lo que ya esta al dia de lo que espera.
+ *
+ * El lote se decide sobre la marcha, no de antemano: entre parada y parada
+ * pasan dos segundos, y en ese rato lo que hacia falta al empezar puede haber
+ * dejado de hacer falta.
+ *
+ *  - `shouldStop` corta el lote entero. Lo usa quien abre una parada concreta:
+ *    lo que se este consultando pasa a segundo plano en el acto.
+ *  - `shouldSkip` descarta UNA parada sin cortar el resto. Lo usa la busqueda
+ *    del autobus hacia atras, que se para en cuanto lo encuentra.
+ *
+ * Las dos se consultan justo antes de pedir cada parada, con lo que ya se sabe.
  */
 export async function fetchStopsSequentially(
   stopIds: string[],
   options: FetchOptions & {
     onFeed?: (feed: StopFeed) => void
     onStart?: (stopId: string) => void
+    shouldStop?: () => boolean
+    shouldSkip?: (stopId: string) => boolean
   } = {},
 ): Promise<StopFeed[]> {
   const results: StopFeed[] = []
 
   for (const stopId of stopIds) {
-    if (options.signal?.aborted) {
+    if (options.signal?.aborted || options.shouldStop?.()) {
       break
+    }
+
+    if (options.shouldSkip?.(stopId)) {
+      continue
     }
 
     options.onStart?.(stopId)

@@ -99,8 +99,36 @@ $versionCode = git rev-list --count HEAD
 ```
 
 - Crece solo con cada push, sin intervención.
-- `versionName` sigue saliendo de `package.json`, que es lo que ve el usuario.
-- La etiqueta de la release combina ambos: `v3.4.0-b23`.
+- La etiqueta de la release combina ambos: `v5.1-b1018`.
+
+**El `versionName` sale del commit que marca la versión.** Aquí las versiones se
+marcan escribiendo su nombre como título del commit (`v5.1`, `v5`, `4.9`), así
+que el nombre ya está escrito: repetirlo en `package.json` era escribirlo dos
+veces, y las dos copias acabaron diciendo cosas distintas —los commits iban por
+la v5.1 con `package.json` todavía en la 4.8.0—.
+
+```
+git log -200 --pretty=%s   →   primer título que sea sólo dígitos y puntos
+```
+
+Se busca hacia atrás y no sólo en la punta: después de marcar la v5.1 pueden
+venir commits normales, que no renombran nada. La versión sigue siendo la 5.1
+—con un `versionCode` mayor, que es lo que hace que la actualización se
+ofrezca— hasta que otro commit la renombre. `package.json` queda de reserva
+para cuando se compila desde un zip, sin historia de git.
+
+La regla vive por duplicado (`tools/version.mjs` y `android/app/build.gradle`)
+porque Gradle no puede importar JavaScript; el autodiagnóstico comprueba que las
+dos digan lo mismo.
+
+### Cualquier versión salta directamente a la última
+
+No hay cadena de actualizaciones que seguir. La app consulta **siempre**
+`/releases/latest` y compara ese `versionCode` con el que le dice el sistema, sea
+el que sea: una instalación de hace veinte publicaciones se pone al día en un
+solo paso, exactamente igual que la de ayer. Es lo que se gana con un
+`versionCode` que sólo crece y un APK completo por release —no diferencial—: no
+existe un salto intermedio que se pueda quedar a medias.
 
 **Contrapartida:** no se puede reescribir la historia de la rama principal. Un
 `rebase` o un `push --force` que reduzca el número de commits deja las releases
@@ -311,7 +339,7 @@ Ninguno de estos es teórico; todos ocurrieron.
 | El `versionCode` sale 1 en CI | Falta `fetch-depth: 0` en el checkout |
 | El aviso sigue pidiendo el permiso ya concedido | El permiso se da fuera de la app; hay que releerlo al volver al primer plano |
 | Tras actualizar, la app ofrece la MISMA actualización | Se comparaba contra el `versionCode` del bundle (congelado si la WebView cachea la página), o se reinstalaba un APK viejo guardado en caché |
-| Dos releases seguidas se llaman igual | El `versionName` sale de `package.json` y nadie lo subió; sólo cambia el `-b<versionCode>`. Enseña la compilación en la interfaz |
+| Dos releases seguidas se llaman igual | Ningún commit nuevo marcó versión: el `versionName` se hereda y sólo cambia el `-b<versionCode>`. Es lo esperado; por eso la interfaz enseña también la compilación |
 
 Y una recomendación de método: **los logs de Actions exigen autenticación, pero
 las anotaciones de un repositorio público se leen por la API sin credenciales.**

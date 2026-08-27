@@ -107,12 +107,13 @@ eso es lo que permite que lo encendido llegue a tiempo.
 
 | Qué | Cada cuánto | Cuándo |
 | --- | --- | --- |
-| Paradas guardadas | una vez al abrir la app | Una pasada por todas, en serie |
-| Parada desplegada | 15 s | Solo la que esté abierta (una a la vez) |
+| Paradas guardadas | 45 s | Todas, cada vez que se abre Inicio y ninguna está desplegada |
+| Parada desplegada | 15 s | Solo ella: al abrirla se corta el repaso de las demás |
 | Ficha de una parada | 15 s | Buscador y mapa; el globo del mapa ya la adelanta |
 | Aviso de próximo bus | 15 s | Solo si está activo; con la app cerrada, el servicio nativo |
-| Por dónde viene · mirándolo | 20 s por parada | El recorrido entero (8 paradas), con la pestaña Seguir delante |
-| Por dónde viene · de fondo | 30 s | Solo el «a N paradas»: autobús a menos de 20 min y hasta donde puede estar |
+| Por dónde viene · mirándolo | 20 s por parada | Las 8 paradas anteriores enteras, con la pestaña Seguir delante |
+| Por dónde viene · de fondo | 30 s | Las mismas 8, pero parando en la parada donde aparezca el autobús |
+
 | Puntualidad | 30 s (15 s con bus entrando) | Solo dentro de la franja del control |
 
 Los números viven **una sola vez**, en `FRESHNESS` de `src/state.ts`. Ajustes →
@@ -132,17 +133,110 @@ consulta cada dos segundos, así que la primera parada que se desplegaba se
 quedaba mirando un esqueleto. Esa espera se adelanta al arranque, donde ya hay
 una pantalla de bienvenida y una lista que mirar.
 
-Es **una sola vez por sesión**. A partir de ahí, en vivo solo se mantiene la
-parada desplegada: plegada no enseña ni un tiempo, y refrescar diez paradas para
-no mirar ninguna es gastar la cola contra una fuente que limita por IP.
+Es **una sola vez por sesión**, y no es la única pasada: al entrar en Inicio se
+repasan también todas (ver abajo).
+
+### Inicio pone al día todas las guardadas, salvo cuando abres una
+
+Al entrar en Inicio se repasan **todas** las paradas guardadas. Es lo que hace
+que desplegar una la abra con algo puesto en vez de un hueco vacío: la cola va a
+dos segundos por consulta, así que un dato que no se haya pedido antes de tocar
+la tarjeta se hace esperar delante de los ojos.
+
+Y en cuanto se despliega una, **manda ella sola**: el repaso en curso se corta
+(`cancelRefreshCycle` invalida el ciclo, y el lote se para en la siguiente parada
+sin llegar a pedirla) y esa parada pasa a la cabeza de la cola con prioridad
+alta. Sin eso, la parada recién abierta esperaba turno detrás de nueve que nadie
+está mirando: veinte segundos de reloj delante de un hueco.
+
+### Mientras se consulta, se dice
+
+Una consulta tarda lo que tarda —hay una sola cola, a una petición cada dos
+segundos— y ese rato, sin decir nada, se lee como que la app se ha colgado. La
+lista de llegadas enseña una barra de progreso en dos casos, que para quien mira
+significan lo mismo (*lo que hay en pantalla no es lo definitivo*):
+
+- la parada está **en la cola** (esperando turno o ya pidiendo);
+- el dato en pantalla **pasa del minuto** (`ARRIVALS_STALE_MS`), así que toca
+  refresco aunque todavía no le hayan dado turno.
+
+Sin ningún dato todavía va el esqueleto completo, con el motivo escrito
+(*«Esperando turno en la cola de consultas…»*). Con dato puesto, la lista sigue
+siendo legible —es lo mejor que se sabe— pero se atenúa un punto para que deje de
+leerse como firme.
+
+
+## Buscar: tres formas de llegar a la misma parada
+
+**Parada**, **Cerca** y **Mapa**. Antes eran *Nombre*, *Línea* y *Mapa*, con las
+paradas cercanas viviendo aparte, en la pestaña experimental.
+
+**Nombre y Línea se fusionaron en una sola búsqueda.** Eran la misma pregunta
+—dónde está esta parada— y obligaban a decidir cuál antes de escribir nada: quien
+sabía el nombre no podía acotar por línea, y quien elegía línea se comía el
+recorrido entero sin poder filtrarlo. Ahora el texto y el filtro de línea
+conviven y se combinan:
+
+- solo texto → paradas de toda la red que casan con lo escrito;
+- solo línea y sentido → su recorrido, numerado en orden;
+- los dos → ese recorrido filtrado por el texto, **conservando el número de
+  orden real**, que es lo que dice si la parada va antes o después.
+
+El filtro de línea va plegado, ocupando una línea que dice qué filtro hay puesto
+—nunca se filtra sin saberlo—. Su estado lo lleva `state.search.lineFilterOpen` y
+no un `<details>`: el repintado es incremental y borra los atributos que ya no
+vienen en el HTML nuevo, así que un `open` puesto por el navegador se perdía en
+el siguiente latido del reloj y el panel se cerraba solo cada segundo.
+
+**Las paradas cercanas se mudaron aquí desde la pestaña Mapas.** Allí vivían bajo
+un mapa que ocupaba media pantalla, y al tocar una parada su ficha se abría por
+encima… con los mandos del mapa montados sobre ella: los botones de ampliar y
+centrar (z-index 1200), los controles de Leaflet (800) y sus globos (700) flotan
+sobre el mapa y no sabían nada de la ficha, que se abre a 620. La solución es de
+dos partes: `isolation: isolate` sobre `.map-shell`, que encierra todos esos
+números puertas adentro y ordena el mapa entero **como un bloque** frente al
+resto de la página; y, con la ficha abierta, apagar además los mandos del mapa
+(`.is-behind-dialog`), porque un botón visible detrás de un diálogo sigue
+pidiendo que lo toquen. En Buscar, encima, la lista de cercanas no tiene mapa que
+estorbe.
 
 ## Buscar por mapa
 
-**Sin línea ni sentido elegidos el mapa no está vacío: enseña las 349 paradas de
-la red**, como puntos sin número, y se puede tocar cualquiera. Es la forma
+**Sin línea ni sentido elegidos el mapa enseña la red entera, pero no de
+cualquier manera**: se agrupa y se recorta al encuadre (ver abajo). Es la forma
 natural de usar un mapa —«esta es mi calle, esta es mi parada»— y antes obligaba
 a saber de antemano qué línea pasa por ella. El botón «Ampliar» funciona también
-ahí, que es justo donde más falta hace para acertarle con el dedo.
+ahí, que es justo donde más falta hace para acertarle con el dedo. Si ya se sabe
+dónde estás, el mapa arranca centrado ahí: la parada que se busca en un mapa de
+toda la ciudad casi siempre es una de las de al lado.
+
+### Agrupar y recortar: por qué 349 chinchetas no caben
+
+Dibujar las 349 paradas desde el zoom mínimo dejaba el mapa inservible, y no
+tanto por lo que se veía —a esa distancia las chinchetas son una mancha— como por
+lo que costaba: Leaflet no descarta nada por su cuenta, cada marcador es un nodo
+del documento, y cada arrastre del dedo obliga a recolocarlos todos. Dos reglas
+lo arreglan:
+
+- **Agrupar por debajo de `CLUSTER_MAX_ZOOM` (16).** Las paradas caen en una
+  rejilla cuya casilla se estrecha con cada nivel de acercamiento, así que los
+  grupos se van partiendo solos hasta salir una a una. Cada grupo dice cuántas
+  lleva dentro y, al tocarlo, encuadra su contenido: el mismo desglose de golpe.
+  Un grupo de una sola parada no es un grupo y se dibuja como parada.
+- **Recortar al encuadre.** Solo se dibuja lo que se está mirando, con un margen
+  (`bounds.pad(0.35)`) para que arrastrar un poco no deje huecos. Medido: 349
+  marcadores pasan a 33 con el mapa cerca, y a unas 65 formas —grupos más paradas
+  sueltas— con la ciudad entera en pantalla.
+
+Con un recorrido elegido **no se agrupa ni se recorta**: son treinta paradas, el
+número de orden *es* la información y el trazado tiene que verse entero.
+
+El repintado tiene su propia firma (`mapPaintKey`), aparte de la del encuadre
+(`mapSignature`): son dos preguntas distintas —si hay que reencuadrar el mapa y
+si hay que volver a colocar los marcadores— y acercar el mapa cambia la segunda
+sin tocar la primera. El encuadre entra en la firma redondeado, o cada fotograma
+de una inercia contaría como un encuadre nuevo.
+
 
 Al abrir el globo de una parada **se lanza ya la consulta de sus tiempos**, antes
 de pulsar «Ver tiempos». Quien abre el globo casi siempre acaba pulsando el
@@ -164,6 +258,12 @@ alejado, y ahí treinta chinchetas se solapan, el tamaño se escala con el zoom
 parada se abre un globo con su nombre, su código y las líneas que pasan por ella;
 los tiempos no van en el globo, porque abrirían una consulta por cada parada que
 se tocara.
+
+Lo que va encima de las teselas —grupos, chinchetas, «estás aquí»— lleva colores
+fijos y no los del tema: las teselas de OpenStreetMap son siempre claras, también
+con la aplicación en modo oscuro, y con `var(--surface)` los números salían azul
+oscuro sobre azul oscuro.
+
 
 ## La tarjeta de una parada guardada
 
@@ -188,6 +288,13 @@ porque plantarse en la acera equivocada es peor que una tarjeta desigual.
 
 El botón de actualizar solo aparece **desplegada**. Plegada no se enseña ni un
 tiempo, así que refrescar era pedirle a la fuente un dato que nadie iba a ver.
+
+De las llegadas se enseñan **cinco** (`ARRIVALS_PREVIEW`); el resto se piden con
+«Ver más». Esa vista compacta es la predeterminada y **se recupera sola**: el
+estado guarda un único hueco de «desplegada» (`arrivalsExpandedStopId`, no un
+registro por parada), y abrir cualquier parada lo vacía. Haber desplegado una no
+deja desplegadas las que se abran después, que era lo que convertía la lista de
+paradas guardadas en una tira interminable.
 
 ## Repintado de la interfaz
 
@@ -353,19 +460,34 @@ Línea 4 · Llegando · en tu parada
 Los minutos dicen cuándo llega; las paradas dicen si ese número se puede creer.
 Un «en 2 min · a 5 paradas» avisa de que el contador va a dar un salto.
 
-Buscar cuesta peticiones contra una fuente que solo admite una cada dos
-segundos, y salen del mismo turno que necesita el tiempo de **tu** parada. Tres
-reglas lo mantienen barato:
+**La ventana son siempre las ocho paradas anteriores** (`ROUTE_WINDOW_STOPS`),
+las mismas que dibuja la pestaña Seguir. Buscar cuesta peticiones contra una
+fuente que solo admite una cada dos segundos, y salen del mismo turno que
+necesita el tiempo de **tu** parada, así que ocho paradas no significan ocho
+peticiones. Lo que cambia es hasta dónde hay que llegar dentro de la ventana:
 
-- **Se busca de tu parada hacia atrás y se para en la primera que lo tenga
-  encima.** Siendo la más cercana de las que lo tienen, es la más avanzada. Ese
-  orden es lo que hace la búsqueda barata: con el autobús cerca —justo cuando el
-  dato sirve— se encuentra a la primera o a la segunda consulta.
-- **No se mira más atrás de donde puede estar** (`routeScanDepth`): con cinco
-  minutos por delante no tiene sentido consultar la parada de hace diez.
-- **Por encima de 20 minutos no se busca.** El autobús puede ni haber salido, «a
-  trece paradas» no cambia lo que nadie va a hacer, y costaría el máximo de
-  peticiones justo cuando menos falta hace.
+- **Con la pestaña Seguir delante se recorre entera**, porque se dibuja parada a
+  parada y hay que poder verlas todas.
+- **Fuera de ella —otra pestaña, o la app en segundo plano— se busca de tu parada
+  hacia atrás y se PARA en la primera que tenga el autobús encima.** Siendo la
+  más cercana de las que lo tienen, es la más avanzada, y las de más atrás ya no
+  cambian la respuesta. Con el autobús cerca —justo cuando el dato sirve— se
+  encuentra a la primera o a la segunda consulta.
+- **Por encima de 20 minutos no se busca** (`shouldScanRoute`). El autobús puede
+  ni haber salido, «a trece paradas» no cambia lo que nadie va a hacer, y
+  costaría la ventana entera justo cuando menos falta hace.
+
+Lo que **ya no se hace** es recortar la ventana por los minutos que faltan. Ese
+cálculo —«a minuto y medio por parada, con cinco minutos por delante basta con
+mirar cuatro»— daba por sentado un ritmo fijo, y en cuanto el autobús acumulaba
+retraso o tráfico la búsqueda se paraba antes de llegar a él: el aviso se quedaba
+sin decir por dónde venía justo cuando más se pregunta. El coste real lo pone el
+corte al encontrarlo, no un tope calculado de antemano.
+
+En la app, el corte lo aplica el propio lote de refresco: las paradas del rastreo
+entran en el plan marcadas con su aviso (`scan`), y en cuanto una devuelve el
+autobús las que quedan de ese aviso se saltan sin pedirse (`shouldSkip`). El
+servicio nativo hace lo mismo con su propio bucle, que sale en cuanto encuentra.
 
 Un 429 **interrumpe** la búsqueda en vez de seguir hacia atrás: dar por
 descartada una parada que no se ha llegado a mirar dejaría el autobús «más lejos»
@@ -412,25 +534,31 @@ no existe: no aparece en la barra, no se puede abrir aunque quedara guardada com
 última pestaña, no crea ningún mapa y no pide la ubicación. Al apagarla —incluso
 estando dentro— se sueltan en el acto el mapa, el `watchPosition` y lo calculado.
 
-Dos funciones:
+Una sola función: **el planificador de rutas**. Las paradas cercanas vivían aquí
+y se mudaron a Buscar, que es donde se busca una parada —y donde, además, no hay
+un mapa montándose sobre la ficha—.
 
-**Paradas cercanas.** Ubicación por `navigator.geolocation`; en Android es
-Capacitor quien saca el diálogo del permiso al llamarla, así que no hace falta
-plugin propio, solo `ACCESS_COARSE_LOCATION` y `ACCESS_FINE_LOCATION` en el
-manifiesto. Se piden **las dos** cosas: `getCurrentPosition`, que responde
-enseguida (vale incluso una lectura cacheada), y `watchPosition`, que la va
-afinando. Solo con el seguimiento la primera posición puede tardar o no llegar
-según el sistema y la pantalla se queda en "Buscando tu ubicación…" —pasó en las
-pruebas—; solo con la lectura suelta, las "paradas más cercanas" salían de otro
-barrio, porque el primer dato trae cientos de metros de error. Una posición peor
-nunca pisa a una mejor, o las paradas se moverían hacia atrás en pantalla.
-El mapa dibuja el punto con su círculo de precisión —enseñar un punto exacto
-cuando el sistema dice "en algún sitio de estos 300 m" es mentir— y las seis
-paradas más próximas numeradas.
+**La ubicación es de la app, no de esta pestaña.** Vive en `state.geo` y la usan
+las dos pantallas: las paradas cercanas de Buscar y el «desde mi ubicación» de
+las rutas. Antes vivía dentro de `state.maps`, que se vacía entero al salir de la
+pestaña, así que cambiar de pantalla obligaba a volver a localizar.
 
-Los dos mapas de la pestaña llevan **botón de ampliar**, igual que el del
-buscador y por el mismo mecanismo: el contenedor no se mueve del árbol, solo
-cambia cómo se coloca, porque moverlo obligaría a reconstruir Leaflet.
+Se obtiene con `navigator.geolocation`; en Android es Capacitor quien saca el
+diálogo del permiso al llamarla, así que no hace falta plugin propio, solo
+`ACCESS_COARSE_LOCATION` y `ACCESS_FINE_LOCATION` en el manifiesto. Se piden
+**las dos** cosas: `getCurrentPosition`, que responde enseguida (vale incluso una
+lectura cacheada), y `watchPosition`, que la va afinando. Solo con el seguimiento
+la primera posición puede tardar o no llegar según el sistema y la pantalla se
+queda en "Buscando tu ubicación…" —pasó en las pruebas—; solo con la lectura
+suelta, las "paradas más cercanas" salían de otro barrio, porque el primer dato
+trae cientos de metros de error. Una posición peor nunca pisa a una mejor, o las
+paradas se moverían hacia atrás en pantalla. El `watchPosition` se suelta cuando
+no queda ninguna de las dos pantallas mirando.
+
+Los mapas llevan **botón de ampliar**, igual que el del buscador y por el mismo
+mecanismo: el contenedor no se mueve del árbol, solo cambia cómo se coloca,
+porque moverlo obligaría a reconstruir Leaflet.
+
 
 Cuando la ubicación no llega, la app **distingue qué falta y lleva hasta allí**.
 El interruptor general de ubicación del teléfono y el permiso de SALBUS son dos
@@ -442,8 +570,7 @@ que aparece abre la pantalla concreta: los ajustes de ubicación, o la ficha de
 permisos de la app. Decir «activa la ubicación» sin llevar hasta donde se activa
 deja el problema donde estaba.
 
-**Rutas.** Origen y destino se eligen entre "mi ubicación" y las paradas de la
-red; no hay buscador de calles porque no hay geocodificador sin conexión. El
+Origen y destino se eligen entre "mi ubicación" y las paradas de la red; no hay buscador de calles porque no hay geocodificador sin conexión. El
 cálculo (`src/services/routing.ts`) es un Dijkstra sobre las paradas donde el
 coste es el TIEMPO: cada arista de autobús va de la parada de subida a la de
 bajada de un mismo sentido, así que el camino ya sale troceado en tramos. Hay
@@ -581,9 +708,26 @@ alfa, así que un icono con fondo se vería como un cuadrado blanco.
 > anterior pulsaba «Instalar», reinstalaba la vieja, y volvía a ver el mismo
 > aviso al abrir.
 >
-> El `versionName` sale de `package.json` y no cambia solo: dos releases seguidas
-> pueden llamarse igual. Lo que las distingue siempre es la **compilación**
-> (`-b1012`), y por eso la ventana de aviso y la pantalla de Ajustes la enseñan.
+> **El `versionName` es el del commit que marca la versión.** Aquí las versiones
+> se marcan escribiendo su nombre como título del commit (`v5.1`, `v5`, `4.9`),
+> así que el nombre ya está escrito: repetirlo en `package.json` era escribirlo
+> dos veces, y las dos copias acabaron diciendo cosas distintas —los commits iban
+> por la v5.1 con `package.json` todavía en la 4.8.0—. Se busca hacia atrás el
+> primer título que sea sólo dígitos y puntos, porque después de marcar una
+> versión pueden venir commits normales, que no renombran nada. `package.json`
+> queda de reserva para cuando se compila desde un zip, sin historia de git.
+>
+> Dos releases seguidas pueden llamarse igual —ningún commit nuevo marcó
+> versión—. Lo que las distingue siempre es la **compilación** (`-b1018`), y por
+> eso la ventana de aviso y la pantalla de Ajustes la enseñan.
+>
+> **Cualquier versión instalada salta directamente a la última.** No hay cadena
+> de actualizaciones que seguir: la app consulta siempre `/releases/latest` y
+> compara ese `versionCode` con el que le dice el sistema, sea el que sea. Una
+> instalación de hace veinte publicaciones se pone al día en un solo paso, igual
+> que la de ayer. Es lo que se gana con un `versionCode` que sólo crece y un APK
+> completo por release —no diferencial—: no existe un salto intermedio que se
+> pueda quedar a medias.
 
 Un `git push` a `main` acaba convertido en una actualización instalada en el
 móvil. El workflow `.github/workflows/release.yml` compila y **firma** la APK,
@@ -633,11 +777,20 @@ versiones anteriores a este sistema llegaron a mano hasta la 430, muy por
 encima del número de commits: sin ella la primera release automática habría
 salido por debajo de lo ya instalado y el móvil no la habría reconocido.
 
-La fórmula vive por duplicado, en `tools/version.mjs` (que alimenta al bundle
-vía `vite.config.ts` y al workflow) y en `android/app/build.gradle`, porque
-Gradle no puede importar JavaScript. **`npm test` comprueba que las dos
+`versionName` = el título del último commit que sea un nombre de versión
+(`git log -200 --pretty=%s`, primer título que sean sólo dígitos y puntos:
+`v5.1`, `v5`, `4.9`). Las versiones aquí se marcan así, escribiendo el nombre en
+el commit, de modo que el nombre ya está puesto y no hay que escribirlo otra vez
+en `package.json` —que es lo que llevó a que los commits fueran por la v5.1 con
+`package.json` en la 4.8.0—. Se busca hacia atrás porque después de marcar una
+versión pueden venir commits normales: la versión sigue siendo la misma, con un
+`versionCode` mayor, hasta que otro commit la renombre.
+
+Las dos fórmulas viven por duplicado, en `tools/version.mjs` (que alimenta al
+bundle vía `vite.config.ts` y al workflow) y en `android/app/build.gradle`,
+porque Gradle no puede importar JavaScript. **`npm test` comprueba que las dos
 coinciden**: si se separan, la app compara su `versionCode` contra otro número
-y el canal falla en silencio.
+y el canal falla en silencio, o enseña un nombre distinto del que se publicó.
 
 *Contrapartida:* no se puede reescribir la historia de `main`. Un rebase o un
 `push --force` que reduzca el número de commits deja las releases nuevas por

@@ -40,8 +40,36 @@ static def readPackageVersion(rootDir) {
     return new groovy.json.JsonSlurper().parse(file).version ?: '0.0.0'
 }
 
+/*
+ * El NOMBRE de la version es el del ultimo commit que lo lleve por titulo
+ * ("v5.1", "v5", "4.9"), que es como se marcan aqui las versiones. La misma
+ * regla vive en tools/version.mjs: si las dos se separan, la app enseñaria un
+ * nombre y la release se publicaria con otro.
+ *
+ * Se mira hacia atras y no solo la punta porque despues de marcar la v5.1
+ * pueden venir commits normales, que no renombran nada. Solo se pide que sean
+ * digitos y puntos: es lo que distingue "v5.1" de "arreglar el mapa".
+ */
+static def gitVersionName(providers) {
+    try {
+        def log = providers.exec {
+            commandLine 'git', 'log', '-200', '--pretty=%s'
+        }.standardOutput.asText.get()
+
+        for (line in log.readLines()) {
+            def matcher = (line.trim() =~ /^v?(\d+(?:\.\d+)*)$/)
+            if (matcher.matches()) {
+                return matcher.group(1)
+            }
+        }
+    } catch (Exception ignored) {
+        // Sin git (compilando desde un zip) se cae a package.json.
+    }
+    return null
+}
+
 def salbusVersionCode = ext.VERSION_CODE_BASE + gitCommitCount(providers)
-def salbusVersionName = readPackageVersion(rootProject.projectDir)
+def salbusVersionName = gitVersionName(providers) ?: readPackageVersion(rootProject.projectDir)
 
 /*
  * Firma de release. La clave NO vive en el repositorio: en local se lee de

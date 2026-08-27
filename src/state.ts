@@ -12,7 +12,15 @@ export const APP_VERSION = `v${__APP_VERSION__}`
 export const APP_VERSION_CODE = __APP_VERSION_CODE__
 
 export type TabId = 'inicio' | 'buscar' | 'monitor' | 'seguimiento' | 'mapas' | 'ajustes'
-export type SearchMode = 'nombre' | 'linea' | 'mapa'
+/**
+ * Como se busca una parada.
+ *
+ * 'parada' fusiona lo que antes eran dos modos distintos —por nombre y por
+ * linea—: eran la misma busqueda con el mismo resultado, y obligar a elegir
+ * cual de las dos antes de escribir nada solo anadia un paso. Ahora el texto y
+ * los desplegables de linea y sentido conviven y se combinan entre si.
+ */
+export type SearchMode = 'parada' | 'cerca' | 'mapa'
 export type PermissionState = 'granted' | 'denied' | 'unknown'
 
 export interface FavouriteStop {
@@ -309,12 +317,37 @@ export interface AppState {
     selectedStopId: string | null
     /** El mapa pasa a pantalla completa al elegir linea y sentido. */
     mapExpanded: boolean
+    /**
+     * Panel de "acotar por linea", desplegado a mano.
+     *
+     * Lo lleva el estado y no el navegador: el repintado es incremental y borra
+     * los atributos que ya no vienen en el HTML, asi que el `open` de un
+     * `<details>` desaparecia en el siguiente latido del reloj.
+     */
+    lineFilterOpen: boolean
   }
+
+  /**
+   * Ubicacion del dispositivo, compartida por "paradas cercanas" (Buscar) y por
+   * el planificador de rutas (Mapas).
+   *
+   * Vive fuera de `maps` porque las dos pantallas la necesitan y la pestana
+   * experimental se vacia entera al salir de ella: tenerla ahi dentro obligaba
+   * a volver a localizar cada vez que se cambiaba de pestana.
+   */
+  geo: GeoState
 
   favourites: FavouriteStop[]
   expandedStopId: string | null
-  /** Paradas cuya lista de llegadas se ha desplegado mas alla de ARRIVALS_PREVIEW. */
-  arrivalsExpanded: Record<string, boolean>
+  /**
+   * LA parada (una sola) cuya lista de llegadas esta desplegada mas alla de
+   * ARRIVALS_PREVIEW.
+   *
+   * Es un unico hueco a proposito: la vista compacta es la predeterminada y se
+   * recupera sola. Al abrir cualquier otra parada este hueco se vacia, asi que
+   * haber desplegado una no deja desplegadas las que se abran despues.
+   */
+  arrivalsExpandedStopId: string | null
 
   trackings: TrackingJob[]
   /**
@@ -383,6 +416,37 @@ export interface AppState {
 }
 
 /* ------------------------------------------------------------------ *
+ * Ubicacion del dispositivo                                            *
+ * ------------------------------------------------------------------ */
+
+/**
+ * Donde estas, y por que no se sabe cuando no se sabe.
+ *
+ * NO se guarda en disco. Una ubicacion es del momento en que se pidio, y
+ * arrancar la app con la posicion de ayer marcada en el mapa enganaria.
+ */
+export interface GeoState {
+  /** Ultima lectura conocida, con su margen de error en metros. */
+  location: { point: GeoPoint, accuracy: number, at: number } | null
+  locating: boolean
+  /** Motivo por el que no hay ubicacion, ya redactado para leerse en pantalla. */
+  error: string | null
+  /**
+   * Que falta exactamente para poder localizar.
+   *
+   * Desde la pagina los dos fallos se ven igual —la geolocalizacion no
+   * responde— pero se arreglan en pantallas distintas del sistema: 'service' es
+   * el interruptor de ubicacion del telefono, 'permission' es el permiso de
+   * SALBUS. Decir "activa la ubicacion" sin decir donde no ayuda a nadie.
+   */
+  blocked: 'service' | 'permission' | null
+}
+
+export function emptyGeoState(): GeoState {
+  return { location: null, locating: false, error: null, blocked: null }
+}
+
+/* ------------------------------------------------------------------ *
  * Pestana experimental "Mapas"                                         *
  * ------------------------------------------------------------------ */
 
@@ -396,33 +460,15 @@ export interface RoutePoint {
   stopId?: string
 }
 
-export type MapsMode = 'cercanas' | 'rutas'
-
 /**
- * Todo lo de la pestana experimental vive aqui dentro y NO se guarda en disco.
+ * Todo lo del planificador de rutas vive aqui dentro y NO se guarda en disco.
  *
- * Que sea efimero es deliberado: una ubicacion es del momento en que se pidio,
- * y arrancar la app con una posicion de ayer marcada en el mapa enganaria. Al
- * cerrar la pestana se vacia (resetMaps), asi que apagada no ocupa ni memoria.
+ * La pestana quedo reducida a las rutas: las paradas cercanas se buscan ahora
+ * en Buscar, que es donde se busca una parada. Al salir de la pestana esto se
+ * vacia entero, asi que apagada no ocupa ni memoria. Lo unico que sobrevive es
+ * la ubicacion, que vive aparte (`state.geo`) porque tambien la usa Buscar.
  */
 export interface MapsState {
-  mode: MapsMode
-
-  /** Ultima ubicacion conocida, con su margen de error en metros. */
-  location: { point: GeoPoint, accuracy: number, at: number } | null
-  locating: boolean
-  /** Motivo por el que no hay ubicacion, ya redactado para leerse en pantalla. */
-  locationError: string | null
-  /**
-   * Que falta exactamente para poder localizar.
-   *
-   * Desde la pagina los dos fallos se ven igual —la geolocalizacion no
-   * responde— pero se arreglan en pantallas distintas: 'service' es el
-   * interruptor de ubicacion del telefono, 'permission' es el permiso de
-   * SALBUS. Decir "activa la ubicacion" sin decir donde no ayuda a nadie.
-   */
-  locationBlocked: 'service' | 'permission' | null
-
   /** El mapa de la pestaña, a pantalla completa. */
   expanded: boolean
 
@@ -440,11 +486,6 @@ export interface MapsState {
 
 export function emptyMapsState(): MapsState {
   return {
-    mode: 'cercanas',
-    location: null,
-    locating: false,
-    locationError: null,
-    locationBlocked: null,
     expanded: false,
     origin: null,
     destination: null,
@@ -477,7 +518,7 @@ export interface AppSettings {
   trackingBusTarget: number
 
   /**
-   * Pestana experimental "Mapas" (paradas cercanas y rutas).
+   * Pestana experimental "Mapas" (planificador de rutas).
    *
    * Apagada por defecto y apagada de verdad: con este ajuste en false la
    * pestana no existe, no se pide la ubicacion, no se crea ningun mapa y no se
@@ -504,6 +545,16 @@ export interface TourState {
 
 /** Llegadas que se ven de una parada antes de pulsar "Ver mas". */
 export const ARRIVALS_PREVIEW = 5
+
+/**
+ * A partir de aqui el dato de una parada se considera caducado y su ficha
+ * enseña la animacion de carga aunque todavia no le haya tocado turno.
+ *
+ * Un minuto: los tiempos de la fuente vienen en minutos enteros, asi que a los
+ * sesenta segundos el numero de la pantalla ya no es el numero. Avisar antes de
+ * que llegue el refresco evita leer como bueno algo que esta por cambiar.
+ */
+export const ARRIVALS_STALE_MS = 60_000
 
 const KEYS = {
   favourites: 'salbus.favourites',
@@ -595,19 +646,22 @@ export const state: AppState = {
   lastRefreshAt: null,
 
   search: {
-    mode: 'nombre',
+    mode: 'parada',
     query: '',
     lineId: '',
     directionKey: '',
     selectedStopId: null,
     mapExpanded: false,
+    lineFilterOpen: false,
   },
+
+  geo: emptyGeoState(),
 
   favourites: readJson<FavouriteStop[]>(KEYS.favourites, []).filter(
     (item) => typeof item?.stopId === 'string',
   ),
   expandedStopId: null,
-  arrivalsExpanded: {},
+  arrivalsExpandedStopId: null,
 
   // busesSeen no existia en versiones anteriores: un aviso guardado sin el empieza a contar de cero.
   trackings: readTrackings(),

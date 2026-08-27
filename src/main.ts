@@ -10,18 +10,13 @@ import {
   fetchStopsSequentially,
   MIN_REQUEST_SPACING_MS,
 } from './services/arrivals'
-import {
-  routeScanDepth,
-  ROUTE_SCAN_MAX_STOPS,
-  ROUTE_WINDOW_STOPS,
-} from './services/bus-position'
+import { AT_STOP_MINUTES, ROUTE_WINDOW_STOPS } from './services/bus-position'
 import { loadNetwork } from './services/network'
 import { checkForUpdate, isNativeAndroid, readInstalledVersion, Updater } from './services/updates'
 import { ARM_MINUTES, matchSlot, MISSING_STREAK, observe } from './services/punctuality'
 import {
   DEFAULT_WAIT_MINUTES,
   isValidPoint,
-  nearestStops,
   planRoute,
   refineWalking,
   type GeoPoint,
@@ -78,8 +73,9 @@ import {
   type RoutePoint,
   type TabId,
   type TrackingJob,
+  type SearchMode,
 } from './state'
-import type { StopFeed } from './types'
+import type { NetworkStop, StopFeed } from './types'
 import { patch } from './dom'
 import { esc, liveMinutes, readableTextColor } from './ui'
 import {
@@ -284,6 +280,14 @@ let scrollPending: string | null = null
 let map: L.Map | null = null
 let mapLayer: L.LayerGroup | null = null
 let mapSignature = ''
+/**
+ * Firma de lo ULTIMO DIBUJADO en el mapa del buscador.
+ *
+ * Va aparte de `mapSignature` porque son dos preguntas distintas: aquella
+ * decide si hay que reencuadrar el mapa, y esta si hay que volver a colocar los
+ * marcadores. Acercar el mapa cambia lo segundo sin tocar lo primero.
+ */
+let mapPaintKey = ''
 
 /* ------------------------------------------------------------------ *
  * Arranque                                                             *
@@ -674,14 +678,35 @@ async function syncBatteryPermission(prompt: boolean): Promise<void> {
  * Motor de refresco                                                    *
  * ------------------------------------------------------------------ */
 
-/** Paradas que interesan ahora mismo, con su frescura objetivo, mas prioritarias primero. */
-function buildRefreshPlan(): Array<{ stopId: string, maxAgeMs: number, priority: 'high' | 'normal' }> {
-  const plan = new Map<string, { stopId: string, maxAgeMs: number, priority: 'high' | 'normal' }>()
+/**
+ * Una parada que hay que refrescar en este ciclo.
+ *
+ * `scan` marca las paradas ANTERIORES de un aviso: van en orden, de la tuya
+ * hacia atras, y en cuanto una de ellas resulta tener el autobus encima el
+ * resto sobra. Es lo que permite parar la busqueda donde esta el autobus en vez
+ * de recorrer siempre las ocho.
+ */
+interface RefreshEntry {
+  stopId: string
+  maxAgeMs: number
+  priority: 'high' | 'normal'
+  /** Aviso al que pertenece esta parada como paso de su busqueda hacia atras. */
+  scan?: { jobId: string, lineId: string }
+}
 
-  const add = (stopId: string, maxAgeMs: number, priority: 'high' | 'normal' = 'normal') => {
+/** Paradas que interesan ahora mismo, con su frescura objetivo, mas prioritarias primero. */
+function buildRefreshPlan(): RefreshEntry[] {
+  const plan = new Map<string, RefreshEntry>()
+
+  const add = (
+    stopId: string,
+    maxAgeMs: number,
+    priority: 'high' | 'normal' = 'normal',
+    scan?: { jobId: string, lineId: string },
+  ) => {
     const existing = plan.get(stopId)
     if (!existing || maxAgeMs < existing.maxAgeMs) {
-      plan.set(stopId, { stopId, maxAgeMs, priority })
+      plan.set(stopId, { stopId, maxAgeMs, priority, scan: scan ?? existing?.scan })
     }
   }
 
@@ -699,18 +724,22 @@ function buildRefreshPlan(): Array<{ stopId: string, maxAgeMs: number, priority:
 
   // 1 bis. Y sus paradas ANTERIORES: por dónde viene el autobús.
   //
-  // La profundidad depende de si alguien lo está mirando, que es lo que decide
-  // para qué sirve el dato:
+  // La ventana es SIEMPRE la misma —las ocho paradas anteriores a la tuya— y es
+  // la misma que dibuja la pestaña Seguir. Lo que cambia según quién mire es
+  // hasta dónde hay que llegar dentro de ella:
   //
-  //  - Con la pestaña Seguir delante se pide el RECORRIDO ENTERO, porque se
-  //    dibuja parada a parada y hay que poder verlas todas.
-  //  - Fuera de ella (otra pestaña, o la app en segundo plano) nadie mira el
-  //    recorrido y lo único que hace falta es el "a N paradas" del aviso: se
-  //    busca de tu parada hacia atrás y se para en la primera que tenga el
-  //    autobús encima, sin llegar más lejos de donde puede estar.
+  //  - Con la pestaña Seguir delante se recorre ENTERA, porque se dibuja parada
+  //    a parada y hay que poder verlas todas.
+  //  - Fuera de ella (otra pestaña, o la app en segundo plano) lo único que
+  //    hace falta es el "a N paradas" de la notificación: se va de tu parada
+  //    hacia atrás y se PARA en la primera que tenga el autobús encima. Las de
+  //    más atrás ya no cambian la respuesta, así que no se piden.
   //
-  // La diferencia no es cosmética: el recorrido entero son ocho paradas por
-  // ciclo contra una fuente que admite una petición cada dos segundos.
+  // La diferencia no es cosmética: la ventana entera son ocho paradas por ciclo
+  // contra una fuente que admite una petición cada dos segundos. Antes esto se
+  // acotaba a ojo —por los minutos que faltaban— y se quedaba corto justo
+  // cuando el autobús venía de lejos, que es cuando el recorrido salía en
+  // blanco y el aviso no sabía decir por dónde venía.
   const watchingRoute = state.tab === 'seguimiento' && document.visibilityState === 'visible'
 
   for (const job of state.trackings) {
@@ -722,14 +751,6 @@ function buildRefreshPlan(): Array<{ stopId: string, maxAgeMs: number, priority:
       continue
     }
 
-    const depth = watchingRoute
-      ? ROUTE_WINDOW_STOPS
-      : routeScanDepth(nextArrivalMinutes(job.stopId, job.lineId))
-
-    if (depth === 0) {
-      continue
-    }
-
     const window = state.network?.getDirectionWindow(
       job.directionKey,
       job.stopId,
@@ -738,10 +759,17 @@ function buildRefreshPlan(): Array<{ stopId: string, maxAgeMs: number, priority:
 
     // De la parada propia hacia atrás: las más cercanas son las que primero
     // delatan al autobús, y son las que antes conviene tener frescas.
-    const scanned = window.slice(Math.max(0, window.length - 1 - depth), window.length - 1).reverse()
+    const scanned = window.slice(0, Math.max(0, window.length - 1)).reverse()
 
     for (const stop of scanned) {
-      add(stop.stopId, watchingRoute ? FRESHNESS.routeVisible : FRESHNESS.routeBackground)
+      add(
+        stop.stopId,
+        watchingRoute ? FRESHNESS.routeVisible : FRESHNESS.routeBackground,
+        'normal',
+        // Solo fuera de la pestaña se corta la búsqueda al encontrar el
+        // autobús: con el recorrido dibujado hacen falta las ocho.
+        watchingRoute ? undefined : { jobId: job.id, lineId: job.lineId },
+      )
     }
   }
 
@@ -759,12 +787,22 @@ function buildRefreshPlan(): Array<{ stopId: string, maxAgeMs: number, priority:
     add(state.search.selectedStopId, FRESHNESS.focused, 'high')
   }
 
-  // Inicio ES la lista de paradas guardadas, pero SOLO se consulta la que está
-  // desplegada: es la única que enseña tiempos (plegada solo se ven sus líneas),
-  // y pedir las diez guardadas para no mirar ninguna dejaba sin turno en la cola
-  // al aviso de próximo bus, que sí tiene que llegar a tiempo.
-  if (state.tab === 'inicio' && state.expandedStopId) {
-    add(state.expandedStopId, FRESHNESS.focused, 'high')
+  // Inicio ES la lista de paradas guardadas, y al abrirla se ponen al día
+  // TODAS: la parada que se despliegue tiene que abrirse con algo puesto, no en
+  // blanco a la espera de una consulta que llega cuando le toque turno.
+  //
+  // Con una parada desplegada manda ELLA y solo ella: es la única cuyos tiempos
+  // se están leyendo, así que se pide con prioridad y el repaso de las demás se
+  // aparta hasta que se vuelva a plegar. Quien acaba de abrirla no puede
+  // quedarse esperando detrás de nueve paradas que no está mirando.
+  if (state.tab === 'inicio') {
+    if (state.expandedStopId) {
+      add(state.expandedStopId, FRESHNESS.focused, 'high')
+    } else {
+      for (const favourite of state.favourites) {
+        add(favourite.stopId, FRESHNESS.visible)
+      }
+    }
   }
 
   return Array.from(plan.values()).sort((left, right) => {
@@ -773,6 +811,17 @@ function buildRefreshPlan(): Array<{ stopId: string, maxAgeMs: number, priority:
     }
     return left.maxAgeMs - right.maxAgeMs
   })
+}
+
+/** ¿El autobús de ese aviso está AHORA en esa parada, según lo que ya se sabe? */
+function busIsAt(stopId: string, lineId: string): boolean {
+  const feed = state.feeds[stopId]
+  if (!feed || feed.status === 'error') {
+    return false
+  }
+
+  const minutes = nextArrivalMinutes(stopId, lineId)
+  return minutes >= 0 && minutes <= AT_STOP_MINUTES
 }
 
 /**
@@ -906,6 +955,21 @@ function tick(): void {
   void refreshVisible('auto')
 }
 
+/**
+ * Ciclo de refresco en curso.
+ *
+ * Cada pasada se queda con su número, y `cancelRefreshCycle` lo invalida: el
+ * lote se corta en la siguiente parada, sin llegar a pedirla. Sirve para que
+ * abrir una parada guardada aparte en el acto el repaso de las demás, porque la
+ * cola va a dos segundos por consulta y esperar turno detrás de nueve paradas
+ * que nadie mira son veinte segundos mirando un hueco vacío.
+ */
+let refreshCycle = 0
+
+function cancelRefreshCycle(): void {
+  refreshCycle += 1
+}
+
 async function refreshVisible(source: 'auto' | 'manual'): Promise<void> {
   if (refreshInFlight || !state.ready) {
     return
@@ -923,6 +987,7 @@ async function refreshVisible(source: 'auto' | 'manual'): Promise<void> {
     return
   }
 
+  const cycle = ++refreshCycle
   refreshInFlight = true
   lastAutoCycleAt = Date.now()
   state.refreshing = true
@@ -943,11 +1008,21 @@ async function refreshVisible(source: 'auto' | 'manual'): Promise<void> {
   try {
     let done = 0
 
+    const byStop = new Map(plan.map((entry) => [entry.stopId, entry]))
+    // Avisos cuyo autobús ya ha aparecido en este mismo lote: sus paradas de
+    // más atrás dejan de tener nada que decir y se saltan sin pedirlas.
+    const located = new Set<string>()
+
     await fetchStopsSequentially(
       plan.map((entry) => entry.stopId),
       {
         maxAgeMs: source === 'manual' ? 0 : DEFAULT_MAX_AGE_MS,
         priority: plan[0]?.priority,
+        shouldStop: () => refreshCycle !== cycle,
+        shouldSkip: (stopId) => {
+          const scan = byStop.get(stopId)?.scan
+          return Boolean(scan && located.has(scan.jobId))
+        },
         onStart: (stopId) => {
           state.stopSync[stopId] = 'loading'
           render()
@@ -956,6 +1031,14 @@ async function refreshVisible(source: 'auto' | 'manual'): Promise<void> {
           done += 1
           delete state.stopSync[feed.stopId]
           applyFeed(feed)
+
+          // Aquí es donde se cierra la búsqueda: esta parada tiene el autobús
+          // encima, así que las anteriores de ese aviso ya no hacen falta.
+          const scan = byStop.get(feed.stopId)?.scan
+          if (scan && busIsAt(feed.stopId, scan.lineId)) {
+            located.add(scan.jobId)
+          }
+
           state.refreshQueueLabel =
             plan.length > 1 && done < plan.length ? `Actualizando ${done + 1} de ${plan.length}…` : null
           render()
@@ -1123,7 +1206,7 @@ function trackingRouteStops(job: TrackingJob): string[] {
   const window = state.network.getDirectionWindow(
     job.directionKey,
     job.stopId,
-    ROUTE_SCAN_MAX_STOPS + 1,
+    ROUTE_WINDOW_STOPS + 1,
   )
 
   return window
@@ -2115,17 +2198,44 @@ async function handleAction(action: string, element: HTMLElement): Promise<void>
       return
 
     case 'search-mode': {
-      const mode = element.dataset.mode as 'nombre' | 'linea' | 'mapa' | undefined
-      if (mode) {
-        state.search.mode = mode
-        // Linea y sentido se quedan en "Seleccionar" hasta que se elijan a mano.
-        if (mode !== 'mapa' || !state.search.lineId || !state.search.directionKey) {
-          state.search.mapExpanded = false
-        }
-        render()
+      const mode = element.dataset.mode as SearchMode | undefined
+      if (!mode) {
+        return
       }
+
+      state.search.mode = mode
+      // Linea y sentido se quedan en "Seleccionar" hasta que se elijan a mano.
+      if (mode !== 'mapa' || !state.search.lineId || !state.search.directionKey) {
+        state.search.mapExpanded = false
+      }
+
+      // Entrar en "Cerca" sin ubicacion no puede quedarse en un boton: es la
+      // unica cosa que esa pantalla sabe hacer, y pedirla es justo lo que se ha
+      // pedido al tocar la pestana. Si ya se sabe donde estamos no se vuelve a
+      // pedir: la lista se dibuja con lo que hay.
+      if (mode === 'cerca' && !state.geo.location && !state.geo.locating && !state.geo.blocked) {
+        locateMe()
+        return
+      }
+
+      render()
       return
     }
+
+    case 'toggle-line-filter':
+      state.search.lineFilterOpen = !(state.search.lineFilterOpen || Boolean(state.search.lineId))
+      render()
+      return
+
+    // El filtro de linea del buscador, de vuelta a "sin filtro". El texto
+    // escrito se respeta: quitar el filtro no es empezar de cero.
+    case 'clear-line-filter':
+      state.search.lineId = ''
+      state.search.directionKey = ''
+      state.search.lineFilterOpen = false
+      state.search.mapExpanded = false
+      render()
+      return
 
     // Ampliar ya no exige haber elegido linea: sin ella el mapa enseña las
     // paradas de toda la red, y precisamente ahi es donde mas falta hace verlo
@@ -2144,6 +2254,9 @@ async function handleAction(action: string, element: HTMLElement): Promise<void>
     // por encima, asi que no hay que salir de la pantalla completa para verla.
     case 'map-select-stop':
     case 'select-stop':
+      // La vista compacta es la predeterminada y se REFUERZA: haber desplegado
+      // las llegadas de una parada no deja desplegada la siguiente que se abra.
+      state.arrivalsExpandedStopId = null
       state.search.selectedStopId = stopId
       render()
       await ensureStopFresh(stopId)
@@ -2154,13 +2267,24 @@ async function handleAction(action: string, element: HTMLElement): Promise<void>
       render()
       return
 
-    case 'expand-stop':
-      state.expandedStopId = state.expandedStopId === stopId ? null : stopId
+    case 'expand-stop': {
+      const opening = state.expandedStopId !== stopId
+      state.expandedStopId = opening ? stopId : null
+      // Vista compacta otra vez: desplegar las llegadas vale para ESA parada y
+      // ese momento, no para todas las que se abran despues.
+      state.arrivalsExpandedStopId = null
       render()
-      if (state.expandedStopId) {
+
+      if (opening) {
+        // La parada que se acaba de abrir manda. El repaso de todas las
+        // guardadas que corre al entrar en Inicio se corta aqui mismo: si no,
+        // esta se quedaba esperando turno detras de nueve paradas que nadie
+        // esta mirando, a dos segundos por consulta.
+        cancelRefreshCycle()
         void refreshOneStop(stopId)
       }
       return
+    }
 
     case 'toggle-favourite':
       if (isFavourite(stopId)) {
@@ -2248,14 +2372,15 @@ async function handleAction(action: string, element: HTMLElement): Promise<void>
       openPickLine(stopId, 'tracking')
       return
 
-    // Lista de llegadas: las que pasan de ARRIVALS_PREVIEW se piden a mano.
+    // Lista de llegadas: las que pasan de ARRIVALS_PREVIEW se piden a mano, y
+    // solo una parada a la vez puede estar desplegada.
     case 'expand-arrivals':
-      state.arrivalsExpanded[stopId] = true
+      state.arrivalsExpandedStopId = stopId
       render()
       return
 
     case 'collapse-arrivals':
-      delete state.arrivalsExpanded[stopId]
+      state.arrivalsExpandedStopId = null
       render()
       return
 
@@ -2279,23 +2404,7 @@ async function handleAction(action: string, element: HTMLElement): Promise<void>
       return
     }
 
-    case 'maps-mode': {
-      const mode = element.dataset.mode as 'cercanas' | 'rutas' | undefined
-      // El callejero son cien mil nodos: se pide al entrar en "Rutas", no al
-      // arrancar la app, y una sola vez por sesión.
-      if (mode === 'rutas') {
-        void loadStreetGraph()
-      }
-      if (mode) {
-        state.maps.mode = mode
-        state.maps.picking = null
-        mapsSignature = ''
-        render()
-      }
-      return
-    }
-
-    case 'maps-locate':
+    case 'locate':
       locateMe()
       return
 
@@ -2303,7 +2412,7 @@ async function handleAction(action: string, element: HTMLElement): Promise<void>
     // interruptor general de ubicación, o los permisos de SALBUS.
     case 'open-location-settings':
       try {
-        if (state.maps.locationBlocked === 'permission') {
+        if (state.geo.blocked === 'permission') {
           await DeviceSettings.openAppSettings()
         } else {
           await DeviceSettings.openLocationSettings()
@@ -2326,14 +2435,6 @@ async function handleAction(action: string, element: HTMLElement): Promise<void>
       state.maps.expanded = false
       mapsSignature = ''
       render()
-      return
-
-    case 'maps-open-stop':
-      // Se reutiliza la ficha de siempre. Es la ÚNICA consulta que hace esta
-      // pestaña, y solo cuando alguien toca una parada a propósito.
-      state.search.selectedStopId = stopId
-      render()
-      await refreshOneStop(stopId)
       return
 
     case 'maps-pick': {
@@ -2517,14 +2618,27 @@ async function goToTab(tab: TabId): Promise<void> {
     closeMaps()
   }
 
+  // El callejero son cien mil nodos por una función en pruebas: se pide al
+  // entrar en la pestaña, no al arrancar la app, y una sola vez por sesión.
+  if (tab === 'mapas' && previous !== 'mapas') {
+    void loadStreetGraph()
+  }
+
   if (tab === 'buscar' && previous !== 'buscar') {
     // Los desplegables arrancan siempre sin elegir: al volver al buscador, una
     // linea y un sentido heredados de la visita anterior se leian como una
     // busqueda en curso que nadie habia pedido.
     state.search.lineId = ''
     state.search.directionKey = ''
+    state.search.lineFilterOpen = false
     state.search.mapExpanded = false
     state.search.selectedStopId = null
+  }
+
+  // Salir de Buscar suelta el seguimiento de la ubicación si no queda quien la
+  // mire: es lo único de esa pantalla que sigue trabajando por detrás.
+  if (previous === 'buscar' && tab !== 'buscar' && tab !== 'mapas') {
+    stopWatchingLocation()
   }
 
   state.tab = tab
@@ -2656,6 +2770,7 @@ function syncMap(): void {
       map = null
       mapLayer = null
       mapSignature = ''
+      mapPaintKey = ''
     }
     return
   }
@@ -2664,43 +2779,167 @@ function syncMap(): void {
     map?.remove()
     map = L.map(container, { zoomControl: false, attributionControl: true })
     L.control.zoom({ position: 'bottomleft' }).addTo(map)
-    // Con el mapa ampliado las chinchetas se amontonarian: se encogen al alejar.
-    map.on('zoomend', () => applyZoomScale())
+    // Cada gesto sobre el mapa cambia QUE se dibuja, no solo cómo se ve: al
+    // acercar los grupos se abren en las paradas que llevan dentro, y al
+    // arrastrar entran unas paradas y salen otras. `moveend` cubre las dos
+    // cosas (un zoom termina también en un movimiento).
+    map.on('moveend', () => {
+      applyZoomScale()
+      paintStopMarkers()
+    })
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
       attribution: '&copy; OpenStreetMap',
     }).addTo(map)
     mapLayer = L.layerGroup().addTo(map)
     mapSignature = ''
+    mapPaintKey = ''
   }
 
   const direction = state.network.directionByKey.get(state.search.directionKey)
 
-  // Sin linea ni sentido elegidos el mapa NO se queda vacio: enseña las 349
-  // paradas de la red para poder tocar directamente la que se busca. Es la
-  // forma natural de usar un mapa —"esta es mi calle, esta es mi parada"— y
-  // antes obligaba a saber de antemano que linea pasa por ella.
-  const showingAll = !direction
+  // Sin linea ni sentido elegidos el mapa NO se queda vacio: enseña la red
+  // entera para poder tocar directamente la parada que se busca. Es la forma
+  // natural de usar un mapa —"esta es mi calle, esta es mi parada"— y antes
+  // obligaba a saber de antemano que linea pasa por ella.
   const stops = direction?.stops ?? state.network.stops
 
   // La pantalla completa entra en la firma: al cambiar de tamano hay que
   // reencuadrar el recorrido, no solo recalcular el lienzo.
-  const signature = `${state.search.directionKey || 'todas'}|${state.search.selectedStopId ?? ''}|${
+  const signature = `${state.search.directionKey || 'todas'}|${
     state.search.mapExpanded ? 'full' : 'inline'
-  }`
+  }|${state.geo.location ? 'geo' : ''}`
 
   if (signature === mapSignature) {
     map.invalidateSize()
+    // El encuadre no cambia, pero la parada elegida o la ubicacion si: se
+    // repintan los marcadores sin mover el mapa de sitio.
+    paintStopMarkers()
     return
   }
 
   mapSignature = signature
-  mapLayer?.clearLayers()
 
   // Al pasar a pantalla completa el contenedor cambia de tamano, pero Leaflet
   // sigue con el anterior en cache. Sin esto el encuadre sale calculado sobre
   // la franja pequena y el recorrido queda diminuto en el centro.
   map.invalidateSize()
+
+  const points: Array<[number, number]> = []
+  for (const stop of stops) {
+    if (Number.isFinite(stop.lat) && Number.isFinite(stop.lon)) {
+      points.push([stop.lat, stop.lon])
+    }
+  }
+
+  // Con un recorrido elegido manda el recorrido. Sin el, si ya se sabe donde
+  // estas, el encuadre arranca a tu alrededor: la parada que se busca en un
+  // mapa de toda la ciudad casi siempre es una de las de al lado.
+  const home = !direction ? state.geo.location : null
+
+  if (home) {
+    map.setView([home.point.lat, home.point.lon], 16)
+  } else if (points.length > 0) {
+    map.fitBounds(points, { padding: [34, 34], maxZoom: 16 })
+  } else {
+    map.setView([40.9701, -5.6635], 13)
+  }
+
+  applyZoomScale()
+  paintStopMarkers()
+
+  // Segunda pasada: la transicion de tamano del contenedor puede no haber
+  // terminado cuando se pinta, y el encuadre quedaria corrido.
+  window.setTimeout(() => {
+    if (!map) {
+      return
+    }
+    map.invalidateSize()
+    if (!home && points.length > 0) {
+      map.fitBounds(points, { padding: [34, 34], maxZoom: 16 })
+    }
+    applyZoomScale()
+    paintStopMarkers()
+  }, 80)
+}
+
+/** Encuadre redondeado a tres decimales (~100 m): sirve de firma sin repintar por nada. */
+function viewKey(bounds: L.LatLngBounds): string {
+  const south = bounds.getSouth().toFixed(3)
+  const west = bounds.getWest().toFixed(3)
+  const north = bounds.getNorth().toFixed(3)
+  const east = bounds.getEast().toFixed(3)
+  return `${south},${west},${north},${east}`
+}
+
+/**
+ * A partir de este acercamiento las paradas van una a una.
+ *
+ * Es el punto en el que dos paradas consecutivas de la misma calle ya se
+ * separan lo bastante como para poder acertarle a una con el dedo. Por debajo
+ * se agrupan.
+ */
+const CLUSTER_MAX_ZOOM = 16
+
+/**
+ * Dibuja lo que toca segun el acercamiento actual.
+ *
+ * Se llama tanto al cambiar de busqueda como en cada `zoomend`, y por eso lleva
+ * su propia firma: repintar 349 marcadores en cada gesto del mapa es justo lo
+ * que hacia que el movil se arrastrara al moverlo.
+ */
+function paintStopMarkers(): void {
+  if (!map || !mapLayer || !state.network) {
+    return
+  }
+
+  const direction = state.network.directionByKey.get(state.search.directionKey)
+  const showingAll = !direction
+  const zoom = map.getZoom()
+
+  // Solo se dibuja lo que se está mirando, con un margen para que arrastrar un
+  // poco el mapa no deje huecos. Leaflet no descarta nada por su cuenta: cada
+  // marcador es un nodo del documento que hay que recolocar en cada gesto, y
+  // las 349 paradas de la red arrastraban el mapa entero aunque solo se vieran
+  // seis. Con un recorrido elegido no se recorta: son treinta paradas y el
+  // recorrido tiene que verse ENTERO, con su trazado.
+  const view = map.getBounds().pad(0.35)
+  const stops = showingAll
+    ? state.network.stops.filter((stop) => view.contains([stop.lat, stop.lon]))
+    : direction.stops
+
+  // Con un recorrido elegido las paradas van numeradas y no se agrupan nunca,
+  // porque el numero de orden ES la informacion. Sin recorrido, lo que decide
+  // el dibujo es el nivel de acercamiento.
+  const grouping = showingAll && zoom < CLUSTER_MAX_ZOOM
+  const here = state.geo.location?.point
+  const key = [
+    state.search.directionKey || 'todas',
+    state.search.selectedStopId ?? '',
+    grouping ? `grupo:${Math.floor(zoom)}` : 'sueltas',
+    // El encuadre entra en la firma porque decide QUE paradas se dibujan. Va
+    // redondeado: sin eso, cada fotograma de una inercia contaria como un
+    // encuadre nuevo y se repintaria el mapa decenas de veces por gesto.
+    showingAll ? viewKey(view) : '',
+    // El punto de "estás aquí" se afina con cada lectura del GPS: si no entrara
+    // en la firma se quedaria clavado donde cayo la primera, que suele ser la
+    // peor de todas.
+    here ? `${here.lat.toFixed(5)},${here.lon.toFixed(5)}` : '',
+  ].join('|')
+
+  if (key === mapPaintKey) {
+    return
+  }
+
+  mapPaintKey = key
+  mapLayer.clearLayers()
+
+  paintYouAreHere(mapLayer, [])
+
+  if (grouping) {
+    paintStopClusters(stops, zoom)
+    return
+  }
 
   const color = state.network.getLineColor(direction?.key.split('|')[0] ?? '')
   const points: Array<[number, number]> = []
@@ -2736,43 +2975,119 @@ function syncMap(): void {
     // cuando se pulsa el boton el dato suele estar puesto.
     marker.on('popupopen', () => prefetchStop(stop.stopId))
 
-    if (mapLayer) {
-      marker.addTo(mapLayer)
-    }
+    marker.addTo(mapLayer as L.LayerGroup)
   })
 
   // El trazado une las paradas en el orden real del trayecto. Sin recorrido
   // elegido no hay orden que unir: las paradas de la red no son una linea.
-  if (!showingAll && points.length > 1 && mapLayer) {
+  if (!showingAll && points.length > 1) {
     L.polyline(points, { color, weight: 5, opacity: 0.7 }).addTo(mapLayer)
   }
-
-  if (points.length > 0) {
-    map.fitBounds(points, { padding: [34, 34], maxZoom: 16 })
-  } else {
-    map.setView([40.9701, -5.6635], 13)
-  }
-
-  applyZoomScale()
-
-  // Segunda pasada: la transicion de tamano del contenedor puede no haber
-  // terminado cuando se pinta, y el encuadre quedaria corrido.
-  window.setTimeout(() => {
-    if (!map) {
-      return
-    }
-    map.invalidateSize()
-    if (points.length > 0) {
-      map.fitBounds(points, { padding: [34, 34], maxZoom: 16 })
-    }
-    applyZoomScale()
-  }, 80)
 }
 
 /**
- * Una linea entera cabe en pantalla solo muy alejado, y ahi 30 chinchetas se
- * solapan hasta ser ilegibles. Alejado se dibujan como puntos; al acercarse
- * recuperan tamano y numero de orden.
+ * Las paradas de la red, agrupadas por casillas.
+ *
+ * Dibujar las 349 desde el acercamiento minimo dejaba el mapa inservible: no
+ * por lo que se ve —a esa distancia las chinchetas se solapan hasta ser una
+ * mancha— sino por lo que cuesta, porque cada arrastre del dedo obliga a
+ * recolocar 349 nodos y el telefono se atasca. Agrupadas son unas pocas
+ * decenas de circulos, y cada uno dice cuantas paradas lleva dentro.
+ *
+ * La casilla se estrecha con cada nivel de acercamiento, asi que los grupos se
+ * van partiendo solos hasta que, ya cerca, las paradas salen una a una. Tocar
+ * un grupo hace lo mismo de golpe: encuadra lo que tiene dentro.
+ */
+function paintStopClusters(stops: NetworkStop[], zoom: number): void {
+  if (!map || !mapLayer) {
+    return
+  }
+
+  // Grados de longitud por casilla. El mundo son 360º repartidos en 2^zoom
+  // teselas, y se toma un cuarto de tesela: a zoom 13 son unos 900 m, que es la
+  // distancia a la que dos paradas dejan de distinguirse en pantalla.
+  const cellLon = 360 / 2 ** zoom / 4
+  // A la latitud de Salamanca un grado de longitud mide unos tres cuartos de
+  // uno de latitud: sin corregirlo las casillas salen rectangulares.
+  const cellLat = cellLon * 0.75
+
+  const cells = new Map<string, { stops: NetworkStop[], lat: number, lon: number }>()
+
+  for (const stop of stops) {
+    if (!Number.isFinite(stop.lat) || !Number.isFinite(stop.lon)) {
+      continue
+    }
+
+    const key = `${Math.floor(stop.lat / cellLat)}:${Math.floor(stop.lon / cellLon)}`
+    const cell = cells.get(key) ?? { stops: [], lat: 0, lon: 0 }
+    cell.stops.push(stop)
+    cell.lat += stop.lat
+    cell.lon += stop.lon
+    cells.set(key, cell)
+  }
+
+  for (const cell of cells.values()) {
+    // Un grupo de una sola parada no es un grupo: se dibuja la parada, que ya
+    // se puede tocar y abrir sin tener que acercarse mas.
+    if (cell.stops.length === 1) {
+      const stop = cell.stops[0]
+      const selected = state.search.selectedStopId === stop.stopId
+      const marker = L.marker([stop.lat, stop.lon], {
+        icon: buildStopIcon(stop.stopId, null, state.network?.getLineColor('') ?? '#1f6feb', selected),
+        keyboard: false,
+        zIndexOffset: selected ? 1000 : 0,
+      })
+
+      marker.bindPopup(buildStopPopup(stop), {
+        className: 'map-popup',
+        closeButton: true,
+        maxWidth: 260,
+        minWidth: 200,
+        autoPanPadding: [16, 16],
+      })
+      marker.on('popupopen', () => prefetchStop(stop.stopId))
+      marker.addTo(mapLayer)
+      continue
+    }
+
+    // El grupo se planta en el centro de gravedad de sus paradas, no en el de
+    // la casilla: asi cae encima del barrio y no en mitad del campo de al lado.
+    const center: [number, number] = [cell.lat / cell.stops.length, cell.lon / cell.stops.length]
+    const size = cell.stops.length >= 25 ? 52 : cell.stops.length >= 10 ? 46 : 40
+
+    const marker = L.marker(center, {
+      icon: L.divIcon({
+        className: '',
+        html: `<span class="map-cluster" style="--cluster-size:${size}px">${cell.stops.length}</span>`,
+        iconSize: [size, size],
+        iconAnchor: [size / 2, size / 2],
+      }),
+      keyboard: false,
+      zIndexOffset: 200,
+    })
+
+    marker.on('click', () => {
+      if (!map) {
+        return
+      }
+
+      // Encuadrar lo que hay dentro desgrana el grupo en un solo toque. El
+      // limite evita que un grupo de dos paradas pegadas dispare el mapa hasta
+      // el maximo acercamiento.
+      map.fitBounds(
+        cell.stops.map((stop) => [stop.lat, stop.lon] as [number, number]),
+        { padding: [48, 48], maxZoom: CLUSTER_MAX_ZOOM + 1 },
+      )
+    })
+
+    marker.addTo(mapLayer)
+  }
+}
+
+/**
+ * Una linea entera cabe en pantalla solo muy alejado, y ahi las chinchetas se
+ * amontonan. Alejado se dibujan como puntos; al acercarse recuperan tamano y
+ * numero de orden.
  */
 function applyZoomScale(): void {
   if (!map) {
@@ -2937,8 +3252,13 @@ let locationWatchId: number | null = null
 
 /** Suelta el mapa, el seguimiento de ubicación y lo calculado. */
 function closeMaps(): void {
-  stopWatchingLocation()
   pendingLocationField = null
+
+  // El seguimiento de la ubicación solo se suelta si no queda nadie mirándola:
+  // "paradas cercanas" vive ahora en Buscar y también la usa.
+  if (state.tab !== 'buscar') {
+    stopWatchingLocation()
+  }
 
   // La ficha de parada se comparte con el buscador y se dibuja fuera de la
   // pantalla actual: dejarla abierta al salir la haría aparecer en la pestaña
@@ -2952,6 +3272,7 @@ function closeMaps(): void {
     mapsSignature = ''
   }
 
+  // La ubicación (state.geo) NO se toca: es de la app, no de esta pestaña.
   state.maps = emptyMapsState()
 }
 
@@ -2992,14 +3313,14 @@ let pendingLocationField: 'origin' | 'destination' | null = null
  */
 function locateMe(): void {
   if (!navigator.geolocation) {
-    state.maps.locationError = 'Este dispositivo no permite compartir la ubicación.'
-    state.maps.locating = false
+    state.geo.error = 'Este dispositivo no permite compartir la ubicación.'
+    state.geo.locating = false
     render()
     return
   }
 
-  state.maps.locating = true
-  state.maps.locationError = null
+  state.geo.locating = true
+  state.geo.error = null
   render()
 
   stopWatchingLocation()
@@ -3017,8 +3338,8 @@ function locateMe(): void {
       maximumAge: 15_000,
     })
   } catch (error) {
-    state.maps.locating = false
-    state.maps.locationError = errorMessage(error)
+    state.geo.locating = false
+    state.geo.error = errorMessage(error)
     render()
   }
 }
@@ -3031,8 +3352,8 @@ function locateMe(): void {
  * afinada de 20 m movía las paradas cercanas hacia atrás delante de tus ojos.
  */
 function acceptPosition(position: GeolocationPosition): void {
-  // Se puede haber salido de la pestaña mientras llegaba la posición.
-  if (state.tab !== 'mapas') {
+  // Se puede haber salido de las dos pantallas que la usan mientras llegaba.
+  if (state.tab !== 'mapas' && state.tab !== 'buscar') {
     stopWatchingLocation()
     return
   }
@@ -3047,7 +3368,7 @@ function acceptPosition(position: GeolocationPosition): void {
   }
 
   const accuracy = position.coords.accuracy ?? Number.NaN
-  const known = state.maps.location
+  const known = state.geo.location
   const better = !known
     || !Number.isFinite(known.accuracy)
     || !Number.isFinite(accuracy)
@@ -3055,17 +3376,20 @@ function acceptPosition(position: GeolocationPosition): void {
     // Una lectura vieja deja de mandar aunque fuera más precisa: te has movido.
     || Date.now() - known.at > 20_000
 
-  state.maps.locating = false
-  state.maps.locationError = null
-  state.maps.locationBlocked = null
+  state.geo.locating = false
+  state.geo.error = null
+  state.geo.blocked = null
 
   if (!better) {
     render()
     return
   }
 
-  state.maps.location = { point, accuracy, at: Date.now() }
+  state.geo.location = { point, accuracy, at: Date.now() }
+  // Las dos firmas caducan: el mapa de rutas dibuja "estás aquí", y el del
+  // buscador centra ahí cuando se pide.
   mapsSignature = ''
+  mapPaintKey = ''
 
   // Alguien está esperando esta posición para rellenar un extremo de la ruta.
   if (pendingLocationField && state.maps.picking === pendingLocationField) {
@@ -3082,13 +3406,13 @@ function acceptPosition(position: GeolocationPosition): void {
 
 function rejectPosition(error: GeolocationPositionError): void {
   pendingLocationField = null
-  state.maps.locating = false
+  state.geo.locating = false
 
   // Un fallo de la lectura rápida no puede borrar una posición que ya se tenía;
   // el seguimiento puede seguir dando buenas lecturas después.
-  if (!state.maps.location) {
-    state.maps.locationError = describeGeolocationError(error)
-    log('warn', 'mapas', state.maps.locationError)
+  if (!state.geo.location) {
+    state.geo.error = describeGeolocationError(error)
+    log('warn', 'ubicación', state.geo.error)
     void diagnoseLocationBlock(error)
   }
 
@@ -3111,28 +3435,28 @@ function rejectPosition(error: GeolocationPositionError): void {
  */
 async function diagnoseLocationBlock(error: GeolocationPositionError): Promise<void> {
   if (error.code === error.PERMISSION_DENIED) {
-    state.maps.locationBlocked = 'permission'
+    state.geo.blocked = 'permission'
     render()
     return
   }
 
   if (!isNative()) {
-    state.maps.locationBlocked = null
+    state.geo.blocked = null
     return
   }
 
   try {
     const { enabled } = await DeviceSettings.isLocationEnabled()
-    state.maps.locationBlocked = enabled ? null : 'service'
+    state.geo.blocked = enabled ? null : 'service'
 
     if (!enabled) {
-      state.maps.locationError =
+      state.geo.error =
         'La ubicación del teléfono está apagada. SALBUS no puede saber dónde estás hasta que la enciendas.'
-      log('warn', 'mapas', 'El servicio de ubicación del sistema está desactivado.')
+      log('warn', 'ubicación', 'El servicio de ubicación del sistema está desactivado.')
     }
   } catch {
     // No poder preguntarlo no es lo mismo que estar apagado.
-    state.maps.locationBlocked = null
+    state.geo.blocked = null
   }
 
   render()
@@ -3153,7 +3477,7 @@ function describeGeolocationError(error: GeolocationPositionError): string {
 
 /** El punto que representa "yo", ya sea como origen o como destino. */
 function currentLocationPoint(): RoutePoint | null {
-  const location = state.maps.location
+  const location = state.geo.location
   if (!location) {
     return null
   }
@@ -3364,9 +3688,9 @@ function syncMapsMap(): void {
   }
 
   const maps = state.maps
+  const location = state.geo.location
   const signature = [
-    maps.mode,
-    maps.location ? `${maps.location.point.lat.toFixed(5)},${maps.location.point.lon.toFixed(5)}` : '',
+    location ? `${location.point.lat.toFixed(5)},${location.point.lon.toFixed(5)}` : '',
     maps.origin ? `${maps.origin.lat},${maps.origin.lon}` : '',
     maps.destination ? `${maps.destination.lat},${maps.destination.lon}` : '',
     maps.plan?.status ?? '',
@@ -3384,12 +3708,7 @@ function syncMapsMap(): void {
   mapsMap.invalidateSize()
 
   const bounds: Array<[number, number]> = []
-
-  if (maps.mode === 'cercanas') {
-    paintNearby(bounds)
-  } else {
-    paintRoute(bounds)
-  }
+  paintRoute(bounds)
 
   if (bounds.length === 1) {
     mapsMap.setView(bounds[0], 16)
@@ -3413,17 +3732,23 @@ function syncMapsMap(): void {
   }, 80)
 }
 
-function paintNearby(bounds: Array<[number, number]>): void {
-  const location = state.maps.location
-  if (!location || !mapsLayer || !state.network) {
-    return
+/**
+ * "Estás aquí": punto azul con su margen de error.
+ *
+ * Lo comparten los dos mapas —el del buscador y el de rutas—, porque es el
+ * mismo dato y el mismo dibujo. Enseñar un punto exacto cuando el GPS dice "en
+ * algún sitio de estos 300 m" sería mentir con precisión, así que el círculo va
+ * siempre que el margen dé para notarse.
+ */
+function paintYouAreHere(layer: L.LayerGroup, bounds: Array<[number, number]>): boolean {
+  const location = state.geo.location
+  if (!location) {
+    return false
   }
 
   const here: [number, number] = [location.point.lat, location.point.lon]
   bounds.push(here)
 
-  // Circulo del margen de error: enseñar un punto exacto cuando el GPS dice
-  // "en algún sitio de estos 300 m" es mentir con precisión.
   if (Number.isFinite(location.accuracy) && location.accuracy > 25) {
     L.circle(here, {
       radius: location.accuracy,
@@ -3431,7 +3756,7 @@ function paintNearby(bounds: Array<[number, number]>): void {
       weight: 1,
       opacity: 0.5,
       fillOpacity: 0.08,
-    }).addTo(mapsLayer)
+    }).addTo(layer)
   }
 
   L.marker(here, {
@@ -3443,40 +3768,20 @@ function paintNearby(bounds: Array<[number, number]>): void {
     }),
     keyboard: false,
     zIndexOffset: 1200,
-  }).addTo(mapsLayer)
+  }).addTo(layer)
 
-  nearestStops(location.point, state.network.stops, 6).forEach((entry, index) => {
-    const stop = entry.stop
-    bounds.push([stop.lat, stop.lon])
-
-    const marker = L.marker([stop.lat, stop.lon], {
-      icon: L.divIcon({
-        className: '',
-        html: `<span class="map-near${index === 0 ? ' is-first' : ''}">${index + 1}</span>`,
-        iconSize: [32, 32],
-        iconAnchor: [16, 16],
-        popupAnchor: [0, -16],
-      }),
-      keyboard: false,
-      zIndexOffset: 100 - index,
-    })
-
-    marker.bindPopup(buildStopPopup(stop), {
-      className: 'map-popup',
-      closeButton: true,
-      maxWidth: 260,
-      minWidth: 200,
-      autoPanPadding: [16, 16],
-    })
-
-    marker.addTo(mapsLayer as L.LayerGroup)
-  })
+  return true
 }
 
 function paintRoute(bounds: Array<[number, number]>): void {
   const maps = state.maps
   if (!mapsLayer) {
     return
+  }
+
+  // Sin origen ni destino puestos, lo único que hay que situar es a ti.
+  if (!maps.origin && !maps.destination) {
+    paintYouAreHere(mapsLayer, bounds)
   }
 
   for (const [point, kind] of [
