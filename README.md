@@ -168,8 +168,9 @@ leerse como firme.
 
 ## Buscar: tres formas de llegar a la misma parada
 
-**Parada**, **Cerca** y **Mapa**. Antes eran *Nombre*, *Línea* y *Mapa*, con las
+**Parada**, **Mapa** y **Cerca**. Antes eran *Nombre*, *Línea* y *Mapa*, con las
 paradas cercanas viviendo aparte, en la pestaña experimental.
+
 
 **Nombre y Línea se fusionaron en una sola búsqueda.** Eran la misma pregunta
 —dónde está esta parada— y obligaban a decidir cuál antes de escribir nada: quien
@@ -188,17 +189,26 @@ no un `<details>`: el repintado es incremental y borra los atributos que ya no
 vienen en el HTML nuevo, así que un `open` puesto por el navegador se perdía en
 el siguiente latido del reloj y el panel se cerraba solo cada segundo.
 
-**Las paradas cercanas se mudaron aquí desde la pestaña Mapas.** Allí vivían bajo
-un mapa que ocupaba media pantalla, y al tocar una parada su ficha se abría por
-encima… con los mandos del mapa montados sobre ella: los botones de ampliar y
-centrar (z-index 1200), los controles de Leaflet (800) y sus globos (700) flotan
-sobre el mapa y no sabían nada de la ficha, que se abre a 620. La solución es de
-dos partes: `isolation: isolate` sobre `.map-shell`, que encierra todos esos
-números puertas adentro y ordena el mapa entero **como un bloque** frente al
-resto de la página; y, con la ficha abierta, apagar además los mandos del mapa
-(`.is-behind-dialog`), porque un botón visible detrás de un diálogo sigue
-pidiendo que lo toquen. En Buscar, encima, la lista de cercanas no tiene mapa que
-estorbe.
+**Las paradas cercanas se mudaron aquí desde la pestaña Mapas, con su mapa.** De
+allí venía el problema: al tocar una parada su ficha se abría por encima… con los
+mandos del mapa montados sobre ella. Los botones de ampliar y centrar (z-index
+1200), los controles de Leaflet (800) y sus globos (700) flotan sobre el mapa y
+no sabían nada de la ficha, que se abre a 620.
+
+Eso se arregla **en el propio mapa**, no quitándolo: `isolation: isolate` sobre
+`.map-shell` encierra todos esos números puertas adentro y ordena el mapa entero
+**como un bloque** frente al resto de la página; y, con la ficha abierta, se
+apagan además sus mandos (`.is-behind-dialog`), porque un botón visible detrás de
+un diálogo sigue pidiendo que lo toquen. Con eso resuelto el mapa se queda, que
+es donde más dice: una lista de metros no sitúa, y saber si la parada está en tu
+acera o al otro lado de la avenida sí.
+
+El mapa de "Cerca" **reutiliza el mismo contenedor y la misma instancia de
+Leaflet** que el modo "Mapa" (`#stop-map`): son dos vistas de la misma pantalla,
+y dos instancias obligarían a mantener dos encuadres de acuerdo entre sí. Ahí ni
+se agrupa ni se recorta —son ocho paradas contadas— y van numeradas con el mismo
+criterio que la lista de abajo, para que las dos digan lo mismo: la 1 del mapa es
+la 1 de la lista.
 
 ## Buscar por mapa
 
@@ -488,6 +498,30 @@ En la app, el corte lo aplica el propio lote de refresco: las paradas del rastre
 entran en el plan marcadas con su aviso (`scan`), y en cuanto una devuelve el
 autobús las que quedan de ese aviso se saltan sin pedirse (`shouldSkip`). El
 servicio nativo hace lo mismo con su propio bucle, que sale en cuanto encuentra.
+
+### Con el servicio vivo, la pantalla dibuja con lo que él ya consultó
+
+**La web no consulta las paradas anteriores mientras el servicio está vivo**: dos
+clientes contra una fuente que admite una petición cada dos segundos es justo lo
+que la bloquea, y serían además dos recuentos capaces de discrepar. Pero el
+servicio se quedaba el dato para él: consultaba esas paradas, sacaba su «a 4
+paradas» y tiraba lo demás. Resultado en el móvil: el recuento salía bien y el
+recorrido dibujado salía con **siete rayas y un solo tiempo**, el de la parada
+del aviso.
+
+Se arregla sin una sola petición más, por los dos lados:
+
+- **El servicio comparte lo que ve.** Cada barrido emite un evento `routeUpdate`
+  con lo que encontró en cada parada, y la web lo mete en la misma caché
+  (`state.feeds`) que usa todo lo demás, así que el recorrido se dibuja con el
+  código de siempre. Una parada donde esa línea no aparece no se guarda como
+  hueco sino como «por aquí no viene», que es dibujable y distinto de «todavía no
+  se ha mirado».
+- **La web le dice si se está mirando** (`setRouteWatch`, desde `goToTab` y desde
+  `visibilitychange`). El servicio no puede saber qué pestaña hay delante, y la
+  diferencia le cambia el trabajo: mirándolo recorre la ventana entera porque hay
+  ocho paradas que dibujar; sin mirarlo vuelve a parar en el autobús, que es todo
+  lo que necesita la notificación.
 
 Un 429 **interrumpe** la búsqueda en vez de seguir hacia atrás: dar por
 descartada una parada que no se ha llegado a mirar dejaría el autobús «más lejos»

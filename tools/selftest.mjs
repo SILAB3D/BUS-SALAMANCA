@@ -1294,9 +1294,18 @@ async function main() {
     check('la cabecera es la misma en las dos',
       viewsSource.includes('function renderTrackingHead('))
 
+    // El servicio no puede saber que pestana hay delante, y la diferencia le
+    // cambia el trabajo: mirandolo hay ocho paradas que dibujar.
+    check('se avisa al servicio de si el recorrido se está mirando',
+      mainSource.includes('function isWatchingRoute()')
+        && mainSource.includes('BusTracking.setRouteWatch({ watching })')
+        && /goToTab[\s\S]{0,2000}void syncRouteWatch\(\)/.test(mainSource)
+        && /visibilitychange[\s\S]{0,400}void syncRouteWatch\(\)/.test(mainSource))
+
     // Fuera de la pestana se degrada: sigue avisando, deja de dibujar.
     check('el recorrido entero solo se pide mirándolo',
-      mainSource.includes("const watchingRoute = state.tab === 'seguimiento' && document.visibilityState === 'visible'")
+      mainSource.includes("return state.tab === 'seguimiento' && document.visibilityState === 'visible'")
+        && mainSource.includes('const watchingRoute = isWatchingRoute()')
         && mainSource.includes('watchingRoute ? FRESHNESS.routeVisible : FRESHNESS.routeBackground'))
     // La ventana es la misma mire quien mire: lo que cambia es hasta donde se
     // llega dentro de ella. Fuera de la pestana se corta al encontrarlo.
@@ -1380,6 +1389,9 @@ async function main() {
       const service = await fs.readFile(
         path.join(projectRoot, 'android', 'app', 'src', 'main', 'java', 'com', 'icuas', 'salbus',
           'BusTrackingService.java'), 'utf8')
+      const plugin = await fs.readFile(
+        path.join(projectRoot, 'android', 'app', 'src', 'main', 'java', 'com', 'icuas', 'salbus',
+          'BusTrackingPlugin.java'), 'utf8')
 
       const constant = (name) => {
         const match = new RegExp(name + '\\s*=\\s*([0-9_.]+)').exec(service)
@@ -1399,15 +1411,32 @@ async function main() {
       check('usa el mismo umbral de "el autobús está aquí"',
         /arrival\.arriving \|\| arrival\.minutes <= 1/.test(service) && AT_STOP_MINUTES === 1)
 
-      // La busqueda va de la parada mas cercana hacia atras y para en la
+      // La busqueda va de la parada mas cercana hacia atras y se queda con la
       // primera que lo tenga: siendo la mas cercana de las que lo tienen, es la
       // mas avanzada. Ese orden es lo que la hace barata.
       check('el servicio busca desde la parada más cercana hacia atrás',
-        service.includes('job.stopsAway = index + 1;')
+        service.includes('found = index + 1;')
+          && service.includes('job.stopsAway = found;')
           && service.includes('for (int index = 0; index < depth; index += 1)'))
+      // Y sale en cuanto lo encuentra... salvo con la pantalla Seguir delante,
+      // que dibuja las ocho paradas y por tanto las necesita todas.
+      check('sin nadie mirando el recorrido, la búsqueda para en el autobús',
+        /if \(!watching\) \{\s*\n\s*break;/.test(service))
+      check('mirando el recorrido se barre la ventana entera',
+        service.includes('boolean watching = routeWatch;')
+          && service.includes('static void setRouteWatch(boolean watching)'))
+      // Lo consultado se comparte con la web en vez de tirarse: es lo que le
+      // permite dibujar el recorrido sin pedir una sola consulta mas.
+      check('el servicio comparte lo que ve en cada parada',
+        service.includes('plugin.emitRouteUpdate(job.id, job.lineId, seen)')
+          && plugin.includes('notifyListeners("routeUpdate", payload)'))
+      check('la web integra ese barrido en su propia cache',
+        mainSourceForUpdates.includes("BusTracking.addListener('routeUpdate'")
+          && /routeUpdate[\s\S]{0,900}state\.feeds\[stop\.stopId\] = \{/.test(mainSourceForUpdates))
       check('un bloqueo de la fuente no adelanta al autobús',
-        /STATUS_THROTTLED[\s\S]{0,200}?return;/.test(
+        /STATUS_THROTTLED[\s\S]{0,200}?break;/.test(
           service.slice(service.indexOf('private void sweepRoute'))))
+
       check('al pasar un autobús se olvida dónde estaba',
         /job\.warnedAt3 = false;\s*\n\s*\/\/[\s\S]{0,180}?job\.stopsAway = -1;/.test(service))
       check('el recuento va detrás del tiempo en el título',

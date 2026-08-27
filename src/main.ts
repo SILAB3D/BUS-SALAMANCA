@@ -81,6 +81,7 @@ import { esc, liveMinutes, readableTextColor } from './ui'
 import {
   describeArrival,
   describeStopsAway,
+  nearestStopsForView,
   renderApp,
   stopName,
   TOUR_STEPS,
@@ -97,7 +98,32 @@ interface BatteryOptimizationPlugin {
   requestIgnoreBatteryOptimizations(): Promise<void>
 }
 
+/** Lo que el servicio ha visto en una parada anterior durante su barrido. */
+interface RouteStopUpdate {
+  stopId: string
+  /** -1 es "esa parada no publica ahora esa linea", que no es lo mismo que cero. */
+  minutes: number
+  arriving: boolean
+}
+
+/**
+ * Barrido del recorrido, tal y como lo vio el SERVICIO.
+ *
+ * El servicio ya consultaba estas paradas para localizar el autobus y tiraba el
+ * dato; la pantalla "Seguir" lo unico que podia hacer era volver a pedirlo, y no
+ * lo hace —dos clientes contra una fuente que admite una peticion cada dos
+ * segundos es justo lo que la bloquea—, asi que el recorrido salia dibujado con
+ * rayas y un solo tiempo. Ahora lo consultado se comparte.
+ */
+interface RouteUpdate {
+  jobId: string
+  lineId: string
+  stops: RouteStopUpdate[]
+  at: number
+}
+
 interface TrackingUpdate {
+
   /** `${stopId}|${lineId}`: identifica a cuál de los avisos vivos pertenece. */
   jobId: string
   stopId: string
@@ -173,12 +199,27 @@ interface BusTrackingPlugin {
   /** `stopped`: avisos que se detuvieron desde su notificacion, quiza sin la app abierta. */
   status(): Promise<{ running: boolean, stopped: string[] }>
   clearStopped(): Promise<void>
+  /**
+   * Avisa de si la pantalla "Seguir" esta delante dibujando el recorrido.
+   *
+   * Con ella delante el servicio recorre la ventana ENTERA en vez de parar en el
+   * autobus: parar basta para el "a N paradas" de la notificacion, pero el
+   * recorrido dibujado necesita las ocho paradas. El servicio no puede saber por
+   * si mismo que pestaña se esta mirando.
+   */
+  setRouteWatch(options: { watching: boolean }): Promise<void>
+
   /** Entrega los pasos medidos en segundo plano Y los borra: solo se leen una vez. */
   takePasses(): Promise<{ passes: NativePass[] }>
   addListener(
     event: 'arrivalUpdate',
     handler: (update: TrackingUpdate) => void,
   ): Promise<{ remove: () => Promise<void> }>
+  addListener(
+    event: 'routeUpdate',
+    handler: (update: RouteUpdate) => void,
+  ): Promise<{ remove: () => Promise<void> }>
+
   addListener(
     event: 'busPassed',
     handler: (update: BusPassedUpdate) => void,
@@ -339,9 +380,14 @@ async function bootstrap(): Promise<void> {
 
   window.setInterval(tick, TICK_MS)
   document.addEventListener('visibilitychange', () => {
+    // Al perder la pantalla el recorrido deja de dibujarse, asi que el servicio
+    // vuelve a parar la busqueda en cuanto encuentra el autobus. Es la mitad
+    // cara del barrido, y nadie la esta mirando.
+    void syncRouteWatch()
+
     if (document.visibilityState !== 'visible') {
-      // No hay nada que parar: el aviso tiene que seguir vivo justamente aquí,
-      // y su rastreo ya se reduce solo al perder la pantalla (el plan de
+      // No hay nada mas que parar: el aviso tiene que seguir vivo justamente
+      // aquí, y su rastreo ya se reduce solo al perder la pantalla (el plan de
       // refresco mira `visibilityState`).
       return
     }
@@ -740,7 +786,8 @@ function buildRefreshPlan(): RefreshEntry[] {
   // acotaba a ojo —por los minutos que faltaban— y se quedaba corto justo
   // cuando el autobús venía de lejos, que es cuando el recorrido salía en
   // blanco y el aviso no sabía decir por dónde venía.
-  const watchingRoute = state.tab === 'seguimiento' && document.visibilityState === 'visible'
+  const watchingRoute = isWatchingRoute()
+
 
   for (const job of state.trackings) {
     // Con el servicio nativo vivo, el rastreo es suyo: hacerlo también aquí
@@ -813,7 +860,48 @@ function buildRefreshPlan(): RefreshEntry[] {
   })
 }
 
+/**
+ * ¿Se está MIRANDO el recorrido ahora mismo?
+ *
+ * Es lo que distingue «hay que dibujar las ocho paradas» de «basta con saber a
+ * cuántas viene». Lo consultan las dos mitades: el plan de refresco de la web y,
+ * a través de `syncRouteWatch`, el servicio nativo, que es quien barre el
+ * recorrido cuando está vivo.
+ */
+function isWatchingRoute(): boolean {
+  return state.tab === 'seguimiento' && document.visibilityState === 'visible'
+}
+
+/**
+ * Le dice al servicio si el recorrido se está mirando.
+ *
+ * El servicio no puede saber qué pestaña hay delante, y la diferencia le cambia
+ * el trabajo: mirándolo recorre la ventana entera (hay ocho paradas que dibujar),
+ * y sin mirarlo para en cuanto encuentra el autobús, que es todo lo que necesita
+ * la notificación. Se le avisa al cambiar de pestaña y al pasar a segundo plano.
+ */
+let routeWatchSent: boolean | null = null
+
+async function syncRouteWatch(): Promise<void> {
+  const watching = isWatchingRoute()
+
+  if (!isNative() || watching === routeWatchSent) {
+    return
+  }
+
+  routeWatchSent = watching
+
+  try {
+    await BusTracking.setRouteWatch({ watching })
+  } catch {
+    // Un servicio que no esté vivo no tiene nada que ajustar; se reintenta en el
+    // siguiente cambio de pestaña.
+    routeWatchSent = null
+  }
+}
+
 /** ¿El autobús de ese aviso está AHORA en esa parada, según lo que ya se sabe? */
+
 function busIsAt(stopId: string, lineId: string): boolean {
   const feed = state.feeds[stopId]
   if (!feed || feed.status === 'error') {
@@ -1172,6 +1260,11 @@ async function syncTrackingService(): Promise<void> {
     trackingServiceActive = jobs.length > 0
     nativeMonitorIds = new Set(monitors.map((monitor) => monitor.id))
 
+    // El servicio puede acabar de arrancar en un proceso nuevo, donde no sabe
+    // nada de qué pestaña hay delante: se le vuelve a decir.
+    routeWatchSent = null
+    void syncRouteWatch()
+
     // El servicio publica sus propias notificaciones: cualquier resto de la web
     // sobra, porque ya no se volvería a actualizar.
     for (const job of state.trackings) {
@@ -1470,6 +1563,50 @@ async function restoreTrackingService(): Promise<void> {
       if (update.finished) {
         void finishTracking(update.jobId, true)
         return
+      }
+
+      render()
+    })
+
+    // Las paradas anteriores, con lo que el servicio vio en cada una. Entran en
+    // la MISMA cache que todo lo demás (`state.feeds`), así que el recorrido se
+    // dibuja con el código de siempre y sin pedir una sola consulta más.
+    await BusTracking.addListener('routeUpdate', (update) => {
+      for (const stop of update.stops ?? []) {
+        if (!stop?.stopId) {
+          continue
+        }
+
+        const existing = state.feeds[stop.stopId]
+        // Sin esa línea en esa parada el dato no es un hueco: es un "por aquí no
+        // viene", y se guarda como tal (lista sin esa línea) para que la pantalla
+        // pueda distinguirlo de "todavía no se ha mirado".
+        const others = (existing?.arrivals ?? []).filter((item) => item.lineId !== update.lineId)
+
+        state.feeds[stop.stopId] = {
+          stopId: stop.stopId,
+          stopName: existing?.stopName ?? null,
+          status: 'ok',
+          arrivals:
+            stop.minutes >= 0
+              ? [
+                  {
+                    stopId: stop.stopId,
+                    lineId: update.lineId,
+                    minutesUntil: Math.max(0, stop.minutes),
+                    status: stop.arriving ? ('arriving' as const) : ('scheduled' as const),
+                    estimatedClock: new Date(update.at + stop.minutes * 60_000).toLocaleTimeString(
+                      'es-ES',
+                      { hour: '2-digit', minute: '2-digit' },
+                    ),
+                    observedAt: update.at,
+                  },
+                  ...others,
+                ]
+              : others,
+          fetchedAt: update.at,
+          message: null,
+        }
       }
 
       render()
@@ -2645,6 +2782,8 @@ async function goToTab(tab: TabId): Promise<void> {
   state.sheet = null
   persistTab()
   render()
+  // El servicio barre el recorrido entero solo mientras se está mirando.
+  void syncRouteWatch()
   void refreshVisible('auto')
 }
 
@@ -2796,19 +2935,28 @@ function syncMap(): void {
     mapPaintKey = ''
   }
 
-  const direction = state.network.directionByKey.get(state.search.directionKey)
+  // El MISMO mapa sirve a dos modos del buscador, porque son dos vistas de la
+  // misma pantalla: "Mapa" (la red, o un recorrido elegido) y "Cerca" (donde
+  // estas y las paradas que tienes al lado). Dos instancias de Leaflet
+  // obligarian a mantener dos encuadres de acuerdo entre si.
+  const nearby = state.search.mode === 'cerca'
+  const direction = nearby ? undefined : state.network.directionByKey.get(state.search.directionKey)
 
   // Sin linea ni sentido elegidos el mapa NO se queda vacio: enseña la red
   // entera para poder tocar directamente la parada que se busca. Es la forma
   // natural de usar un mapa —"esta es mi calle, esta es mi parada"— y antes
   // obligaba a saber de antemano que linea pasa por ella.
-  const stops = direction?.stops ?? state.network.stops
+  const stops = nearby
+    ? nearestStopsForView().map((entry) => entry.stop)
+    : direction?.stops ?? state.network.stops
 
   // La pantalla completa entra en la firma: al cambiar de tamano hay que
-  // reencuadrar el recorrido, no solo recalcular el lienzo.
-  const signature = `${state.search.directionKey || 'todas'}|${
+  // reencuadrar el recorrido, no solo recalcular el lienzo. El modo tambien,
+  // porque cambiar de "Mapa" a "Cerca" cambia lo que hay que encuadrar.
+  const signature = `${nearby ? 'cerca' : state.search.directionKey || 'todas'}|${
     state.search.mapExpanded ? 'full' : 'inline'
   }|${state.geo.location ? 'geo' : ''}`
+
 
   if (signature === mapSignature) {
     map.invalidateSize()
@@ -2832,14 +2980,22 @@ function syncMap(): void {
     }
   }
 
-  // Con un recorrido elegido manda el recorrido. Sin el, si ya se sabe donde
+  // En "Cerca" el encuadre tiene que caber TU punto y las paradas: enseñar las
+  // paradas sin enseñarte a ti no dice de que lado de la calle estan.
+  if (nearby && state.geo.location) {
+    points.push([state.geo.location.point.lat, state.geo.location.point.lon])
+  }
+
+  // Con un recorrido elegido manda el recorrido. En "Cerca" manda el conjunto
+  // de puntos, que ya te incluye. Y en el mapa de la red, si ya se sabe donde
   // estas, el encuadre arranca a tu alrededor: la parada que se busca en un
   // mapa de toda la ciudad casi siempre es una de las de al lado.
-  const home = !direction ? state.geo.location : null
+  const home = !direction && !nearby ? state.geo.location : null
 
   if (home) {
     map.setView([home.point.lat, home.point.lon], 16)
   } else if (points.length > 0) {
+
     map.fitBounds(points, { padding: [34, 34], maxZoom: 16 })
   } else {
     map.setView([40.9701, -5.6635], 13)
@@ -2861,6 +3017,66 @@ function syncMap(): void {
     applyZoomScale()
     paintStopMarkers()
   }, 80)
+}
+
+/**
+ * "Cerca": tu punto y las paradas que tienes al lado, numeradas.
+ *
+ * Ni se agrupan ni se recortan al encuadre: son ocho paradas contadas, y el
+ * numero —cual tienes mas cerca— ES la informacion, igual que en la lista de
+ * abajo. Se numeran con el mismo criterio que ella para que las dos digan lo
+ * mismo: la 1 del mapa es la 1 de la lista.
+ */
+function paintNearbyMarkers(): void {
+  if (!map || !mapLayer) {
+    return
+  }
+
+  const key = `cerca|${state.search.selectedStopId ?? ''}|${
+    state.geo.location
+      ? `${state.geo.location.point.lat.toFixed(5)},${state.geo.location.point.lon.toFixed(5)}`
+      : ''
+  }`
+
+  if (key === mapPaintKey) {
+    return
+  }
+
+  mapPaintKey = key
+  mapLayer.clearLayers()
+  paintYouAreHere(mapLayer, [])
+
+  nearestStopsForView().forEach((entry, index) => {
+    const stop = entry.stop
+    const selected = state.search.selectedStopId === stop.stopId
+
+    const marker = L.marker([stop.lat, stop.lon], {
+      icon: L.divIcon({
+        className: '',
+        html: `<span class="map-near${index === 0 ? ' is-first' : ''}${
+          selected ? ' is-selected' : ''
+        }">${index + 1}</span>`,
+        iconSize: [32, 32],
+        iconAnchor: [16, 16],
+        popupAnchor: [0, -16],
+      }),
+      keyboard: false,
+      zIndexOffset: selected ? 1000 : 100 - index,
+    })
+
+    marker.bindPopup(buildStopPopup(stop), {
+      className: 'map-popup',
+      closeButton: true,
+      maxWidth: 260,
+      minWidth: 200,
+      autoPanPadding: [16, 16],
+    })
+
+    // Igual que en el mapa de la red: abrir el globo ya adelanta la consulta,
+    // porque quien lo abre casi siempre acaba pulsando "Ver tiempos".
+    marker.on('popupopen', () => prefetchStop(stop.stopId))
+    marker.addTo(mapLayer as L.LayerGroup)
+  })
 }
 
 /** Encuadre redondeado a tres decimales (~100 m): sirve de firma sin repintar por nada. */
@@ -2893,9 +3109,17 @@ function paintStopMarkers(): void {
     return
   }
 
+  const nearby = state.search.mode === 'cerca'
+
+  if (nearby) {
+    paintNearbyMarkers()
+    return
+  }
+
   const direction = state.network.directionByKey.get(state.search.directionKey)
   const showingAll = !direction
   const zoom = map.getZoom()
+
 
   // Solo se dibuja lo que se está mirando, con un margen para que arrastrar un
   // poco el mapa no deje huecos. Leaflet no descarta nada por su cuenta: cada

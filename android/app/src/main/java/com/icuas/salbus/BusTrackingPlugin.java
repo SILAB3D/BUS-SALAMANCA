@@ -223,6 +223,21 @@ public class BusTrackingPlugin extends Plugin {
         call.resolve();
     }
 
+    /**
+     * Dice si la pantalla "Seguir" esta delante dibujando el recorrido.
+     *
+     * Con ella delante el servicio recorre la ventana ENTERA en vez de parar en
+     * el autobus: parar basta para el "a 4 paradas" de la notificacion, pero el
+     * recorrido dibujado necesita las ocho paradas. Se avisa desde la web porque
+     * el servicio no puede saber que pestaña se esta mirando.
+     */
+    @PluginMethod
+    public void setRouteWatch(PluginCall call) {
+        BusTrackingService.setRouteWatch(Boolean.TRUE.equals(call.getBoolean("watching", false)));
+        call.resolve();
+    }
+
+
     /** Invocado desde el servicio en cada ciclo para que la UI se mantenga al dia. */
     void emitArrivalUpdate(
         String jobId,
@@ -248,6 +263,25 @@ public class BusTrackingPlugin extends Plugin {
         payload.put("stopsAway", stopsAway);
         payload.put("at", System.currentTimeMillis());
         notifyListeners("arrivalUpdate", payload);
+    }
+
+    /**
+     * Lo que el servicio ha visto en las paradas anteriores durante su barrido.
+     *
+     * Es dato que ya tenia: lo consultaba para localizar el autobus y lo tiraba.
+     * Compartirlo es lo que permite que la pantalla "Seguir" dibuje el recorrido
+     * SIN pedir nada por su cuenta. Con el servicio vivo la web no consulta esas
+     * paradas —dos clientes contra una fuente que admite una peticion cada dos
+     * segundos es justo lo que la bloquea—, asi que sin esto el recorrido salia
+     * con siete rayas y un solo tiempo, el de la parada del aviso.
+     */
+    void emitRouteUpdate(String jobId, String lineId, JSONArray stops) {
+        JSObject payload = new JSObject();
+        payload.put("jobId", jobId);
+        payload.put("lineId", lineId);
+        payload.put("stops", stops);
+        payload.put("at", System.currentTimeMillis());
+        notifyListeners("routeUpdate", payload);
     }
 
     /** Un autobus mas ha pasado por la parada y el aviso sigue con el siguiente. */

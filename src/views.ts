@@ -604,11 +604,17 @@ function renderTrackingHead(
       ${lineChip(tracking.lineId, lineColor(tracking.lineId), 'lg')}
       <div class="card-head-copy">
         <h2 class="card-title">${esc(tracking.stopName)}</h2>
-        <p class="card-sub${wrap || stopsAway ? ' is-wrap' : ''}">${esc(
+        <p class="card-sub${wrap ? ' is-wrap' : ''}">${esc(
           progress + describeArrival(tracking.stopId, tracking.lineId),
-        )}${
+        )}</p>
+        ${
+          // Por dónde viene va en su propia línea, no pegado al final del
+          // sentido. Como cola de un texto que puede ocupar dos líneas, acababa
+          // colgando solo en una tercera y a media altura: parecía un cartel
+          // suelto en medio de la tarjeta. En su línea se alinea con el título y
+          // el sentido, y cada tarjeta lo lleva en el mismo sitio.
           stopsAway ? `<span class="stops-away">${icon('bus')}${esc(stopsAway)}</span>` : ''
-        }</p>
+        }
       </div>
       <div class="card-actions">
         <div class="arrival-eta">${
@@ -776,13 +782,14 @@ function renderBuscar(): string {
 
     <div class="segmented" role="tablist">
       ${renderSegment('parada', 'Parada', 'search')}
-      ${renderSegment('cerca', 'Cerca', 'pin')}
       ${renderSegment('mapa', 'Mapa', 'map')}
+      ${renderSegment('cerca', 'Cerca', 'pin')}
     </div>
 
     ${state.search.mode === 'parada' ? renderSearchByStop() : ''}
-    ${state.search.mode === 'cerca' ? renderSearchNearby() : ''}
     ${state.search.mode === 'mapa' ? renderSearchByMap() : ''}
+    ${state.search.mode === 'cerca' ? renderSearchNearby() : ''}
+
   `
 }
 
@@ -957,14 +964,19 @@ function stopMatches(stop: NetworkStop, query: string): boolean {
 }
 
 /**
- * Paradas cercanas, ya dentro de Buscar.
+ * Paradas cercanas, ya dentro de Buscar y con su mapa.
  *
- * Antes vivía en la pestaña experimental Mapas, encajada bajo un mapa que
- * ocupaba media pantalla: al tocar una parada su ficha se abría por encima y
- * los mandos del mapa —ampliar, centrar, el zoom de Leaflet— se le montaban
- * encima, porque flotan sobre el mapa y no sabían nada de la ficha. Aquí no hay
- * mapa que estorbe, y además es la pantalla donde se busca una parada, que es
- * exactamente lo que se está haciendo.
+ * Vivía en la pestaña experimental Mapas, y de allí venía la queja: al tocar
+ * una parada, su ficha se abría con los mandos del mapa montados encima
+ * —ampliar, centrar, el zoom de Leaflet—, porque flotan sobre el mapa y no
+ * sabían nada de la ficha. Eso está arreglado en el propio mapa (ver
+ * `.map-shell` en la hoja de estilos: `isolation: isolate`), así que el mapa se
+ * conserva aquí, que es donde más dice: una lista de metros no sitúa, y saber
+ * si la parada está en tu acera o al otro lado de la avenida sí.
+ *
+ * Reutiliza el MISMO contenedor y la misma instancia de Leaflet que el modo
+ * "Mapa" (`#stop-map`): son dos vistas de la misma pantalla, y dos instancias
+ * obligarían a mantener dos encuadres de acuerdo entre sí.
  */
 function renderSearchNearby(): string {
   const geo = state.geo
@@ -998,6 +1010,12 @@ function renderSearchNearby(): string {
   }
 
   return `
+    ${renderMapShell('Paradas más cercanas')}
+    <p class="text-tiny">
+      Tú eres el punto azul, con su margen de error. Toca una parada del mapa o de
+      la lista para ver sus tiempos.
+    </p>
+
     <div class="section-head">
       <h2>Paradas más cercanas</h2>
       <button class="btn btn-secondary btn-sm" type="button" data-action="locate">
@@ -1007,6 +1025,7 @@ function renderSearchNearby(): string {
     <p class="text-tiny">${esc(locationAgeLabel())}</p>
 
     <div class="result-list">
+
       ${nearby
         .map((entry, index) => {
           const lines = state.network?.getLinesForStop(entry.stop.stopId) ?? []

@@ -2737,6 +2737,45 @@ button.card-head {
   }
 }
 
+/* Paradas cercanas sobre el mapa ------------------------------------ *
+ *
+ * Numeradas con el mismo criterio que la lista de abajo, para que las dos digan
+ * lo mismo: la 1 del mapa es la 1 de la lista.
+ *
+ * Colores fijos y no los del tema: las teselas de OpenStreetMap son SIEMPRE
+ * claras, tambien con la aplicacion en modo oscuro, y con var(--surface) las
+ * chinchetas salian azul oscuro sobre azul oscuro y no se leia el numero.
+ */
+.map-near {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--r-full);
+  background: #fff;
+  border: 2.5px solid #1e4fd8;
+  color: #12306f;
+  font-size: 13.5px;
+  font-weight: 800;
+  box-shadow: 0 2px 8px rgba(6, 12, 26, 0.35);
+}
+
+/* La más cercana es la respuesta a la pregunta que se estaba haciendo: va
+   maciza y algo más grande para que se distinga sin leer el número. */
+.map-near.is-first {
+  background: #1e4fd8;
+  color: #fff;
+  transform: scale(1.14);
+}
+
+/* La que tiene la ficha abierta: hay que poder encontrarla en el mapa después
+   de cerrarla, sobre todo si se abrió desde la lista y no desde el mapa. */
+.map-near.is-selected {
+  border-color: #0b1f52;
+  box-shadow: 0 0 0 4px rgba(30, 79, 216, 0.32), 0 2px 8px rgba(6, 12, 26, 0.35);
+  transform: scale(1.2);
+}
+
 /* Extremos de una ruta: salida hueca, llegada maciza. */
 .map-end {
   display: block;
@@ -3125,22 +3164,37 @@ button.card-head {
    se recortara con puntos suspensivos, faltar y estar cortado se
    verían igual. */
 
+/*
+ * "Por donde viene", en su propia linea bajo el sentido.
+ *
+ * Iba pegado al final del sentido, como cola del mismo parrafo. Con un sentido
+ * de dos lineas —lo normal: "Hacia Vistahermosa (278)" ya las ocupa— el
+ * distintivo acababa colgando solo en una tercera, a media altura y sin nada al
+ * lado: se leia como un cartel puesto en medio de la tarjeta, no como el dato
+ * de esa parada.
+ *
+ * `align-self: start` es lo que hace que se cina a su texto en vez de estirarse
+ * a lo ancho de la tarjeta, y el margen de arriba lo separa del sentido lo mismo
+ * que el sentido esta separado del titulo, en la misma columna que los dos.
+ */
 .stops-away {
   display: inline-flex;
+  align-self: flex-start;
   align-items: center;
-  gap: 4px;
-  margin-left: 8px;
-  padding: 1px 8px 1px 6px;
+  gap: 5px;
+  margin-top: 5px;
+  padding: 3px 10px 3px 8px;
   border-radius: var(--r-full);
   background: var(--info-soft);
   color: var(--brand-600);
+  font-size: 12.5px;
   font-weight: 700;
+  line-height: 1.2;
   white-space: nowrap;
-  vertical-align: 1px;
 }
 
 .stops-away svg {
-  width: 13px;
-  height: 13px;
+  width: 14px;
+  height: 14px;
   flex: none;
 }

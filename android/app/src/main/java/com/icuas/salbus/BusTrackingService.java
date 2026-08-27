@@ -192,6 +192,28 @@ public class BusTrackingService extends Service {
     /** Pasado este tiempo, la ultima localizacion deja de ensenarse. */
     private static final long ROUTE_FIX_MAX_AGE_MS = 120_000L;
 
+    /**
+     * La pantalla "Seguir" esta delante, dibujando el recorrido parada a parada.
+     *
+     * Cambia dos cosas de la busqueda:
+     *
+     *  - Se recorre la ventana ENTERA en vez de parar en el autobus. Parar en el
+     *    autobus basta para decir "a 4 paradas", que es lo unico que necesita la
+     *    notificacion; pero el recorrido dibujado necesita las ocho, y sin ellas
+     *    la pantalla salia con siete rayas y un solo tiempo.
+     *  - Lo que se ve en cada parada se manda a la web (emitRouteUpdate). El
+     *    servicio ya estaba consultando esas paradas y tirando el dato: la web
+     *    lo unico que podia hacer era volver a pedirlo, y dos clientes contra
+     *    una fuente que admite una peticion cada dos segundos es justo lo que la
+     *    bloquea. Un solo dueño de la cola, y lo que consulta lo comparte.
+     */
+    private static volatile boolean routeWatch = false;
+
+    static void setRouteWatch(boolean watching) {
+        routeWatch = watching;
+    }
+
+
     /** Minutos restantes a partir de los cuales se avisa con una vibracion corta. */
     private static final int VIBRATION_THRESHOLD_MINUTES = 3;
 
@@ -1066,9 +1088,16 @@ public class BusTrackingService extends Service {
         // minutos que faltan: ese calculo daba por sentado un ritmo fijo entre
         // paradas, y en cuanto el autobus acumulaba retraso o trafico la
         // busqueda se paraba antes de llegar a el, con lo que el aviso se
-        // quedaba sin decir por donde venia justo cuando mas se preguntaba. El
-        // coste real lo pone el bucle, que sale en cuanto lo encuentra.
+        // quedaba sin decir por donde venia justo cuando mas se preguntaba.
+        //
+        // Lo que sigue acotando el COSTE es la salida anticipada: en cuanto una
+        // parada tiene el autobus encima, las de mas atras ya no cambian la
+        // respuesta. Salvo con la pantalla "Seguir" delante, que dibuja las ocho
+        // y por tanto las necesita todas.
+        boolean watching = routeWatch;
         int depth = job.route.length;
+        int found = -1;
+        JSONArray seen = new JSONArray();
 
         for (int index = 0; index < depth; index += 1) {
             if (!running) {
@@ -1082,7 +1111,7 @@ public class BusTrackingService extends Service {
             // llegado a mirar, y el autobus acabaria "mas lejos" de lo que esta.
             if (result.status == ArrivalsClient.STATUS_THROTTLED) {
                 backoffMs = Math.min(BACKOFF_MAX_MS, backoffMs * 2);
-                return;
+                break;
             }
 
             if (result.status != ArrivalsClient.STATUS_OK) {
@@ -1090,19 +1119,45 @@ public class BusTrackingService extends Service {
             }
 
             ArrivalsClient.Arrival arrival = result.findLine(job.lineId);
-            if (arrival != null && (arrival.arriving || arrival.minutes <= 1)) {
+
+            // Lo consultado se comparte con la web, tenga o no autobus encima:
+            // "por aqui no viene" es tan dibujable como "aqui esta".
+            try {
+                JSONObject entry = new JSONObject();
+                entry.put("stopId", job.route[index]);
+                entry.put("minutes", arrival == null ? -1 : arrival.minutes);
+                entry.put("arriving", arrival != null && arrival.arriving);
+                seen.put(entry);
+            } catch (Exception ignored) {
+                /* una parada sin serializar no invalida el resto del barrido */
+            }
+
+            if (found < 0 && arrival != null && (arrival.arriving || arrival.minutes <= 1)) {
                 // La primera que lo tiene encima es la mas avanzada: +1 porque
                 // route[0] es la parada ANTERIOR a la del aviso.
-                job.stopsAway = index + 1;
-                job.stopsAwayAt = now;
-                return;
+                found = index + 1;
+
+                if (!watching) {
+                    break;
+                }
             }
         }
 
-        // No consta en ninguna de las miradas. Puede estar mas atras del tope,
-        // entre dos paradas sin llegar a "llegando", o la fuente puede no estar
-        // publicando esa linea ahora. Se calla en vez de repetir lo anterior.
-        job.stopsAway = -1;
+        if (found > 0) {
+            job.stopsAway = found;
+            job.stopsAwayAt = now;
+        } else {
+            // No consta en ninguna de las miradas. Puede estar mas atras del
+            // tope, entre dos paradas sin llegar a "llegando", o la fuente puede
+            // no estar publicando esa linea ahora. Se calla en vez de repetir lo
+            // anterior.
+            job.stopsAway = -1;
+        }
+
+        BusTrackingPlugin plugin = listener;
+        if (plugin != null && seen.length() > 0) {
+            plugin.emitRouteUpdate(job.id, job.lineId, seen);
+        }
     }
 
     /**
