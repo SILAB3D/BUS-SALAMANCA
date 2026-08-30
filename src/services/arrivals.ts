@@ -31,8 +31,70 @@ const PROXY_BASE_URL = '/api/arrivals'
 const USER_AGENT =
   'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36'
 
-/** Espaciado minimo entre peticiones consecutivas. Medido como seguro. */
+/**
+ * Espaciado SOSTENIDO entre peticiones. Medido como seguro indefinidamente.
+ *
+ * Es el ritmo al que se acaba cayendo cuando hay mucho que pedir, no el de la
+ * primera peticion: para eso esta la rafaga (BURST_CAPACITY).
+ */
 export const MIN_REQUEST_SPACING_MS = 2_000
+
+/**
+ * Peticiones que pueden salir SEGUIDAS desde reposo.
+ *
+ * La fuente limita con un cubo de fichas, no con un cronometro: admite una
+ * rafaga y luego repone. Medido el 2026-08-17 daba 6-8 fichas de capacidad y
+ * una reposicion de ~1 ficha cada 1,2 s. Aqui se usan CUATRO, muy por debajo de
+ * lo medido, porque pasarse cuesta un bloqueo de 6-10 s y quedarse corto solo
+ * cuesta esperar un poco mas.
+ *
+ * Sin esto el cliente esperaba 2 s ANTES de la primera peticion aunque llevara
+ * un minuto sin pedir nada: abrir una parada tardaba 2 s de reloj en empezar a
+ * consultar, y ocho paradas de un recorrido eran mas de veinte segundos.
+ */
+const BURST_CAPACITY = 4
+
+/**
+ * Cada cuanto vuelve una ficha al cubo.
+ *
+ * 1,4 s frente a los ~1,2 s medidos: mismo criterio conservador. Por debajo de
+ * este ritmo la fuente aguanta indefinidamente.
+ */
+const REFILL_MS = 1_400
+
+/**
+ * Fichas que el trafico de fondo NO puede gastar.
+ *
+ * Es lo que garantiza que la parada que alguien esta MIRANDO no espere: el
+ * repaso de las paradas guardadas, el recorrido de un aviso y todo lo que nadie
+ * tiene delante se quedan a una ficha del fondo del cubo, y esa ficha esta
+ * siempre lista para quien abre una parada. Sin la reserva, tocar una tarjeta
+ * en mitad de un repaso significaba esperar a que el lote soltara una ficha.
+ */
+const RESERVED_FOR_FOCUS = 1
+
+/**
+ * Peticiones simultaneas como maximo.
+ *
+ * Antes era estrictamente UNA: se esperaba la respuesta antes de pedir la
+ * siguiente, asi que la latencia (~0,6 s) se SUMABA al espaciado en vez de
+ * solaparse. Dos permiten aprovechar la rafaga de verdad sin acercarse a lo que
+ * bloqueaba a la fuente, que eran las peticiones sin ningun limite.
+ */
+const MAX_IN_FLIGHT_BACKGROUND = 2
+
+/**
+ * Y una mas, reservada igual que la ficha.
+ *
+ * La reserva de fichas sola no bastaba: aunque hubiera ficha, la parada recien
+ * abierta tenia que esperar a que una de las dos peticiones en vuelo terminara,
+ * y eso son los ~3 s que tarda la fuente en responder. Medido antes de esto:
+ * 3,3 s para una parada abierta en mitad de un repaso; con el hueco reservado
+ * paga solo lo que tarde la red.
+ */
+const MAX_IN_FLIGHT = MAX_IN_FLIGHT_BACKGROUND + 1
+
+
 
 /** Espaciado al que se degrada temporalmente tras recibir un 429. */
 const THROTTLED_SPACING_MS = 4_000
@@ -64,8 +126,11 @@ interface QueueTask {
 export interface ClientHealth {
   /** Espaciado efectivo actual entre peticiones. */
   spacingMs: number
+  /** Fichas disponibles ahora mismo: lo que puede salir sin esperar. */
+  tokens: number
   /** Peticiones pendientes en cola. */
   queued: number
+
   /** Timestamp hasta el que la cola esta penalizada por un 429. */
   penaltyUntil: number
   throttleEvents: number
@@ -79,15 +144,23 @@ const inFlight = new Map<string, Promise<StopFeed>>()
 
 const queue: QueueTask[] = []
 let queueRunning = false
+/** Peticiones en vuelo ahora mismo; nunca mas de MAX_IN_FLIGHT. */
+let running = 0
 let lastRequestAt = 0
 let spacingMs = MIN_REQUEST_SPACING_MS
 let penaltyUntil = 0
 let backoffMs = BACKOFF_BASE_MS
 let successStreak = 0
 
+/** Fichas del cubo. Arranca lleno: al abrir la app no se debe nada. */
+let tokens = BURST_CAPACITY
+let tokensAt = Date.now()
+
 const health: ClientHealth = {
   spacingMs,
+  tokens: BURST_CAPACITY,
   queued: 0,
+
   penaltyUntil: 0,
   throttleEvents: 0,
   requestCount: 0,
@@ -96,14 +169,17 @@ const health: ClientHealth = {
 }
 
 export function getClientHealth(): ClientHealth {
+  refillTokens()
   return {
     ...health,
     spacingMs,
+    tokens: Math.floor(tokens),
     queued: queue.length,
     penaltyUntil,
     lastRequestAt,
   }
 }
+
 
 export function getCachedFeed(stopId: string): StopFeed | null {
   return cache.get(stopId) ?? null
@@ -172,6 +248,45 @@ export async function fetchStopArrivals(stopId: string, options: FetchOptions = 
  *
  * Las dos se consultan justo antes de pedir cada parada, con lo que ya se sabe.
  */
+/**
+ * Pide varias paradas A LA VEZ y las va entregando segun llegan.
+ *
+ * La diferencia con `fetchStopsSequentially` no es de estilo: alli el llamador
+ * espera cada respuesta antes de pedir la siguiente, asi que en la cola no hay
+ * nunca mas de una peticion y el cupo de la fuente —que admite una rafaga— se
+ * desperdicia entero. Medido contra la fuente real: ocho paradas de un
+ * recorrido tardaban 29,5 s pedidas de una en una.
+ *
+ * Aqui entran las ocho de golpe y es la COLA la que decide el ritmo, con su
+ * cubo de fichas y su tope de peticiones en vuelo. El orden de llegada deja de
+ * estar garantizado, y da igual: `onFeed` pinta cada parada en cuanto llega.
+ *
+ * Lo unico que NO puede usar esto es la busqueda del autobus hacia atras, que
+ * decide si sigue preguntando SEGUN lo que devolvio la parada anterior. Esa
+ * sigue en `fetchStopsSequentially`, que existe justo para eso.
+ */
+export async function fetchStopsInParallel(
+  stopIds: string[],
+  options: FetchOptions & {
+    onFeed?: (feed: StopFeed) => void
+    onStart?: (stopId: string) => void
+    priorityOf?: (stopId: string) => 'high' | 'normal'
+  } = {},
+): Promise<StopFeed[]> {
+  const pending = stopIds.map((stopId) => {
+    options.onStart?.(stopId)
+    return fetchStopArrivals(stopId, {
+      ...options,
+      priority: options.priorityOf?.(stopId) ?? options.priority,
+    }).then((feed) => {
+      options.onFeed?.(feed)
+      return feed
+    })
+  })
+
+  return Promise.all(pending)
+}
+
 export async function fetchStopsSequentially(
   stopIds: string[],
   options: FetchOptions & {
@@ -179,6 +294,16 @@ export async function fetchStopsSequentially(
     onStart?: (stopId: string) => void
     shouldStop?: () => boolean
     shouldSkip?: (stopId: string) => boolean
+    /**
+     * Prioridad de CADA parada, cuando no todas valen lo mismo.
+     *
+     * Un lote no es homogeneo: entre diez paradas guardadas puede ir la que
+     * alguien tiene abierta en pantalla. Con una sola prioridad para todo el
+     * lote, esa parada esperaba su turno como las demas —y eso son segundos de
+     * reloj mirando un hueco— porque la prioridad solo servia para ordenar
+     * lotes enteros entre si, no dentro de uno.
+     */
+    priorityOf?: (stopId: string) => 'high' | 'normal'
   } = {},
 ): Promise<StopFeed[]> {
   const results: StopFeed[] = []
@@ -193,7 +318,10 @@ export async function fetchStopsSequentially(
     }
 
     options.onStart?.(stopId)
-    const feed = await fetchStopArrivals(stopId, options)
+    const feed = await fetchStopArrivals(stopId, {
+      ...options,
+      priority: options.priorityOf?.(stopId) ?? options.priority,
+    })
     results.push(feed)
     options.onFeed?.(feed)
   }
@@ -201,10 +329,20 @@ export async function fetchStopsSequentially(
   return results
 }
 
-/** Estima cuanto tardara en refrescarse un lote de paradas, para avisar en la UI. */
+/**
+ * Estima cuanto tardara en refrescarse un lote, para avisar en la UI.
+ *
+ * Cuenta la rafaga: las primeras salen casi seguidas y solo las que quedan
+ * pagan la reposicion. Con el calculo anterior —todas al espaciado sostenido—
+ * el aviso prometia el doble de espera de la que hay.
+ */
 export function estimateBatchDurationMs(stopCount: number): number {
-  return Math.max(0, stopCount - 1) * spacingMs
+  refillTokens()
+  const free = Math.min(stopCount, Math.floor(tokens))
+  const waiting = Math.max(0, stopCount - free)
+  return waiting * (spacingMs > MIN_REQUEST_SPACING_MS ? spacingMs : REFILL_MS)
 }
+
 
 /* ------------------------------------------------------------------ *
  * Cola serializada                                                     *
@@ -229,6 +367,43 @@ function runQueued<T>(task: () => Promise<T>, priority: number): Promise<T> {
   })
 }
 
+/** Devuelve al cubo las fichas que toquen por el tiempo transcurrido. */
+function refillTokens(): void {
+  const now = Date.now()
+  const elapsed = now - tokensAt
+
+  if (elapsed <= 0) {
+    return
+  }
+
+  // Tras un 429 la reposicion se frena al mismo ritmo degradado que el
+  // espaciado: el cubo no puede recuperarse mas deprisa que la fuente.
+  const rate = spacingMs > MIN_REQUEST_SPACING_MS ? spacingMs : REFILL_MS
+  tokens = Math.min(BURST_CAPACITY, tokens + elapsed / rate)
+  tokensAt = now
+}
+
+/**
+ * Milisegundos que faltan para poder atender a esa prioridad, o 0 si ya.
+ *
+ * El trafico de fondo se queda a `RESERVED_FOR_FOCUS` fichas del fondo: esa
+ * reserva es de quien esta mirando una parada, y es lo que hace que abrir una
+ * tarjeta en mitad de un repaso no signifique ponerse a la cola.
+ */
+function waitForToken(priority: number): number {
+  refillTokens()
+
+  const floor = priority === 0 ? 0 : RESERVED_FOR_FOCUS
+  const needed = floor + 1 - tokens
+
+  if (needed <= 0) {
+    return 0
+  }
+
+  const rate = spacingMs > MIN_REQUEST_SPACING_MS ? spacingMs : REFILL_MS
+  return Math.ceil(needed * rate)
+}
+
 async function drainQueue(): Promise<void> {
   if (queueRunning) {
     return
@@ -238,9 +413,23 @@ async function drainQueue(): Promise<void> {
 
   try {
     while (queue.length > 0) {
-      const waitMs = Math.max(penaltyUntil - Date.now(), lastRequestAt + spacingMs - Date.now(), 0)
+      // La cola esta ordenada por prioridad, asi que la primera es la que mas
+      // urge; es su prioridad la que decide si puede gastar la reserva.
+      const next = queue[0]
+      const waitMs = Math.max(penaltyUntil - Date.now(), waitForToken(next.priority), 0)
+
       if (waitMs > 0) {
         await delay(waitMs)
+        continue
+      }
+
+      const slots = next.priority === 0 ? MAX_IN_FLIGHT : MAX_IN_FLIGHT_BACKGROUND
+
+      if (running >= slots) {
+
+        // Sin ficha que gastar todavia: se espera a que vuelva un hueco. Es una
+        // espera corta y acotada, no un sondeo.
+        await delay(60)
         continue
       }
 
@@ -249,17 +438,26 @@ async function drainQueue(): Promise<void> {
         break
       }
 
+      refillTokens()
+      tokens = Math.max(0, tokens - 1)
       lastRequestAt = Date.now()
       health.lastRequestAt = lastRequestAt
 
-      // Se espera a que termine antes de tomar la siguiente: garantiza que nunca
-      // haya dos peticiones simultaneas contra la fuente oficial.
-      await task.run()
+      // Ya NO se espera la respuesta antes de tomar la siguiente: lo que limita
+      // el ritmo es el cubo de fichas, no el ir de una en una. Esperandola, la
+      // latencia se sumaba al espaciado y ocho paradas pasaban de ~7 s a ~21 s.
+      running += 1
+      void task.run().finally(() => {
+        running -= 1
+        // Puede haber quedado trabajo esperando hueco mientras esta corria.
+        void drainQueue()
+      })
     }
   } finally {
     queueRunning = false
   }
 }
+
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -273,6 +471,12 @@ function registerThrottle(): void {
   spacingMs = THROTTLED_SPACING_MS
   penaltyUntil = Date.now() + backoffMs
   backoffMs = Math.min(BACKOFF_MAX_MS, backoffMs * 2)
+
+  // El cubo se vacia: si la fuente acaba de decir que no, no quedan fichas que
+  // gastar por muy de reposo que se viniera. Es lo que impide que una rafaga
+  // encadene un 429 detras de otro.
+  tokens = 0
+  tokensAt = Date.now()
 }
 
 function registerSuccess(): void {

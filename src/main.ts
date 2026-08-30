@@ -7,8 +7,10 @@ import './style.css'
 import {
   DEFAULT_MAX_AGE_MS,
   fetchStopArrivals,
+  fetchStopsInParallel,
   fetchStopsSequentially,
-  MIN_REQUEST_SPACING_MS,
+  estimateBatchDurationMs,
+  getClientHealth,
 } from './services/arrivals'
 import { AT_STOP_MINUTES, ROUTE_WINDOW_STOPS } from './services/bus-position'
 import { loadNetwork } from './services/network'
@@ -953,7 +955,7 @@ async function primeFavourites(): Promise<void> {
     state.stopSync[stopId] = 'queued'
   }
 
-  const seconds = Math.round(((stopIds.length - 1) * MIN_REQUEST_SPACING_MS) / 1000)
+  const seconds = Math.round(estimateBatchDurationMs(stopIds.length) / 1000)
   state.refreshQueueLabel =
     stopIds.length > 1 ? `Preparando ${stopIds.length} paradas · ~${seconds} s` : null
   render()
@@ -961,7 +963,10 @@ async function primeFavourites(): Promise<void> {
   try {
     let done = 0
 
-    await fetchStopsSequentially(stopIds, {
+    // Todas a la vez: ninguna depende de la anterior, y el ritmo lo pone la
+    // cola. En serie, diez paradas guardadas eran más de medio minuto de
+    // pantalla de bienvenida.
+    await fetchStopsInParallel(stopIds, {
       maxAgeMs: FRESHNESS.visible,
       priority: 'normal',
       onStart: (stopId) => {
@@ -1087,7 +1092,7 @@ async function refreshVisible(source: 'auto' | 'manual'): Promise<void> {
   }
 
   if (plan.length > 1) {
-    const seconds = Math.round(((plan.length - 1) * MIN_REQUEST_SPACING_MS) / 1000)
+    const seconds = Math.round(estimateBatchDurationMs(plan.length) / 1000)
     state.refreshQueueLabel = `Actualizando ${plan.length} paradas · ~${seconds} s`
   }
 
@@ -1101,38 +1106,72 @@ async function refreshVisible(source: 'auto' | 'manual'): Promise<void> {
     // más atrás dejan de tener nada que decir y se saltan sin pedirlas.
     const located = new Set<string>()
 
-    await fetchStopsSequentially(
-      plan.map((entry) => entry.stopId),
-      {
-        maxAgeMs: source === 'manual' ? 0 : DEFAULT_MAX_AGE_MS,
-        priority: plan[0]?.priority,
-        shouldStop: () => refreshCycle !== cycle,
-        shouldSkip: (stopId) => {
-          const scan = byStop.get(stopId)?.scan
-          return Boolean(scan && located.has(scan.jobId))
-        },
-        onStart: (stopId) => {
-          state.stopSync[stopId] = 'loading'
-          render()
-        },
-        onFeed: (feed) => {
-          done += 1
-          delete state.stopSync[feed.stopId]
-          applyFeed(feed)
+    const onStart = (stopId: string) => {
+      state.stopSync[stopId] = 'loading'
+      render()
+    }
 
-          // Aquí es donde se cierra la búsqueda: esta parada tiene el autobús
-          // encima, así que las anteriores de ese aviso ya no hacen falta.
-          const scan = byStop.get(feed.stopId)?.scan
-          if (scan && busIsAt(feed.stopId, scan.lineId)) {
-            located.add(scan.jobId)
-          }
+    const onFeed = (feed: StopFeed) => {
+      done += 1
+      delete state.stopSync[feed.stopId]
+      applyFeed(feed)
 
-          state.refreshQueueLabel =
-            plan.length > 1 && done < plan.length ? `Actualizando ${done + 1} de ${plan.length}…` : null
-          render()
+      // Aquí es donde se cierra la búsqueda hacia atrás: esta parada tiene el
+      // autobús encima, así que las anteriores de ese aviso ya no hacen falta.
+      const scan = byStop.get(feed.stopId)?.scan
+      if (scan && busIsAt(feed.stopId, scan.lineId)) {
+        located.add(scan.jobId)
+      }
+
+      state.refreshQueueLabel =
+        plan.length > 1 && done < plan.length ? `Actualizando ${done + 1} de ${plan.length}…` : null
+      render()
+    }
+
+    // El lote se parte en dos por una razón de fondo, no de estilo:
+    //
+    //  - La búsqueda del autobús hacia atrás DEPENDE de lo que devolvió la
+    //    parada anterior —para en la primera que lo tenga encima—, así que sus
+    //    paradas tienen que ir una detrás de otra.
+    //  - Todo lo demás no depende de nada: paradas guardadas, la que está
+    //    abierta, las de un control. Pedirlas de una en una era desperdiciar el
+    //    cupo de la fuente, que admite una ráfaga. Medido contra la fuente
+    //    real: ocho paradas tardaban 29,5 s en serie.
+    //
+    // Las dos mitades salen a la vez; quien reparte el ritmo es la cola, con su
+    // cubo de fichas, no el orden en que se piden.
+    const scanned = plan.filter((entry) => entry.scan)
+    const direct = plan.filter((entry) => !entry.scan)
+
+    await Promise.all([
+      fetchStopsInParallel(
+        direct.map((entry) => entry.stopId),
+        {
+          maxAgeMs: source === 'manual' ? 0 : DEFAULT_MAX_AGE_MS,
+          // Cada parada con la suya, no una para todo el lote: entre diez
+          // paradas guardadas puede ir la que alguien tiene abierta, y esa
+          // tiene ficha y hueco reservados para no hacer cola.
+          priorityOf: (stopId) => byStop.get(stopId)?.priority ?? 'normal',
+          onStart,
+          onFeed,
         },
-      },
-    )
+      ),
+      fetchStopsSequentially(
+        scanned.map((entry) => entry.stopId),
+        {
+          maxAgeMs: source === 'manual' ? 0 : DEFAULT_MAX_AGE_MS,
+          priorityOf: (stopId) => byStop.get(stopId)?.priority ?? 'normal',
+          shouldStop: () => refreshCycle !== cycle,
+          shouldSkip: (stopId) => {
+            const scan = byStop.get(stopId)?.scan
+            return Boolean(scan && located.has(scan.jobId))
+          },
+          onStart,
+          onFeed,
+        },
+      ),
+    ])
+
 
     state.lastRefreshAt = Date.now()
   } catch (error) {
@@ -2152,7 +2191,16 @@ function render(): void {
 // actualizacion, descarga en curso). Vite lo elimina de la compilacion de
 // produccion, asi que no viaja en la APK.
 if (import.meta.env.DEV) {
-  ;(window as unknown as { __salbus?: unknown }).__salbus = { state, render }
+  ;(window as unknown as { __salbus?: unknown }).__salbus = {
+    state,
+    render,
+    // Para medir la cola de consultas desde tools/: cuanto tarda un lote y
+    // cuanto tarda la parada que alguien acaba de abrir con un lote corriendo.
+    health: getClientHealth,
+    fetchStopArrivals,
+    fetchStopsSequentially,
+    fetchStopsInParallel,
+  }
 }
 
 function paint(): void {

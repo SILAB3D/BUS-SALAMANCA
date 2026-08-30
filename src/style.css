@@ -1920,6 +1920,21 @@ button.card-head {
   color: var(--ok);
 }
 
+/* Consultada, y por ahí no viene nada de esta línea: es una RESPUESTA, no un
+   hueco. De noche o en una línea poco frecuente es lo normal en casi todo el
+   recorrido, así que se pinta apagada pero legible. */
+.timeline-eta.is-none {
+  font-weight: 600;
+  color: var(--text-3);
+}
+
+/* Todavía sin consultar: eso sí es un hueco, y se dice con un punto en vez de
+   con una raya para que no se confunda con la respuesta anterior. */
+.timeline-eta.is-pending {
+  color: var(--text-3);
+  opacity: 0.55;
+}
+
 /* Estado de refresco por parada -------------------------------------- *
    Las paradas se consultan de una en una, asi que sus tiempos no son de un
    mismo instante. El punto dice de cual lo es cada uno.                  */

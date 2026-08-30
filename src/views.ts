@@ -716,17 +716,39 @@ function renderTrackingRoute(tracking: TrackingJob): string {
           const isTarget = stop.stopId === tracking.stopId
           const isBus = index === busIndex
           const classes = [isTarget ? 'is-target' : '', isBus ? 'is-bus' : ''].filter(Boolean).join(' ')
+
+          // Un hueco en el recorrido puede significar dos cosas MUY distintas, y
+          // hasta ahora las dos se pintaban con la misma raya:
+          //
+          //  - «todavía no se ha mirado esa parada», que es un dato que falta;
+          //  - «ya se ha mirado y por ahí no viene ningún autobús de esta línea
+          //    ahora mismo», que es una respuesta completa.
+          //
+          // Confundirlas hace leer un recorrido correcto como una app rota: de
+          // noche, o en una línea con poca frecuencia, lo normal es que casi
+          // todas las paradas estén miradas y vacías. La raya se queda para eso
+          // —hay respuesta, no hay paso— y lo no consultado se marca aparte.
+          const consultada = feed !== undefined && feed.status !== 'error'
           const eta = arrival
             ? liveMinutes(arrival) <= 0
               ? 'aquí'
               : `${liveMinutes(arrival)} min`
-            : '—'
+            : consultada
+              ? '—'
+              : '·'
+          const porQue = arrival
+            ? ''
+            : consultada
+              ? 'Consultada: ahora mismo no consta ningún autobús de esta línea'
+              : 'Todavía sin consultar'
 
           return `
             <div class="timeline-stop ${classes}">
               <div class="timeline-rail"><span class="timeline-dot"></span></div>
               <span class="timeline-name">${esc(stop.stopName)}</span>
-              <span class="timeline-eta">${esc(eta)}</span>
+              <span class="timeline-eta${arrival ? '' : consultada ? ' is-none' : ' is-pending'}"${
+                porQue ? ` title="${esc(porQue)}" aria-label="${esc(porQue)}"` : ''
+              }>${esc(eta)}</span>
               ${syncDot(feed, state.stopSync[stop.stopId])}
             </div>
           `
@@ -1581,8 +1603,13 @@ function renderJobGroup(
 
 /**
  * Los tiempos de una parada y de la siguiente pueden llevar medio minuto de
- * diferencia porque se piden en serie. La leyenda explica el codigo de color
- * para que esa diferencia no se lea como un error.
+ * diferencia porque no se piden todos a la vez. La leyenda explica el codigo de
+ * color para que esa diferencia no se lea como un error.
+ *
+ * Y explica tambien la raya, que es la duda que de verdad trae a la gente aqui:
+ * un recorrido lleno de rayas parece la app rota, y casi siempre es la
+ * respuesta correcta —de noche, o en una linea de poca frecuencia, por casi
+ * ninguna parada viene nada—.
  */
 function renderSyncLegend(): string {
   const items: Array<[string, string]> = [
@@ -1601,6 +1628,10 @@ function renderSyncLegend(): string {
         )}</span>`)
         .join('')}
     </div>
+    <p class="text-tiny">
+      <strong>—</strong> es una respuesta: esa parada está consultada y ahora mismo no consta
+      ningún autobús de esta línea por ahí. <strong>·</strong> es que todavía no se ha mirado.
+    </p>
   `
 }
 
@@ -2349,17 +2380,22 @@ function renderAjustes(): string {
       </div></div>
       <div class="card-body">
         <dl class="kv">
-          <dt>Espaciado actual</dt><dd>${(health.spacingMs / 1000).toFixed(1)} s</dd>
+          <dt>Espaciado sostenido</dt><dd>${(health.spacingMs / 1000).toFixed(1)} s</dd>
+          <dt>Consultas listas ya</dt><dd>${health.tokens}</dd>
           <dt>En cola</dt><dd>${health.queued}</dd>
+
           <dt>Consultas realizadas</dt><dd>${health.requestCount}</dd>
           <dt>Bloqueos recibidos</dt><dd>${health.throttleEvents}</dd>
           <dt>Errores de red</dt><dd>${health.errorCount}</dd>
         </dl>
         <p class="text-tiny">
-          La web oficial limita las consultas por IP (unas 6–8 seguidas y después bloquea unos segundos).
-          SALBUS las envía de una en una cada ${(MIN_REQUEST_SPACING_MS / 1000).toFixed(0)} s, que es el ritmo
-          máximo sostenible medido, y reutiliza la respuesta durante unos segundos.
+          La web oficial no limita con un cronómetro sino con un cupo: admite unas 6–8 consultas
+          seguidas y luego va reponiendo. SALBUS lleva su propia cuenta, más corta que la medida,
+          para poder aprovechar esa ráfaga sin llegar al bloqueo: las primeras salen enseguida y
+          después se sostiene el ritmo de una cada ${(MIN_REQUEST_SPACING_MS / 1000).toFixed(0)} s.
+          Siempre queda una consulta apartada para la parada que estés mirando, que nunca hace cola.
         </p>
+
       </div>
     </section>
 
@@ -2520,7 +2556,8 @@ function renderRefreshRulesCard(): string {
         </div>
 
         <dl class="kv">
-          <dt>Entre peticiones</dt><dd>${(MIN_REQUEST_SPACING_MS / 1000).toFixed(0)} s, siempre en serie</dd>
+          <dt>Entre peticiones</dt><dd>ráfaga corta y luego ${(MIN_REQUEST_SPACING_MS / 1000).toFixed(0)} s</dd>
+          <dt>Lo que estás mirando</dt><dd>tiene consulta reservada: no hace cola</dd>
           <dt>Revisión del plan</dt><dd>cada segundo</dd>
           <dt>Lote automático</dt><dd>como mucho uno cada ${Math.round(AUTO_CYCLE_MS / 1000)} s</dd>
           <dt>“Al día” en pantalla</dt><dd>dato de hace menos de 40 s</dd>

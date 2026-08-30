@@ -402,6 +402,55 @@ async function main() {
     check('sin User-Agent de navegador la fuente rechaza', withoutUa.status === 403, `HTTP ${withoutUa.status}`)
   }
 
+  section('6 bis · Cupo de consultas a la fuente')
+
+  {
+    const arrivalsSource = await fs.readFile(
+      path.join(projectRoot, 'src', 'services', 'arrivals.ts'), 'utf8')
+
+    const constant = (name) => {
+      const match = new RegExp('const ' + name + ' = ([0-9_]+)').exec(arrivalsSource)
+      return match ? Number(match[1].replace(/_/g, '')) : null
+    }
+
+    // La fuente limita con un cubo de fichas, no con un cronometro: medido el
+    // 2026-08-17 daba 6-8 de rafaga y ~1 ficha cada 1,2 s. Lo que se use aqui
+    // tiene que quedarse POR DEBAJO, porque pasarse cuesta un bloqueo de 6-10 s
+    // y quedarse corto solo cuesta esperar un poco mas.
+    check('la ráfaga se queda por debajo de la medida',
+      constant('BURST_CAPACITY') > 0 && constant('BURST_CAPACITY') <= 6,
+      String(constant('BURST_CAPACITY')))
+    check('la reposición es más lenta que la medida',
+      constant('REFILL_MS') >= 1_200, String(constant('REFILL_MS')))
+    check('el ritmo sostenido no baja del medido como seguro',
+      constant('REFILL_MS') <= 2_000)
+
+    // Lo que garantiza que la parada MIRADA no haga cola: el trafico de fondo
+    // no puede vaciar el cubo ni ocupar todos los huecos en vuelo.
+    check('queda una consulta reservada para lo que se está mirando',
+      constant('RESERVED_FOR_FOCUS') >= 1
+        && /const floor = priority === 0 \? 0 : RESERVED_FOR_FOCUS/.test(arrivalsSource))
+    check('y también un hueco en vuelo reservado',
+      constant('MAX_IN_FLIGHT_BACKGROUND') >= 1
+        && arrivalsSource.includes('const MAX_IN_FLIGHT = MAX_IN_FLIGHT_BACKGROUND + 1')
+        && /const slots = next\.priority === 0 \? MAX_IN_FLIGHT : MAX_IN_FLIGHT_BACKGROUND/
+          .test(arrivalsSource))
+
+    // Nunca se vuelve al ataque despues de un 429: el cubo se vacia y la
+    // reposicion se frena al mismo ritmo degradado que el espaciado.
+    check('un bloqueo vacía el cupo en vez de encadenar otro',
+      /function registerThrottle\(\)[\s\S]{0,400}tokens = 0/.test(arrivalsSource))
+    check('tras un bloqueo el cupo se repone más despacio',
+      /const rate = spacingMs > MIN_REQUEST_SPACING_MS \? spacingMs : REFILL_MS/
+        .test(arrivalsSource))
+
+    // El aviso de "~N s" tiene que contar la rafaga, o promete el doble de
+    // espera de la que hay.
+    check('la espera anunciada cuenta la ráfaga',
+      /export function estimateBatchDurationMs[\s\S]{0,400}Math\.floor\(tokens\)/
+        .test(arrivalsSource))
+  }
+
   section('7 · Canal de actualización')
 
   const { parseTag, readRelease, isNewer } = await import(
@@ -1214,10 +1263,22 @@ async function main() {
       mainSource.includes('function syncMonitorNotification(')
         && mainSource.includes('showOngoingNotification('))
 
-    // Repaso de arranque: una pasada por todas las guardadas, en serie.
+    // Repaso de arranque: una pasada por todas las guardadas, a la vez.
     check('al arrancar se precargan todas las paradas guardadas',
       mainSource.includes('async function primeFavourites()')
         && mainSource.includes('await primeFavourites()'))
+
+    // La cola reparte el ritmo; el llamador ya no lo hace de una en una. Medido
+    // contra la fuente real: ocho paradas pasaban de 29,5 s a 7,1 s.
+    check('los lotes sin dependencias se piden a la vez',
+      mainSource.includes('await fetchStopsInParallel(stopIds, {')
+        && /const direct = plan\.filter\(\(entry\) => !entry\.scan\)/.test(mainSource)
+        && /fetchStopsInParallel\(\s*\n\s*direct\.map/.test(mainSource))
+    // La busqueda del autobus hacia atras SI depende de la respuesta anterior:
+    // para en la primera parada que lo tenga encima. Esa sigue en serie.
+    check('la búsqueda hacia atrás sigue yendo una a una',
+      /const scanned = plan\.filter\(\(entry\) => entry\.scan\)/.test(mainSource)
+        && /fetchStopsSequentially\(\s*\n\s*scanned\.map/.test(mainSource))
     check('el repaso de arranque se hace una sola vez',
       mainSource.includes('let bootPrimeDone = false')
         && mainSource.includes('bootPrimeDone = true'))

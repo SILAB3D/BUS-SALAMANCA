@@ -76,10 +76,14 @@ La web oficial está tras Cloudflare con un limitador por IP. Medido el
 - se recupera en **6–10 s**;
 - **1 petición cada 2 s se sostiene indefinidamente** sin ningún bloqueo.
 
-Por eso todas las consultas pasan por una cola serializada con 2 s de separación
-(`MIN_REQUEST_SPACING_MS`), nunca en paralelo, con caché por parada y espera
-progresiva ante un 429. Ese es el mínimo seguro; bajar de ~1,5 s vuelve a
-provocar bloqueos.
+Por eso todas las consultas pasan por **una sola cola**, que lleva un cubo de
+fichas calcado del de la fuente pero más corto (4 fichas, una cada 1,4 s, frente
+a las 6–8 y ~1,2 s medidas), con caché por parada y espera progresiva ante un
+429. Lo importante de ese modelo es que el límite no es un cronómetro: desde
+reposo se puede pedir una ráfaga, y sostenidamente hay que bajar a ~1 cada 2 s.
+Tratarlo como cronómetro —que es lo que se hacía— desperdiciaba la ráfaga
+entera. Ver *El cupo de la fuente es una ráfaga, no un cronómetro*.
+
 
 Consecuencia visible: en una lista larga los tiempos **no son de un mismo
 instante**. Cada parada del recorrido de un aviso lleva a su derecha un punto con
@@ -100,10 +104,11 @@ El estado por parada vive en `state.stopSync`; lo alimentan `onStart`/`onFeed` d
 
 ### Qué se actualiza, cada cuánto y con qué condición
 
-Todas estas frecuencias salen de repartir **una sola cola** —una petición cada
-2 s— entre funciones que la quieren a la vez. Por eso la columna que manda no es
-«cada cuánto» sino «cuándo»: casi todo está apagado la mayor parte del tiempo, y
-eso es lo que permite que lo encendido llegue a tiempo.
+Todas estas frecuencias salen de repartir **una sola cola** entre funciones que
+la quieren a la vez. Por eso la columna que manda no es «cada cuánto» sino
+«cuándo»: casi todo está apagado la mayor parte del tiempo, y eso es lo que
+permite que lo encendido llegue a tiempo.
+
 
 | Qué | Cada cuánto | Cuándo |
 | --- | --- | --- |
@@ -120,6 +125,52 @@ Los números viven **una sola vez**, en `FRESHNESS` de `src/state.ts`. Ajustes �
 *Frecuencias de actualización* los lee de ahí: contarlos en dos sitios acaba
 siempre con dos cifras distintas, y la que se enseña es la que no se cumple.
 
+### El cupo de la fuente es una ráfaga, no un cronómetro
+
+La fuente oficial limita por IP con un **cubo de fichas**: admite unas 6–8
+consultas seguidas desde reposo y luego repone a ~1 ficha cada 1,2 s (medido el
+2026-08-17). El cliente lo trataba como un cronómetro —una consulta cada 2 s,
+siempre— y con eso tiraba la ráfaga entera a la basura. Peor: el llamador
+*además* esperaba cada respuesta antes de pedir la siguiente, así que la latencia
+se sumaba al espaciado en vez de solaparse.
+
+Ahora la cola lleva su propio cubo, deliberadamente **más corto que el medido**
+(4 fichas y una cada 1,4 s), porque pasarse cuesta un bloqueo de 6–10 s y
+quedarse corto solo cuesta esperar un poco más. Un 429 vacía el cubo y frena la
+reposición al ritmo degradado, así que una ráfaga no puede encadenar bloqueos.
+
+Medido contra la fuente real, mismo recorrido y misma sesión:
+
+| | antes | ahora |
+|---|---|---|
+| 8 paradas de un recorrido, desde reposo | 29,5 s | **7,1 s** |
+| Parada abierta con un repaso de fondo en marcha | 3,3 s | **1,0 s** |
+
+Cero bloqueos en las dos medidas, y el cubo terminó con ficha de sobra.
+
+### Lo que estás mirando no hace cola
+
+De las cuatro fichas, **una no la puede gastar el tráfico de fondo**, y de los
+huecos de peticiones en vuelo **hay uno reservado igual**. Las dos reservas
+hacen falta: con solo la ficha, la parada recién abierta tenía ficha pero seguía
+esperando a que terminara una de las peticiones en curso, y eso son los ~3 s que
+tarda la fuente en contestar.
+
+Y dentro de un lote cada parada lleva **su propia prioridad**, no una para todo
+el lote (`priorityOf`). Entre diez paradas guardadas puede ir la que alguien
+tiene abierta en pantalla; antes esperaba turno como las demás porque la
+prioridad solo servía para ordenar lotes enteros entre sí.
+
+### Qué se pide a la vez y qué no
+
+- **A la vez** (`fetchStopsInParallel`) todo lo que no depende de nada: las
+  paradas guardadas, la que está abierta, las de un control. Entran de golpe en
+  la cola y es ella la que reparte el ritmo.
+- **Una a una** (`fetchStopsSequentially`) solo la búsqueda del autobús hacia
+  atrás, porque *decide si sigue preguntando según lo que devolvió la parada
+  anterior*: para en la primera que lo tenga encima. Pedirlas a la vez sería
+  perder justamente el ahorro que la hace barata.
+
 Un dato se pinta como **«al día» durante 40 s** (`SYNC_FRESH_MS` en `src/ui.ts`).
 Son el doble del ciclo de un recorrido activo, así que verde significa «entró en
 uno de los dos últimos ciclos». Con el minuto de antes, una parada podía haberse
@@ -127,11 +178,12 @@ saltado dos ciclos enteros y seguir pintada de verde.
 
 ### El repaso de arranque
 
-Al abrir la app se hace **una** pasada en serie por todas las paradas guardadas
-(`primeFavourites`). No es un capricho: la fuente tarda lo suyo y solo admite una
-consulta cada dos segundos, así que la primera parada que se desplegaba se
-quedaba mirando un esqueleto. Esa espera se adelanta al arranque, donde ya hay
-una pantalla de bienvenida y una lista que mirar.
+Al abrir la app se hace **una** pasada por todas las paradas guardadas
+(`primeFavourites`). No es un capricho: la fuente tarda lo suyo, así que la
+primera parada que se desplegaba se quedaba mirando un esqueleto. Esa espera se
+adelanta al arranque, donde ya hay una pantalla de bienvenida y una lista que
+mirar. Entran todas de golpe en la cola y es ella la que reparte el ritmo.
+
 
 Es **una sola vez por sesión**, y no es la única pasada: al entrar en Inicio se
 repasan también todas (ver abajo).
@@ -446,9 +498,9 @@ La deducción es esta: se mira ese mismo indicio en las paradas **anteriores** d
 recorrido —que salen de `network.json` en el orden real del trayecto, no por
 cercanía geométrica— y se toma **la más avanzada** que lo cumpla.
 
-Lo de «la más avanzada» no es un detalle de estilo. Las paradas se consultan en
-serie, una cada dos segundos, así que los datos de una ventana **no son del
-mismo instante**: puede quedar un «llegando» rezagado de hace medio minuto y
+Lo de «la más avanzada» no es un detalle de estilo. Las paradas de una ventana no
+se consultan de golpe —el cupo de la fuente no da para tanto—, así que sus datos
+**no son del mismo instante**: puede quedar un «llegando» rezagado de hace medio minuto y
 otro más adelante recién traído. Como un autobús solo avanza, el índice mayor es
 siempre la verdad más nueva. Por eso cada parada del recorrido de un aviso lleva
 su punto de color: la diferencia de medio minuto entre dos renglones es el precio
