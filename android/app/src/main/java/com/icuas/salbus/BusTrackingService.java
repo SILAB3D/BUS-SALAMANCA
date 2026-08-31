@@ -1097,11 +1097,30 @@ public class BusTrackingService extends Service {
         boolean watching = routeWatch;
         int depth = job.route.length;
         int found = -1;
-        JSONArray seen = new JSONArray();
+
+        // Con la pantalla "Seguir" delante, el barrido se cuenta MIENTRAS ocurre.
+        //
+        // Antes solo se mandaba el resultado, y solo al terminar: dieciseis
+        // segundos en los que el recorrido dibujado no se movia ni decia por
+        // que. La web no podia pintar "esperando turno" ni "consultando" porque
+        // el unico que sabia por que parada iba la busqueda era este servicio, y
+        // se lo callaba hasta el final. Ahora se anuncia la cola entera al
+        // empezar y cada parada al entrar en turno, que es lo que hace que el
+        // punto de estado diga la verdad.
+        if (watching) {
+            emitRouteProgress(job, queuedFrom(job, 0), null);
+        }
 
         for (int index = 0; index < depth; index += 1) {
             if (!running) {
-                return;
+                // Se sale por el final para vaciar la cola en pantalla; volver
+                // aqui mismo dejaria el punto azul encendido en la ultima parada
+                // consultada hasta el siguiente barrido.
+                break;
+            }
+
+            if (watching) {
+                emitRouteProgress(job, queuedFrom(job, index + 1), job.route[index]);
             }
 
             ArrivalsClient.Result result = cycle.get(job.route[index]);
@@ -1122,12 +1141,24 @@ public class BusTrackingService extends Service {
 
             // Lo consultado se comparte con la web, tenga o no autobus encima:
             // "por aqui no viene" es tan dibujable como "aqui esta".
+            //
+            // Se manda parada A PARADA, en cuanto se sabe, y no en un lote al
+            // acabar: el barrido dura mas de quince segundos y agrupar el
+            // resultado dejaba el recorrido dibujado congelado todo ese rato
+            // para luego rellenarse de golpe.
             try {
                 JSONObject entry = new JSONObject();
                 entry.put("stopId", job.route[index]);
                 entry.put("minutes", arrival == null ? -1 : arrival.minutes);
                 entry.put("arriving", arrival != null && arrival.arriving);
-                seen.put(entry);
+
+                JSONArray one = new JSONArray();
+                one.put(entry);
+
+                BusTrackingPlugin plugin = listener;
+                if (plugin != null) {
+                    plugin.emitRouteUpdate(job.id, job.lineId, one);
+                }
             } catch (Exception ignored) {
                 /* una parada sin serializar no invalida el resto del barrido */
             }
@@ -1143,6 +1174,14 @@ public class BusTrackingService extends Service {
             }
         }
 
+        // La cola se vacia SIEMPRE al terminar, tambien si el barrido se corto
+        // por un 429 o porque el servicio se esta parando: una parada que se
+        // quedara marcada "consultando" para siempre miente igual que no
+        // marcarla.
+        if (watching) {
+            emitRouteProgress(job, new JSONArray(), null);
+        }
+
         if (found > 0) {
             job.stopsAway = found;
             job.stopsAwayAt = now;
@@ -1153,10 +1192,25 @@ public class BusTrackingService extends Service {
             // anterior.
             job.stopsAway = -1;
         }
+    }
 
+    /**
+     * Las paradas del recorrido que aun esperan turno, desde `from` hasta el
+     * final de la ventana.
+     */
+    private JSONArray queuedFrom(Job job, int from) {
+        JSONArray pending = new JSONArray();
+        for (int index = from; index < job.route.length; index += 1) {
+            pending.put(job.route[index]);
+        }
+        return pending;
+    }
+
+    /** Por donde va el barrido del recorrido, para el punto de estado de la web. */
+    private void emitRouteProgress(Job job, JSONArray queued, @Nullable String loading) {
         BusTrackingPlugin plugin = listener;
-        if (plugin != null && seen.length() > 0) {
-            plugin.emitRouteUpdate(job.id, job.lineId, seen);
+        if (plugin != null) {
+            plugin.emitRouteProgress(job.id, job.route, queued, loading);
         }
     }
 
@@ -1223,7 +1277,23 @@ public class BusTrackingService extends Service {
         return job.destination + "\nActualizado a las " + clock();
     }
 
-    /** Vibracion corta: solo un toque, para que se note sin llegar a molestar. */
+    /**
+     * Patron de aviso: TRES toques cortos.
+     *
+     * El toque unico y largo de antes se confundia con cualquier otra
+     * notificacion del telefono, que es justo lo que no puede pasar: este aviso
+     * significa "sal ya", y tenerlo que sacar del bolsillo para comprobar de
+     * quien era le quitaba el sentido. Tres pulsos seguidos no se parecen a
+     * nada mas y se reconocen sin mirar.
+     *
+     * El patron se lee como espera/vibra/espera/vibra…: arranca en 0 para que
+     * el primer toque sea inmediato.
+     *
+     * La parte web lleva su propia copia de estos numeros (vibrateShort en
+     * main.ts): tienen que sonar igual con la app delante y con ella cerrada.
+     */
+    private static final long[] APPROACH_PATTERN = { 0L, 90L, 120L, 90L, 120L, 90L };
+
     private void vibrateShort() {
         Vibrator vibrator = resolveVibrator();
         if (vibrator == null || !vibrator.hasVibrator()) {
@@ -1232,9 +1302,10 @@ public class BusTrackingService extends Service {
 
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                vibrator.vibrate(VibrationEffect.createOneShot(220, VibrationEffect.DEFAULT_AMPLITUDE));
+                // -1: no se repite. El patron ya es el aviso completo.
+                vibrator.vibrate(VibrationEffect.createWaveform(APPROACH_PATTERN, -1));
             } else {
-                vibrator.vibrate(220);
+                vibrator.vibrate(APPROACH_PATTERN, -1);
             }
         } catch (Exception ignored) {
             /* algunos fabricantes lo bloquean en modo de ahorro */

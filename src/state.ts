@@ -11,7 +11,31 @@ export const APP_VERSION = `v${__APP_VERSION__}`
 /** versionCode de esta compilacion, segun el bundle. */
 export const APP_VERSION_CODE = __APP_VERSION_CODE__
 
-export type TabId = 'inicio' | 'buscar' | 'monitor' | 'seguimiento' | 'mapas' | 'ajustes'
+/**
+ * Las pestañas de la aplicación.
+ *
+ * 'info' se llamaba 'mapas' y era solo el planificador de rutas experimental.
+ * Ahora recoge las DOS cosas que se consultan y no se miran cada dos minutos:
+ * cómo llegar de un punto a otro y los horarios oficiales de cada línea. Eso
+ * segundo no es experimental —sale del GTFS que ya viaja dentro de la app— así
+ * que la pestaña existe siempre; lo que sigue dependiendo del interruptor de
+ * Ajustes es el apartado "Cómo llegar".
+ */
+export type TabId = 'inicio' | 'buscar' | 'monitor' | 'seguimiento' | 'info' | 'ajustes'
+
+/** Los dos apartados de la pestaña Info. */
+export type InfoSection = 'llegar' | 'lineas'
+
+/**
+ * Los dos apartados de Ajustes.
+ *
+ * Un ajuste que HACE algo (un interruptor, un permiso, un botón) y un panel que
+ * solo CUENTA algo (cada cuánto se pide cada cosa, cuántas consultas van) no se
+ * leen igual ni se buscan por lo mismo, y mezclados obligaban a recorrer nueve
+ * tarjetas para encontrar el único interruptor que se venía a tocar. Se abre en
+ * 'funciones' porque a Ajustes se entra a cambiar algo, no a leer.
+ */
+export type SettingsSection = 'funciones' | 'informacion'
 /**
  * Como se busca una parada.
  *
@@ -398,6 +422,12 @@ export interface AppState {
 
   maps: MapsState
 
+  /** La pestaña Info: qué apartado está abierto y qué línea se está mirando. */
+  info: InfoState
+
+  /** Apartado abierto de Ajustes. No se guarda: cada visita empieza en funciones. */
+  settingsSection: SettingsSection
+
   tour: TourState
 
   /**
@@ -429,6 +459,15 @@ export interface GeoState {
   /** Ultima lectura conocida, con su margen de error en metros. */
   location: { point: GeoPoint, accuracy: number, at: number } | null
   locating: boolean
+  /**
+   * Se le esta preguntando al sistema si la ubicacion esta encendida.
+   *
+   * Es un paso ANTERIOR a localizar, y por eso tiene su propio indicador: la
+   * comprobacion tarda un instante, mientras que `locating` puede tardar veinte
+   * segundos. Enseñar "buscando tu ubicacion…" durante la comprobacion prometia
+   * una busqueda que a lo mejor ni llegaba a empezar.
+   */
+  checkingService: boolean
   /** Motivo por el que no hay ubicacion, ya redactado para leerse en pantalla. */
   error: string | null
   /**
@@ -443,7 +482,7 @@ export interface GeoState {
 }
 
 export function emptyGeoState(): GeoState {
-  return { location: null, locating: false, error: null, blocked: null }
+  return { location: null, locating: false, checkingService: false, error: null, blocked: null }
 }
 
 /* ------------------------------------------------------------------ *
@@ -482,6 +521,29 @@ export interface MapsState {
   planning: boolean
   /** Tramo del itinerario resaltado en el mapa. */
   focusedLeg: number | null
+}
+
+/* ------------------------------------------------------------------ *
+ * Pestana "Info"                                                       *
+ * ------------------------------------------------------------------ */
+
+/**
+ * Qué se está consultando en la pestaña Info.
+ *
+ * La línea y el sentido NO se guardan en disco a propósito: son una consulta
+ * puntual ("¿a qué hora sale el último 4?"), no una preferencia. Arrancar la
+ * app con una línea ya elegida haría creer que ese horario es el de tu parada.
+ */
+export interface InfoState {
+  section: InfoSection
+  /** Línea cuyo horario se está mirando; vacío mientras no se elija ninguna. */
+  lineId: string
+  /** Sentido dentro de esa línea; vacío hasta elegirlo. */
+  directionKey: string
+}
+
+export function emptyInfoState(): InfoState {
+  return { section: 'llegar', lineId: '', directionKey: '' }
 }
 
 export function emptyMapsState(): MapsState {
@@ -705,6 +767,10 @@ export const state: AppState = {
   settings: readSettings(),
 
   maps: emptyMapsState(),
+
+  info: emptyInfoState(),
+
+  settingsSection: 'funciones',
 
   // El tour se abre solo la primera vez que se arranca cada version nueva.
   tour: { open: readTourVersion() !== APP_VERSION, step: 0 },
@@ -1101,15 +1167,18 @@ function writeJson(key: string, value: unknown): void {
 }
 
 function readTab(): TabId {
-  // "mapas" NO esta en la lista: es experimental y puede estar apagada. Quien la
-  // tuviera abierta al cerrar la app vuelve a Inicio, en vez de aterrizar en una
-  // pestana que ya no existe.
-  const valid: TabId[] = ['inicio', 'buscar', 'monitor', 'seguimiento', 'ajustes']
+  // "info" SI esta en la lista, al contrario que la antigua "mapas": ya no es
+  // una pestana experimental que pueda no existir, porque los horarios de linea
+  // salen del GTFS que viaja dentro de la app y estan siempre disponibles.
+  const valid: TabId[] = ['inicio', 'buscar', 'monitor', 'seguimiento', 'info', 'ajustes']
   try {
     // "paradas" existio hasta la v4.4 como pestaña propia; ahora vive dentro de
     // Inicio, asi que quien la tuviera guardada aterriza justo donde estaba.
-    const raw = window.localStorage.getItem(KEYS.tab) as TabId | null
-    return raw && valid.includes(raw) ? raw : 'inicio'
+    const raw = window.localStorage.getItem(KEYS.tab)
+    // "mapas" es el nombre antiguo de "info": quien la tuviera abierta al
+    // cerrar la app aterriza en la pestana equivalente y no en Inicio.
+    const migrated = raw === 'mapas' ? 'info' : (raw as TabId | null)
+    return migrated && valid.includes(migrated) ? migrated : 'inicio'
   } catch {
     return 'inicio'
   }

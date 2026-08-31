@@ -284,6 +284,29 @@ public class BusTrackingPlugin extends Plugin {
         notifyListeners("routeUpdate", payload);
     }
 
+    /**
+     * Por donde va el barrido del recorrido AHORA MISMO.
+     *
+     * `emitRouteUpdate` cuenta lo que se ha averiguado; esto cuenta lo que se
+     * esta averiguando, que es lo unico que puede explicar los quince segundos
+     * que hay entre una parada y la siguiente. Sin ello la pantalla "Seguir"
+     * enseñaba un recorrido inmovil y sin ningun indicio de estar trabajando:
+     * ni la parada en curso en azul, ni las que esperan turno.
+     *
+     * `route` va entero en cada aviso para que la web pueda BORRAR el estado de
+     * las paradas de este aviso antes de aplicar el nuevo: sin la lista
+     * completa, una parada que dejara de estar en cola se quedaria encendida.
+     */
+    void emitRouteProgress(String jobId, String[] route, JSONArray queued, String loading) {
+        JSObject payload = new JSObject();
+        payload.put("jobId", jobId);
+        payload.put("route", new JSONArray(java.util.Arrays.asList(route)));
+        payload.put("queued", queued);
+        payload.put("loading", loading == null ? JSONObject.NULL : loading);
+        payload.put("at", System.currentTimeMillis());
+        notifyListeners("routeProgress", payload);
+    }
+
     /** Un autobus mas ha pasado por la parada y el aviso sigue con el siguiente. */
     void emitBusPassed(String jobId, String stopId, String lineId, int busesSeen, int target) {
         JSObject payload = new JSObject();

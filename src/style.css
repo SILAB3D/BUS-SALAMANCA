@@ -144,7 +144,7 @@ p {
 }
 
 /* ==================================================================
-   Pantalla de carga (1,5 s)
+   Pantalla de carga (1 s)
    ================================================================== */
 
 .splash {
@@ -158,7 +158,7 @@ p {
   gap: 6px;
   background: linear-gradient(160deg, var(--brand-500), var(--brand-700));
   color: #fff;
-  animation: splash-out 0.32s ease 1.5s forwards;
+  animation: splash-out 0.32s ease 1s forwards;
 }
 
 .splash.is-held {
@@ -170,7 +170,7 @@ p {
 }
 
 .splash-mark {
-  animation: splash-mark 1.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: splash-mark 1s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 .splash-mark img {
@@ -183,13 +183,13 @@ p {
   font-size: 30px;
   font-weight: 800;
   letter-spacing: 0.18em;
-  animation: splash-fade 0.6s ease 0.25s both;
+  animation: splash-fade 0.42s ease 0.16s both;
 }
 
 .splash-tagline {
   font-size: 13px;
   opacity: 0.82;
-  animation: splash-fade 0.6s ease 0.45s both;
+  animation: splash-fade 0.42s ease 0.3s both;
 }
 
 .splash-track {
@@ -207,7 +207,7 @@ p {
   border-radius: inherit;
   background: #fff;
   transform-origin: left center;
-  animation: splash-progress 1.4s cubic-bezier(0.5, 0, 0.2, 1) both;
+  animation: splash-progress 0.92s cubic-bezier(0.5, 0, 0.2, 1) both;
 }
 
 @keyframes splash-mark {
@@ -652,8 +652,9 @@ button.card-head {
 }
 
 .line-chip.is-sm {
-  min-width: 26px;
+  min-width: 25px;
   height: 22px;
+  padding: 0 5px;
   font-size: 11.5px;
   border-radius: 7px;
 }
@@ -1451,7 +1452,7 @@ button.card-head {
 }
 
 .hero-stat {
-  padding: 10px;
+  padding: 10px 6px;
   border-radius: var(--r-md);
   background: rgba(255, 255, 255, 0.14);
   text-align: center;
@@ -1464,15 +1465,28 @@ button.card-head {
   font-variant-numeric: tabular-nums;
 }
 
+/* La etiqueta se PARTE en dos renglones antes que recortarse.
+   "Seguimientos" y "Monitorizaciones" no caben en un tercio de una pantalla de
+   360 px, y con puntos suspensivos quedaban en "SEGUIMIENT…" y "MONITORIZ…",
+   que no dicen lo mismo ni se leen igual de rapido. Sin mayusculas forzadas ni
+   espaciado de letra la palabra ocupa bastante menos, y las tres casillas
+   siguen midiendo lo mismo porque la altura la fija el contenedor. */
 .hero-stat span {
   display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 10.5px;
+  /* Calibrado sobre la etiqueta mas larga ("Monitorizaciones", 16 caracteres)
+     en la pantalla mas estrecha que se contempla: a este tamano entra en un
+     solo renglon dentro de un tercio de 360 px. Puede partirse si hiciera
+     falta, pero no se recorta nunca. */
+  font-size: 9.5px;
+  line-height: 1.25;
   opacity: 0.85;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.01em;
+  overflow-wrap: anywhere;
+}
+
+/* Las tres casillas miden lo mismo aunque una etiqueta ocupe dos renglones. */
+.hero-stats {
+  align-items: stretch;
 }
 
 /* ==================================================================
@@ -3016,47 +3030,231 @@ button.card-head {
    pegada al contenido, la lista subía y bajaba de escalón en escalón
    según cuántas líneas tuviera cada parada. */
 
-/* Plegada, el nombre y la franja de líneas van pegados: el hueco de la
-   cabecera completa los separaba como si fueran de dos tarjetas. */
-.card-head.is-tight {
-  padding-bottom: 6px;
+/* La tarjeta plegada es UN solo botón que ocupa casi todo el ancho, con
+   los tres botones de administrar en su propia fila debajo. Antes eran
+   dos zonas táctiles compitiendo por la misma línea: el nombre tenía que
+   caber entre el código de parada y tres iconos, y con "C/ Licenciado
+   Vidriera, s/n (Frente residencia)" no cabía, así que la cabecera crecía
+   a tres renglones mientras los iconos se quedaban colgando arriba a la
+   derecha. Apilados, el nombre dispone del ancho entero y los botones
+   siempre están donde se espera. */
+.stop-card {
+  transition: border-color 0.15s ease;
 }
 
-/* Hueco para dos líneas. Es la otra mitad de "todas miden lo mismo":
-   sin él, "Gran Vía" hacía la tarjeta más baja que "C/ Licenciado
-   Vidriera, s/n (Frente residencia)", y una parada renombrada —que
-   añade el nombre oficial debajo— más alta que las dos.
-
-   Dos líneas bastan para TODAS las paradas de la red: la más larga son
-   47 caracteres y entra justa. Y es un MÍNIMO, no un recorte: en una
-   pantalla estrecha, un nombre que necesite tres líneas se sigue
-   leyendo entero. Plantarse en la acera equivocada es peor que una
-   tarjeta desigual. */
-.stop-card .card-head.is-tight .card-head-copy {
-  min-height: 40px;
-  justify-content: center;
+.stop-card.is-expanded {
+  border-color: color-mix(in srgb, var(--brand-500) 34%, var(--border));
 }
 
-.stop-lines {
-  display: flex;
-  flex-wrap: wrap;
-  align-content: flex-start;
-  gap: 6px;
+.stop-summary {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 10px;
   width: 100%;
-  /* 2 filas de 22 px + 6 de hueco + 14 de margen inferior. */
-  height: 64px;
-  padding: 0 16px 14px;
+  padding: 12px 14px 4px;
   border: 0;
   background: transparent;
   text-align: left;
   color: inherit;
   cursor: pointer;
-  overflow: hidden;
+}
+
+.stop-summary-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* El nombre NO se recorta ni se corta. Un tercio de las paradas de
+   Salamanca pasa de 24 caracteres, y "…(Frente residencia)" y
+   "…(Junto Residencia)" son dos paradas distintas en aceras distintas:
+   con puntos suspensivos las dos se leen igual. Vale más una tarjeta de
+   tres renglones que plantarse enfrente. */
+.stop-name {
+  font-size: 15.5px;
+  font-weight: 700;
+  line-height: 1.28;
+  overflow-wrap: anywhere;
+}
+
+/* El nombre oficial solo aparece si la parada se ha renombrado, y es
+   justo el dato que dice CUÁL es: tampoco se recorta. */
+.stop-official {
+  font-size: 12px;
+  line-height: 1.3;
+  color: var(--text-3);
+  overflow-wrap: anywhere;
+}
+
+/* La franja de líneas fluye y no se recorta: lo que no cabe en las dos
+   filas se cuenta en un "+N", que es información, en vez de esconderse
+   detrás de un `overflow: hidden`, que es una mentira. */
+.stop-lines {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
 }
 
 .stop-lines-empty {
   font-size: 12.5px;
   color: var(--text-3);
+}
+
+/* El "+N" no es una línea: no lleva color de línea ni parece pulsable. */
+.line-chip.is-more {
+  background: var(--surface-3) !important;
+  color: var(--text-2) !important;
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+
+.stop-chevron {
+  display: grid;
+  place-items: center;
+  flex: none;
+  /* A la altura de la primera línea del nombre, no centrado sobre una
+     tarjeta que puede medir el doble según lo largo que sea. */
+  height: 22px;
+  color: var(--text-3);
+  transition: transform 0.18s ease;
+}
+
+.stop-chevron svg {
+  width: 18px;
+  height: 18px;
+}
+
+.stop-card.is-expanded .stop-chevron {
+  transform: rotate(90deg);
+  color: var(--brand-500);
+}
+
+/* Los tres botones de administrar, en su propia fila y alineados a la
+   derecha. Fuera del botón que despliega —un botón dentro de otro no es
+   HTML válido— y sin robarle ancho al nombre. */
+.stop-tools {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px 8px;
+}
+
+/* Un punto mas pequenos que los de las demas tarjetas: aqui son cinco o seis
+   tarjetas en pantalla y los botones de administrar no son lo que se viene a
+   hacer, sino lo que se hace de vez en cuando. */
+.stop-tools .mini-btn {
+  width: 32px;
+  height: 32px;
+}
+
+
+/* ==================================================================
+   Horarios de línea (pestaña Info)
+   ==================================================================
+   Una rejilla de horas, no una tabla: lo que se busca aquí es "¿a qué
+   hora es el último?" y "¿hay algún hueco?", y las dos se responden de
+   un vistazo si las horas están alineadas en columnas y las tres que
+   importan van marcadas. */
+
+.schedule-group {
+  padding: 12px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+
+.schedule-group + .schedule-group {
+  margin-top: 10px;
+}
+
+/* El bloque del día de hoy, resaltado: entre tres bloques de horarios
+   casi iguales, el que sirve ahora mismo tiene que encontrarse solo. */
+.schedule-group.is-today {
+  border-color: color-mix(in srgb, var(--brand-500) 40%, var(--border));
+  background: color-mix(in srgb, var(--brand-500) 6%, var(--surface-2));
+}
+
+.schedule-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.schedule-head strong {
+  font-size: 13.5px;
+  font-weight: 700;
+}
+
+/* `auto-fill` con un mínimo fijo: las horas quedan en columnas aunque
+   cambie el ancho, que es lo que permite recorrerlas de arriba abajo. */
+.schedule-times {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(52px, 1fr));
+  gap: 5px;
+}
+
+.schedule-time {
+  display: grid;
+  place-items: center;
+  padding: 5px 2px;
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  font-size: 12.5px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-2);
+}
+
+/* Primera y última salida del día: el borde del servicio. */
+.schedule-time.is-first,
+.schedule-time.is-last {
+  background: color-mix(in srgb, var(--brand-500) 12%, var(--surface));
+  border-color: color-mix(in srgb, var(--brand-500) 45%, transparent);
+  /* El texto se queda en el color normal: el azul de marca es legible sobre
+     fondo claro pero se hunde en el oscuro, y el resalte ya lo hacen el fondo
+     tintado y el borde, que si funcionan en los dos temas. */
+  color: var(--text);
+  font-weight: 800;
+}
+
+/* Los bordes de un descanso. Se pintan en el tono de aviso porque eso es
+   lo que son: a partir de esa hora, y hasta la siguiente, bajar a la
+   parada no sirve de nada. */
+.schedule-time.is-break-out,
+.schedule-time.is-break-in {
+  background: color-mix(in srgb, var(--warn) 14%, var(--surface));
+  border-color: color-mix(in srgb, var(--warn) 50%, transparent);
+  color: var(--text);
+  font-weight: 800;
+}
+
+.schedule-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.schedule-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-3);
+}
+
+.schedule-legend-item .schedule-time {
+  padding: 2px 6px;
+  font-size: 10.5px;
 }
 
 /* ==================================================================

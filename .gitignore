@@ -45,3 +45,8 @@ releases/*.apk
 android/keystore.properties
 *.jks
 *.keystore
+
+# Documento interno de informacion del proyecto: NO se publica en GitHub.
+# Recoge el funcionamiento completo de la app y de su interfaz; el documento
+# publico del repositorio sigue siendo README.md.
+INFORMACION-DEL-PROYECTO.md

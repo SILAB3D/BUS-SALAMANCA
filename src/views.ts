@@ -28,6 +28,7 @@ import {
   isWithinWindow,
   MAX_ACTIVE_JOBS,
   MAX_TRACKING_JOBS,
+  parseClockToMinutes,
   state,
   TRACKING_INTERVAL_SECONDS,
   type MonitorTrace,
@@ -35,13 +36,22 @@ import {
   trackingBusTarget,
   TRACKING_BUS_TARGET_MAX,
   TRACKING_WARN_MINUTES,
+  type InfoSection,
   type MonitorJob,
   type MonitorRow,
   type RoutePoint,
+  type SettingsSection,
   type TabId,
   type TrackingJob,
 } from './state'
-import type { Arrival, LineDirection, NetworkStop, StopFeed, TransitLine } from './types'
+import type {
+  Arrival,
+  LineDirection,
+  NetworkStop,
+  ServiceDayType,
+  StopFeed,
+  TransitLine,
+} from './types'
 import {
   arrivalTone,
   emptyState,
@@ -226,21 +236,21 @@ const TABS: TabDefinition[] = [
   { id: 'buscar', label: 'Buscar', iconName: 'search' },
   { id: 'seguimiento', label: 'Seguir', iconName: 'route' },
   { id: 'monitor', label: 'Puntualidad', iconName: 'chart' },
+  { id: 'info', label: 'Info', iconName: 'info' },
 ]
 
 /**
  * Pestañas que se ven ahora mismo.
  *
- * "Mapas" es experimental y solo aparece si se enciende en Ajustes. Apagada no
- * se dibuja, no ocupa sitio en la barra y no puede abrirse: es la garantía de
- * que lo experimental no estorba a quien no lo ha pedido.
+ * "Info" está SIEMPRE, al contrario que la antigua "Mapas": recoge los horarios
+ * oficiales de cada línea, que salen del GTFS que ya viaja dentro de la app y no
+ * dependen de nada experimental. Lo que sigue detrás del interruptor de Ajustes
+ * es su apartado "Cómo llegar" —el planificador de rutas—, y se anuncia DENTRO
+ * de la pestaña en vez de hacer desaparecer la pestaña entera: quien viene a
+ * mirar un horario no tiene por qué enterarse de que existe un experimento.
  */
 function visibleTabs(): TabDefinition[] {
-  if (!state.settings.experimentalMaps) {
-    return TABS
-  }
-
-  return [...TABS, { id: 'mapas', label: 'Mapas', iconName: 'map' }]
+  return TABS
 }
 
 /** Ajustes no esta en la barra, pero su pantalla tambien necesita titulo. */
@@ -249,7 +259,7 @@ const TAB_TITLES: Record<TabId, string> = {
   buscar: 'Buscar',
   seguimiento: 'Seguir',
   monitor: 'Puntualidad',
-  mapas: 'Mapas',
+  info: 'Info',
   ajustes: 'Ajustes',
 }
 
@@ -348,10 +358,8 @@ function renderScreen(): string {
       return renderSeguimiento()
     case 'monitor':
       return renderMonitor()
-    case 'mapas':
-      // Apagada en Ajustes no hay pantalla que enseñar, ni aunque se llegue
-      // aquí por una pestaña guardada de antes.
-      return state.settings.experimentalMaps ? renderMapas() : renderInicio()
+    case 'info':
+      return renderInfo()
     case 'ajustes':
       return renderAjustes()
     default:
@@ -505,8 +513,8 @@ function renderInicio(): string {
       </div>
       <div class="hero-stats">
         <div class="hero-stat"><strong>${favourites.length}</strong><span>Paradas</span></div>
-        <div class="hero-stat"><strong>${state.trackings.length}</strong><span>Avisos</span></div>
-        <div class="hero-stat"><strong>${state.monitors.length}</strong><span>Controles</span></div>
+        <div class="hero-stat"><strong>${state.trackings.length}</strong><span>Seguimientos</span></div>
+        <div class="hero-stat"><strong>${state.monitors.length}</strong><span>Monitorizaciones</span></div>
       </div>
     </section>
 
@@ -625,9 +633,21 @@ function renderTrackingHead(
               : '<span class="eta-unit">buscando…</span>'
         }</div>
         ${renderJobToggle(tracking.id, tracking.active)}
+        ${
+          /*
+           * Una X de cierre, no una campana tachada.
+           *
+           * La campana tachada se lee como "silenciar", que es justo lo que hace
+           * el botón de al lado —el de pausa— y no lo que hace este: este BORRA
+           * el seguimiento entero, con su parada, su línea, su sentido y los
+           * autobuses ya contados. Dos acciones que no se parecen en nada,
+           * pegadas la una a la otra, no pueden dibujarse casi igual.
+           */
+          ''
+        }
         <button class="mini-btn is-danger" type="button" data-action="stop-tracking" data-tracking="${esc(
           tracking.id,
-        )}" aria-label="Quitar el aviso">${icon('bellOff')}</button>
+        )}" aria-label="Cerrar el seguimiento">${icon('close')}</button>
       </div>
     </div>
   `
@@ -1003,6 +1023,18 @@ function stopMatches(stop: NetworkStop, query: string): boolean {
 function renderSearchNearby(): string {
   const geo = state.geo
 
+  // Comprobando si la ubicación del teléfono está encendida. Es un paso previo y
+  // corto, distinto de localizar: decir aquí "buscando tu ubicación…" prometía
+  // una búsqueda que puede no llegar a empezar.
+  if (geo.checkingService && !geo.location) {
+    return `
+      <section class="card"><div class="card-body">
+        <div class="skeleton skeleton-row"></div>
+        <p class="text-tiny">Comprobando el servicio de ubicación del dispositivo…</p>
+      </div></section>
+    `
+  }
+
   if (geo.locating && !geo.location) {
     return `
       <section class="card"><div class="card-body">
@@ -1089,6 +1121,32 @@ function renderLocationPrompt(): string {
   const geo = state.geo
   const blocked = geo.blocked
 
+  // El interruptor de ubicación del teléfono se comprueba ANTES de buscar nada,
+  // así que este caso ya no se descubre por un fallo de la búsqueda: se sabe de
+  // antemano y se dice de antemano. La búsqueda arranca sola en cuanto se
+  // enciende, al volver a la app; el botón de reintentar está por si el sistema
+  // tarda en dar el interruptor por encendido.
+  if (blocked === 'service') {
+    return `
+      <section class="card"><div class="card-body">
+        ${notice(
+          'warn',
+          geo.error
+            ?? 'La ubicación del teléfono está apagada. Es un interruptor del sistema, no de SALBUS: hasta que se encienda no hay forma de saber qué paradas tienes al lado.',
+        )}
+        <button class="btn btn-primary btn-block" type="button" data-action="open-location-settings">
+          ${icon('pin')} Activar la ubicación del teléfono
+        </button>
+        <button class="btn btn-secondary btn-block" type="button" data-action="locate">
+          ${icon('crosshair')} Ya está activada, buscar paradas
+        </button>
+        <p class="text-tiny">
+          Al volver a SALBUS con la ubicación encendida, la búsqueda empieza sola.
+        </p>
+      </div></section>
+    `
+  }
+
   return `
     <section class="card"><div class="card-body">
       ${
@@ -1098,13 +1156,9 @@ function renderLocationPrompt(): string {
                necesita saber dónde estás. La ubicación no sale del teléfono ni se guarda.</p>`
       }
       ${
-        blocked
+        blocked === 'permission'
           ? `<button class="btn btn-primary btn-block" type="button" data-action="open-location-settings">
-               ${icon('pin')} ${
-                 blocked === 'service'
-                   ? 'Activar la ubicación del teléfono'
-                   : 'Abrir los permisos de SALBUS'
-               }
+               ${icon('pin')} Abrir los permisos de SALBUS
              </button>
              <button class="btn btn-secondary btn-block" type="button" data-action="locate">
                ${icon('crosshair')} Volver a intentarlo
@@ -1341,36 +1395,38 @@ function renderFavouriteCard(stopId: string): string {
   const official = label === stopName(stopId) ? '' : stopName(stopId)
 
   return `
-    <section class="card stop-card">
-      <div class="card-head${expanded ? '' : ' is-tight'}">
-        <button class="card-head-main" type="button" data-action="expand-stop" data-stop="${esc(
-          stopId,
-        )}" aria-expanded="${expanded}">
-          <span class="stop-code">${esc(stopId)}</span>
-          <span class="card-head-copy">
-            <span class="card-title">${esc(label)}</span>
-            ${official ? `<span class="card-sub is-wrap">${esc(official)}</span>` : ''}
-          </span>
-          ${icon(expanded ? 'chevronDown' : 'chevron')}
-        </button>
-        <span class="card-actions">
-          ${
-            expanded
-              ? `<button class="mini-btn${syncing ? ' is-spinning' : ''}" type="button" data-action="refresh-stop" data-stop="${esc(
-                  stopId,
-                )}" aria-label="Actualizar esta parada">${icon('refresh')}</button>`
-              : ''
-          }
-          <button class="mini-btn" type="button" data-action="rename-stop" data-stop="${esc(
-            stopId,
-          )}" aria-label="Cambiar nombre">${icon('pencil')}</button>
-          <button class="mini-btn is-danger" type="button" data-action="remove-favourite" data-stop="${esc(
-            stopId,
-          )}" aria-label="Quitar parada">${icon('trash')}</button>
+    <section class="card stop-card${expanded ? ' is-expanded' : ''}" data-key="stop-${esc(stopId)}">
+      <button
+        class="stop-summary"
+        type="button"
+        data-action="expand-stop"
+        data-stop="${esc(stopId)}"
+        aria-expanded="${expanded}"
+      >
+        <span class="stop-code">${esc(stopId)}</span>
+        <span class="stop-summary-copy">
+          <span class="stop-name">${esc(label)}</span>
+          ${official ? `<span class="stop-official">${esc(official)}</span>` : ''}
+          ${renderStopLines(lines)}
         </span>
-      </div>
+        <span class="stop-chevron">${icon('chevron')}</span>
+      </button>
 
-      ${expanded ? '' : renderStopLines(stopId, lines)}
+      <div class="stop-tools">
+        ${
+          expanded
+            ? `<button class="mini-btn${syncing ? ' is-spinning' : ''}" type="button" data-action="refresh-stop" data-stop="${esc(
+                stopId,
+              )}" aria-label="Actualizar esta parada">${icon('refresh')}</button>`
+            : ''
+        }
+        <button class="mini-btn" type="button" data-action="rename-stop" data-stop="${esc(
+          stopId,
+        )}" aria-label="Cambiar nombre">${icon('pencil')}</button>
+        <button class="mini-btn is-danger" type="button" data-action="remove-favourite" data-stop="${esc(
+          stopId,
+        )}" aria-label="Quitar parada">${icon('trash')}</button>
+      </div>
 
       ${
         expanded
@@ -1393,29 +1449,55 @@ function renderFavouriteCard(stopId: string): string {
 }
 
 /**
- * Franja de líneas de una parada plegada.
+ * Cuántos distintivos de línea caben antes de resumir el resto en un "+N".
  *
- * Es un botón, y no un simple bloque, porque ocupa el ancho entero justo debajo
- * del nombre: tocar ahí y que no pase nada se lee como un fallo. Despliega la
- * parada igual que la cabecera, y se queda fuera del recorrido del tabulador
- * (`tabindex="-1"`) para no obligar a pasar dos veces por el mismo destino.
+ * Nueve es lo que entra holgadamente en dos filas en la pantalla más estrecha
+ * que se contempla (360 px). Por encima, en vez de recortar la franja —que era
+ * lo que hacía antes, con un `overflow: hidden` que se comía líneas enteras sin
+ * decirlo— se cuenta cuántas quedan. Un "+4" es información; una fila cortada a
+ * media altura es una mentira, porque quien la lee da por hecho que ha visto
+ * todas las líneas de su parada.
  *
- * El hueco es FIJO —dos filas— aunque sobre sitio. Es lo que hace que todas las
- * tarjetas plegadas midan lo mismo, que era el problema: con la altura pegada al
- * contenido, la lista de paradas guardadas subía y bajaba de escalón en escalón
- * según cuántas líneas tuviera cada una.
+ * Solo hay una parada en toda la red con trece líneas y otras dos que pasan de
+ * nueve, así que el "+N" es la excepción y no la norma.
  */
-function renderStopLines(stopId: string, lines: TransitLine[]): string {
+const STOP_LINES_PREVIEW = 9
+
+/**
+ * Franja de líneas de una parada.
+ *
+ * Va dentro del botón que despliega la tarjeta, así que ya no necesita ser un
+ * botón aparte ni salirse del recorrido del tabulador: es un solo destino.
+ *
+ * La altura la marca el contenido y NO se recorta. Que todas las tarjetas
+ * plegadas midan exactamente lo mismo dejó de ser el objetivo en cuanto se vio
+ * el precio: para conseguirlo había que fijar dos filas y esconder lo que
+ * sobrara, y lo que sobraba eran las líneas de las paradas más importantes, que
+ * son justamente las que más líneas tienen. Con el "+N" la lista sigue siendo
+ * regular —una fila o dos, nunca más— sin ocultar nada.
+ */
+function renderStopLines(lines: TransitLine[]): string {
+  if (lines.length === 0) {
+    return '<span class="stop-lines"><span class="stop-lines-empty">Sin líneas registradas</span></span>'
+  }
+
+  const visible = lines.slice(0, STOP_LINES_PREVIEW)
+  const hidden = lines.length - visible.length
+
   return `
-    <button class="stop-lines" type="button" data-action="expand-stop" data-stop="${esc(
-      stopId,
-    )}" aria-label="Desplegar la parada" tabindex="-1">
+    <span class="stop-lines">
+      ${visible.map((line) => lineChip(line.lineId, line.color, 'sm')).join('')}
       ${
-        lines.length === 0
-          ? '<span class="stop-lines-empty">Sin líneas registradas</span>'
-          : lines.map((line) => lineChip(line.lineId, line.color, 'sm')).join('')
+        hidden > 0
+          ? `<span class="line-chip is-sm is-more" title="${esc(
+              `${hidden} línea(s) más: ${lines
+                .slice(STOP_LINES_PREVIEW)
+                .map((line) => line.lineId)
+                .join(', ')}`,
+            )}">+${hidden}</span>`
+          : ''
       }
-    </button>
+    </span>
   `
 }
 
@@ -1646,6 +1728,7 @@ function renderMonitor(): string {
         <h2>Puntualidad</h2>
         <p>Compara el horario oficial con la hora real a la que pasa tu autobús.</p>
       </div>
+      ${renderMonitorCostNotice()}
       <section class="card"><div class="card-body">
         ${emptyState(
           'chart',
@@ -1662,9 +1745,40 @@ function renderMonitor(): string {
       <h2>Puntualidad</h2>
       <p>Media de paso real observada frente al horario programado.</p>
     </div>
+    ${renderMonitorCostNotice()}
     ${state.schedule?.stale ? notice('warn', scheduleStaleMessage()) : ''}
     ${state.monitors.map((monitor) => renderMonitorCard(monitor)).join('')}
   `
+}
+
+/**
+ * Lo que MEDIR le cuesta al resto de la aplicación.
+ *
+ * No es una advertencia de cortesía: dentro de su franja, un control se queda
+ * con el turno de la cola de consultas, que es una sola y admite una petición
+ * cada dos segundos contra la fuente oficial. Mientras dura, los tiempos de las
+ * demás paradas tardan más en refrescarse y el seguimiento de próximo bus deja
+ * de rastrear por dónde viene el autobús —sigue dando la hora, eso no se toca—.
+ *
+ * Callarlo convertía una regla en un fallo aparente: quien tenía un control a
+ * las ocho veía la app "lenta" a las ocho y no tenía forma de relacionar las dos
+ * cosas. Dicho aquí, en la pantalla que lo provoca, es una decisión informada.
+ */
+function renderMonitorCostNotice(): string {
+  const open = state.monitors.filter((monitor) => isWithinWindow(monitor))
+
+  if (open.length > 0) {
+    const until = Math.max(...open.map((monitor) => monitor.endMinutes))
+    return notice(
+      'warn',
+      `Midiendo hasta las ${formatMinutesClock(until)}. Mientras dure, los tiempos del resto de líneas y paradas se actualizan más despacio y el seguimiento no rastrea por dónde viene el autobús: la cola de consultas es una sola y ahora la ocupa la parada que se está midiendo.`,
+    )
+  }
+
+  return notice(
+    'info',
+    'Mientras un control está dentro de su franja, se queda con el turno de consultas: los tiempos del resto de líneas y paradas se actualizan más despacio y el seguimiento deja de rastrear por dónde viene el autobús, aunque siga avisando de los minutos que faltan.',
+  )
 }
 
 function scheduleStaleMessage(): string {
@@ -1911,7 +2025,7 @@ const TOUR: TourStep[] = [
   {
     iconName: 'home',
     title: 'Inicio',
-    body: 'El reloj, tus avisos en marcha y tus paradas guardadas. Toca una parada para ver sus llegadas; los botones de la derecha la actualizan, la renombran o la quitan.',
+    body: 'El reloj, tus seguimientos en marcha y tus paradas guardadas. Toca una parada para ver sus llegadas; los botones de abajo la renombran o la quitan.',
   },
   {
     iconName: 'search',
@@ -1929,9 +2043,14 @@ const TOUR: TourStep[] = [
     body: 'Elige una parada, una línea y una franja: la app anota a qué hora pasa de verdad y la compara con el horario.',
   },
   {
+    iconName: 'info',
+    title: 'Info',
+    body: 'Los horarios oficiales de cada línea, por sentido y por día, con la primera salida, la última y los descansos señalados. Y, si lo enciendes en Ajustes, el cálculo de rutas entre dos puntos.',
+  },
+  {
     iconName: 'settings',
     title: 'Ajustes',
-    body: 'Desde el engranaje de arriba: permisos, cuántos autobuses sigue cada aviso, actualizaciones y el registro.',
+    body: 'Desde el engranaje de arriba. En "Funciones", permisos, seguimiento y actualizaciones; en "Información", los ritmos de consulta y el registro.',
   },
   {
     iconName: 'bell',
@@ -2021,6 +2140,66 @@ function renderTour(): string {
  * Las paradas cercanas ya no están aquí: se buscan en Buscar, junto al resto de
  * formas de encontrar una parada.
  */
+/**
+ * La pestaña Info: dos apartados, uno debajo del selector.
+ *
+ * Lo que tienen en común no es la tecnología —uno calcula rutas y el otro lee un
+ * GTFS— sino el momento en que se usan: son las dos preguntas que se hacen ANTES
+ * de salir de casa, no las que se hacen en la marquesina. Por eso viven juntas y
+ * lejos de Inicio, Buscar y Seguir, que son las tres pantallas de "estoy
+ * esperando el autobús ahora mismo".
+ */
+function renderInfo(): string {
+  const section = state.info.section
+
+  return `
+    <div class="segmented" role="tablist" aria-label="Apartados de información">
+      ${renderInfoSegment('llegar', 'Cómo llegar', 'route')}
+      ${renderInfoSegment('lineas', 'Información de líneas', 'clock')}
+    </div>
+
+    ${section === 'llegar' ? renderComoLlegar() : renderLineInfo()}
+  `
+}
+
+function renderInfoSegment(section: InfoSection, label: string, iconName: string): string {
+  return `
+    <button
+      class="segmented-item"
+      type="button"
+      role="tab"
+      aria-selected="${state.info.section === section}"
+      data-action="info-section"
+      data-section="${section}"
+    >${icon(iconName)}<span>${esc(label)}</span></button>
+  `
+}
+
+/**
+ * "Cómo llegar": el planificador de rutas, que sigue siendo experimental.
+ *
+ * Apagado en Ajustes NO se dibuja el mapa ni se pide la ubicación ni se calcula
+ * nada: lo experimental no puede gastar recursos de quien no lo ha pedido. Lo
+ * que sí queda es una explicación de qué hay aquí y cómo encenderlo, porque una
+ * pestaña con un apartado que no dice nada se lee como una app rota.
+ */
+function renderComoLlegar(): string {
+  if (!state.settings.experimentalMaps) {
+    return `
+      <section class="card"><div class="card-body">
+        ${emptyState(
+          'route',
+          'Cómo llegar está apagado',
+          'Calcula la ruta en autobús entre dos puntos. Está en pruebas, así que viene apagado: encendido consulta tu ubicación y dibuja un mapa.',
+          '<button class="btn btn-primary" type="button" data-action="tab" data-tab="ajustes">Abrir Ajustes</button>',
+        )}
+      </div></section>
+    `
+  }
+
+  return renderMapas()
+}
+
 function renderMapas(): string {
   const maps = state.maps
 
@@ -2054,6 +2233,318 @@ function renderMapas(): string {
 
     ${renderRoutePanel()}
   `
+}
+
+/* ---------------------- Información de líneas -------------------------- */
+
+/**
+ * Un hueco a partir del cual dejamos de hablar de "frecuencia" y empezamos a
+ * hablar de "descanso".
+ *
+ * Cuarenta y cinco minutos: la línea urbana más floja de Salamanca pasa cada 30,
+ * así que por debajo de ese hueco lo que se está viendo es una frecuencia mala,
+ * no una parada del servicio. Por encima, el autobús ha dejado de circular un
+ * rato —la comida, o el vacío de media tarde— y eso SÍ cambia lo que hace quien
+ * lo lee: significa que no merece la pena bajar a la parada.
+ */
+const BREAK_GAP_MINUTES = 45
+
+/** Los tres tipos de día, en el orden en que se leen. */
+const DAY_TYPES: Array<{ dayType: ServiceDayType, label: string }> = [
+  { dayType: 'weekday', label: 'lunes a viernes' },
+  { dayType: 'saturday', label: 'sábados' },
+  { dayType: 'sunday', label: 'domingos y festivos' },
+]
+
+/**
+ * Horarios oficiales de una línea, por sentido y por tipo de día.
+ *
+ * Es el horario de CABECERA —a qué hora sale cada expedición del principio del
+ * recorrido—, que es lo que se publica en las marquesinas y lo que se busca
+ * cuando la pregunta es "¿a qué hora es el último?". No se mezcla con los
+ * tiempos en vivo: esos son de una parada concreta y de ahora mismo, y viven en
+ * Inicio y en Buscar.
+ */
+function renderLineInfo(): string {
+  const network = state.network
+  if (!network) {
+    return notice('error', 'La red oficial no está disponible.')
+  }
+
+  if (!state.schedule) {
+    return notice(
+      'warn',
+      state.scheduleError
+        ?? 'El horario oficial no se ha podido cargar, así que no hay horarios de línea que enseñar.',
+    )
+  }
+
+  const line = state.info.lineId ? network.lineById.get(state.info.lineId) ?? null : null
+  const direction = state.info.directionKey
+    ? network.directionByKey.get(state.info.directionKey) ?? null
+    : null
+
+  return `
+    <section class="card">
+      <div class="card-body">
+        <label class="field">
+          <span>Línea</span>
+          <select class="select" data-action="info-line">
+            <option value="" ${line ? '' : 'selected'}>Seleccionar línea</option>
+            ${network.lines
+              .map(
+                (item) =>
+                  `<option value="${esc(item.lineId)}" ${
+                    item.lineId === state.info.lineId ? 'selected' : ''
+                  }>${esc(item.shortName)} · ${esc(item.title)}</option>`,
+              )
+              .join('')}
+          </select>
+        </label>
+
+        ${
+          line
+            ? `<label class="field">
+                 <span>Sentido</span>
+                 <select class="select" data-action="info-direction">
+                   <option value="" ${direction ? '' : 'selected'}>Seleccionar sentido</option>
+                   ${line.directions
+                     .map(
+                       (item) =>
+                         `<option value="${esc(item.key)}" ${
+                           item.key === state.info.directionKey ? 'selected' : ''
+                         }>${esc(directionLabel(item))}</option>`,
+                     )
+                     .join('')}
+                 </select>
+               </label>`
+            : ''
+        }
+      </div>
+    </section>
+
+    ${state.schedule.stale ? notice('warn', scheduleStaleMessage()) : ''}
+
+    ${
+      line && direction
+        ? renderDirectionSchedule(line, direction)
+        : `<section class="card"><div class="card-body">${emptyState(
+            'clock',
+            'Elige una línea y un sentido',
+            'Verás las horas de salida de cabecera para cada día, con el primero, el último y los descansos señalados.',
+          )}</div></section>`
+    }
+  `
+}
+
+/**
+ * El horario de UN sentido, con los días de horario idéntico agrupados.
+ *
+ * Agruparlos no es un adorno: en la mayoría de líneas el horario de lunes a
+ * viernes y el del sábado son el mismo, y pintar dos tablas gemelas una debajo
+ * de otra obliga a compararlas hora a hora para descubrir que no hacía falta
+ * compararlas. Cuando de verdad se diferencian, cada bloque se lee solo.
+ */
+function renderDirectionSchedule(line: TransitLine, direction: LineDirection): string {
+  const schedule = state.schedule
+  if (!schedule) {
+    return ''
+  }
+
+  const byDayType = DAY_TYPES.map((entry) => ({
+    ...entry,
+    times: schedule.getDirectionDepartures(direction.key, entry.dayType),
+  }))
+
+  if (byDayType.every((entry) => entry.times.length === 0)) {
+    return `
+      <section class="card"><div class="card-body">
+        ${emptyState(
+          'clock',
+          'Sin horario para este sentido',
+          'El GTFS oficial no trae expediciones de este trayecto. Suele pasar con las variantes parciales, que solo circulan algunos días.',
+        )}
+      </div></section>
+    `
+  }
+
+  // Días con exactamente el mismo horario van juntos. La firma es la lista de
+  // horas: dos días con las mismas horas son, para quien lee, el mismo día.
+  const groups = new Map<string, { labels: string[], dayTypes: ServiceDayType[], times: string[] }>()
+
+  for (const entry of byDayType) {
+    if (entry.times.length === 0) {
+      continue
+    }
+
+    const signature = entry.times.join(',')
+    const group = groups.get(signature)
+
+    if (group) {
+      group.labels.push(entry.label)
+      group.dayTypes.push(entry.dayType)
+    } else {
+      groups.set(signature, { labels: [entry.label], dayTypes: [entry.dayType], times: entry.times })
+    }
+  }
+
+  const today = currentDayType()
+
+  return `
+    <section class="card">
+      <div class="card-head">
+        ${lineChip(line.lineId, line.color, 'lg')}
+        <div class="card-head-copy">
+          <h2 class="card-title">${esc(direction.label)}</h2>
+          <p class="card-sub is-wrap">Salidas desde ${esc(direction.origin)} · ${direction.stopCount} paradas</p>
+        </div>
+      </div>
+      <div class="card-body">
+        ${Array.from(groups.values())
+          .map((group) => renderScheduleGroup(group, group.dayTypes.includes(today)))
+          .join('')}
+        ${renderScheduleLegend()}
+        <p class="text-tiny">
+          Son las salidas de cabecera del horario oficial, no tiempos en vivo: por una parada
+          intermedia el autobús pasa más tarde, y el retraso real no está aquí. Para eso están los
+          tiempos de Inicio y Buscar, y la pestaña Puntualidad.
+        </p>
+      </div>
+    </section>
+  `
+}
+
+/**
+ * Un bloque de días con el mismo horario.
+ *
+ * Se resaltan tres cosas y solo tres, porque son las tres que cambian una
+ * decisión: la primera salida, la última y los bordes de un descanso. El resto
+ * de horas son la frecuencia, y la frecuencia se lee de un vistazo sin ayuda.
+ */
+function renderScheduleGroup(
+  group: { labels: string[], times: string[] },
+  isToday: boolean,
+): string {
+  const marks = markSchedule(group.times)
+
+  return `
+    <div class="schedule-group${isToday ? ' is-today' : ''}">
+      <div class="schedule-head">
+        <strong>${esc(joinDayLabels(group.labels))}</strong>
+        <span class="pill">${group.times.length} ${group.times.length === 1 ? 'salida' : 'salidas'}</span>
+        ${isToday ? '<span class="pill is-ok">Hoy</span>' : ''}
+      </div>
+      <div class="schedule-times">
+        ${group.times
+          .map((clock, index) => {
+            const mark = marks[index]
+            return `<span class="schedule-time${mark.className}"${
+              mark.title ? ` title="${esc(mark.title)}" aria-label="${esc(`${clock}. ${mark.title}`)}"` : ''
+            }>${esc(clock)}</span>`
+          })
+          .join('')}
+      </div>
+    </div>
+  `
+}
+
+/**
+ * Qué es cada hora dentro de su jornada.
+ *
+ * Se calcula sobre la lista ya ordenada: la primera es el inicio, la última la
+ * finalización, y un hueco de más de BREAK_GAP_MINUTES parte la jornada en dos,
+ * de modo que la hora anterior al hueco es "última antes del descanso" y la
+ * siguiente es "vuelta del descanso".
+ *
+ * Una misma hora puede ser dos cosas a la vez (la primera del día y también la
+ * vuelta de un descanso en una línea que solo circula en dos franjas sueltas);
+ * gana el papel más informativo, que es el del descanso.
+ */
+function markSchedule(times: string[]): Array<{ className: string, title: string }> {
+  const marks = times.map(() => ({ className: '', title: '' }))
+  if (times.length === 0) {
+    return marks
+  }
+
+  marks[0] = { className: ' is-first', title: 'Primera salida del día' }
+  const last = times.length - 1
+  marks[last] = { className: ' is-last', title: 'Última salida del día' }
+
+  for (let index = 1; index < times.length; index += 1) {
+    const gap = parseClockToMinutes(times[index]) - parseClockToMinutes(times[index - 1])
+    if (gap < BREAK_GAP_MINUTES) {
+      continue
+    }
+
+    const length = formatGap(Math.round(gap))
+    marks[index - 1] = {
+      className: ' is-break-out',
+      title: `Última salida antes de un descanso de ${length}`,
+    }
+    marks[index] = {
+      className: ' is-break-in',
+      title: `Primera salida tras el descanso de ${length}`,
+    }
+  }
+
+  return marks
+}
+
+/**
+ * La duración de un descanso, dicha como se dice.
+ *
+ * En minutos sueltos funciona para el hueco de la comida, pero los trayectos
+ * parciales tienen dos salidas al día —una por la mañana y otra de noche— y ahí
+ * salía "un descanso de 880 min", que nadie convierte mentalmente a catorce
+ * horas y media. A partir de la hora se cuenta en horas.
+ */
+function formatGap(minutes: number): string {
+  if (minutes < 60) {
+    return `${minutes} min`
+  }
+
+  const hours = Math.floor(minutes / 60)
+  const rest = minutes % 60
+  return rest === 0 ? `${hours} h` : `${hours} h ${rest} min`
+}
+
+function renderScheduleLegend(): string {
+  const items: Array<[string, string]> = [
+    ['is-first', 'Primera'],
+    ['is-last', 'Última'],
+    ['is-break-out', 'Antes del descanso'],
+    ['is-break-in', 'Tras el descanso'],
+  ]
+
+  return `
+    <div class="schedule-legend">
+      ${items
+        .map(
+          ([tone, label]) =>
+            `<span class="schedule-legend-item"><span class="schedule-time ${tone}">00:00</span>${esc(
+              label,
+            )}</span>`,
+        )
+        .join('')}
+    </div>
+  `
+}
+
+/** "lunes a viernes" + "sábados" → "Lunes a viernes y sábados". */
+function joinDayLabels(labels: string[]): string {
+  if (labels.length === DAY_TYPES.length) {
+    return 'Todos los días'
+  }
+
+  // Caso frecuente y con nombre propio: de lunes a sábado, festivos aparte.
+  if (labels.length === 2 && labels[0] === 'lunes a viernes' && labels[1] === 'sábados') {
+    return 'De lunes a sábado'
+  }
+
+  const joined =
+    labels.length === 1 ? labels[0] : `${labels.slice(0, -1).join(', ')} y ${labels[labels.length - 1]}`
+
+  return joined.charAt(0).toUpperCase() + joined.slice(1)
 }
 
 /* -------------------------------- Rutas ------------------------------- */
@@ -2313,14 +2804,51 @@ export function formatWalk(minutes: number): string {
  * 7 · AJUSTES                                                         *
  * ================================================================== */
 
+/**
+ * Ajustes, partido en dos apartados.
+ *
+ * La distinción no es temática sino de uso: hay paneles que HACEN algo —un
+ * interruptor, un permiso, un botón que descarga una versión— y paneles que solo
+ * CUENTAN algo —cada cuánto se pide cada cosa, cuántas consultas van, qué ha
+ * pasado—. Mezclados obligaban a recorrer nueve tarjetas para llegar al único
+ * interruptor que se venía a tocar, y los paneles de datos, que son largos, se
+ * llevaban la mitad del recorrido sin que nadie los hubiera pedido.
+ *
+ * Se abre en "Funciones" porque a Ajustes se entra a cambiar algo. Lo que se
+ * lee está a un toque, y ese toque solo lo da quien lo quiere.
+ */
 function renderAjustes(): string {
-  const health = getClientHealth()
-  const network = state.network
+  return `
+    <div class="segmented" role="tablist" aria-label="Apartados de ajustes">
+      ${renderSettingsSegment('funciones', 'Funciones', 'settings')}
+      ${renderSettingsSegment('informacion', 'Información', 'info')}
+    </div>
 
+    ${state.settingsSection === 'funciones' ? renderSettingsActions() : renderSettingsFacts()}
+
+    <p class="text-tiny" style="text-align:center">SALBUS ${esc(APP_VERSION)}</p>
+  `
+}
+
+function renderSettingsSegment(section: SettingsSection, label: string, iconName: string): string {
+  return `
+    <button
+      class="segmented-item"
+      type="button"
+      role="tab"
+      aria-selected="${state.settingsSection === section}"
+      data-action="settings-section"
+      data-section="${section}"
+    >${icon(iconName)}<span>${esc(label)}</span></button>
+  `
+}
+
+/** Lo que se puede TOCAR: permisos, interruptores y la actualización. */
+function renderSettingsActions(): string {
   return `
     <div class="screen-intro">
-      <h2>Ajustes</h2>
-      <p>Permisos, origen de los datos y diagnóstico.</p>
+      <h2>Funciones</h2>
+      <p>Permisos, comportamiento del seguimiento y actualizaciones.</p>
     </div>
 
     <section class="card">
@@ -2346,11 +2874,24 @@ function renderAjustes(): string {
 
     ${renderTrackingRulesCard()}
 
-    ${renderRefreshRulesCard()}
-
     ${renderExperimentalCard()}
 
     ${renderUpdateCard()}
+  `
+}
+
+/** Lo que solo se LEE: frecuencias, origen de los datos, cola y registro. */
+function renderSettingsFacts(): string {
+  const health = getClientHealth()
+  const network = state.network
+
+  return `
+    <div class="screen-intro">
+      <h2>Información</h2>
+      <p>Cómo funciona por dentro: ritmos de consulta, origen de los datos y registro.</p>
+    </div>
+
+    ${renderRefreshRulesCard()}
 
     <section class="card">
       <div class="card-head"><div class="card-head-copy">
@@ -2429,8 +2970,6 @@ function renderAjustes(): string {
         }
       </div>
     </section>
-
-    <p class="text-tiny" style="text-align:center">SALBUS ${esc(APP_VERSION)}</p>
   `
 }
 
@@ -2627,7 +3166,7 @@ function renderTrackingRulesCard(): string {
         ${renderSettingRow(
           'vibrate',
           'Vibración al acercarse',
-          `Un toque corto cuando faltan ${TRACKING_WARN_MINUTES} minutos, una sola vez por autobús.`,
+          `Tres toques cortos cuando faltan ${TRACKING_WARN_MINUTES} minutos, una sola vez por autobús.`,
           state.settings.vibrateOnApproach,
           'toggle-vibration',
         )}
@@ -2657,15 +3196,17 @@ function renderExperimentalCard(): string {
       <div class="card-body">
         ${renderSettingRow(
           'map',
-          'Pestaña Mapas',
-          'Cálculo de rutas en autobús entre dos puntos. Apagada no consume nada.',
+          'Cómo llegar',
+          'Cálculo de rutas en autobús entre dos puntos, dentro de la pestaña Info. Apagado no consume nada.',
           state.settings.experimentalMaps,
           'toggle-maps',
         )}
         <p class="text-tiny">
           Las rutas se calculan con el recorrido oficial de las líneas, así que los minutos son
           estimaciones y no horarios en firme. No consulta los tiempos de llegada en tiempo real:
-          esa cola es para los avisos de próximo bus.
+          esa cola es para los seguimientos de próximo bus. El otro apartado de Info, los horarios
+          de cada línea, no depende de este interruptor: sale del horario oficial que ya viaja
+          dentro de la aplicación.
         </p>
       </div>
     </section>

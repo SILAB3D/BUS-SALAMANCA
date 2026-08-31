@@ -111,4 +111,17 @@ export interface ScheduleDataset {
     dayType: ServiceDayType,
     directionKey?: string | null,
   ): string[]
+
+  /**
+   * Salidas (HH:MM) de un sentido desde su CABECERA, para un tipo de dia.
+   *
+   * Es el horario de la linea tal y como se publica en una marquesina: a que
+   * hora sale cada expedicion del principio del recorrido. No es lo mismo que
+   * `getScheduledTimes`, que responde "a que hora pasa la linea N por ESTA
+   * parada" y solo tiene sentido con una parada delante.
+   *
+   * Se resuelve mirando la primera parada del sentido en la red oficial, que es
+   * exactamente su cabecera.
+   */
+  getDirectionDepartures(directionKey: string, dayType: ServiceDayType): string[]
 }

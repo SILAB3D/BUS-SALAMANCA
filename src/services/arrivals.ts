@@ -115,6 +115,20 @@ interface FetchOptions {
   /** Las peticiones prioritarias (parada en pantalla) se atienden antes. */
   priority?: 'high' | 'normal'
   signal?: AbortSignal
+  /**
+   * La peticion de ESTA parada sale AHORA.
+   *
+   * Se avisa cuando la tarea ABANDONA la cola, no cuando entra. Son cosas
+   * distintas y confundirlas es lo que hacia mentir al punto de estado de cada
+   * parada: un lote de ocho entra entero en el mismo milisegundo, pero sale de
+   * una en una a lo largo de quince segundos. Avisando al entrar, las ocho se
+   * pintaban "consultando" a la vez y ninguna llegaba a pintarse "esperando
+   * turno", que es el estado en el que pasan casi todo el rato.
+   *
+   * No se llama si la respuesta sale de la cache ni si se engancha a una
+   * peticion ya en vuelo: ahi no se consulta nada.
+   */
+  onStart?: (stopId: string) => void
 }
 
 interface QueueTask {
@@ -207,7 +221,14 @@ export async function fetchStopArrivals(stopId: string, options: FetchOptions = 
     return pending
   }
 
-  const request = runQueued(() => requestStopFeed(stopId, options.signal), options.priority === 'high' ? 0 : 1)
+  const request = runQueued(
+    () => {
+      // Ya tiene ficha y hueco: esto sale a la red ahora mismo.
+      options.onStart?.(stopId)
+      return requestStopFeed(stopId, options.signal)
+    },
+    options.priority === 'high' ? 0 : 1,
+  )
     .then((feed) => {
       // Un 429 no debe destruir el ultimo dato bueno: se conserva y se marca.
       if (feed.status === 'throttled' && cached) {
@@ -269,20 +290,22 @@ export async function fetchStopsInParallel(
   stopIds: string[],
   options: FetchOptions & {
     onFeed?: (feed: StopFeed) => void
-    onStart?: (stopId: string) => void
     priorityOf?: (stopId: string) => 'high' | 'normal'
   } = {},
 ): Promise<StopFeed[]> {
-  const pending = stopIds.map((stopId) => {
-    options.onStart?.(stopId)
-    return fetchStopArrivals(stopId, {
+  // `onStart` NO se dispara aqui: lo hace `fetchStopArrivals` cuando la
+  // peticion sale de la cola. Avisandolo al encolar, las ocho paradas se
+  // marcaban "consultando" en el mismo instante y el estado dejaba de decir
+  // cual se esta pidiendo de verdad.
+  const pending = stopIds.map((stopId) =>
+    fetchStopArrivals(stopId, {
       ...options,
       priority: options.priorityOf?.(stopId) ?? options.priority,
     }).then((feed) => {
       options.onFeed?.(feed)
       return feed
-    })
-  })
+    }),
+  )
 
   return Promise.all(pending)
 }
@@ -291,7 +314,6 @@ export async function fetchStopsSequentially(
   stopIds: string[],
   options: FetchOptions & {
     onFeed?: (feed: StopFeed) => void
-    onStart?: (stopId: string) => void
     shouldStop?: () => boolean
     shouldSkip?: (stopId: string) => boolean
     /**
@@ -317,7 +339,6 @@ export async function fetchStopsSequentially(
       continue
     }
 
-    options.onStart?.(stopId)
     const feed = await fetchStopArrivals(stopId, {
       ...options,
       priority: options.priorityOf?.(stopId) ?? options.priority,

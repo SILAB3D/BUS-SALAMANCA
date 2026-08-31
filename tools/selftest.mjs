@@ -248,7 +248,11 @@ async function main() {
 
   const css = await fs.readFile(path.join(projectRoot, 'src', 'style.css'), 'utf8')
   const splashDuration = css.match(/animation:\s*splash-out[^;]*?([\d.]+)s\s+forwards/)
-  check('la animación de carga dura 1,5 s', css.includes('1.5s'), splashDuration?.[0] ?? 'no encontrada')
+  check(
+    'la animación de carga dura 1 s',
+    /animation: splash-out 0\.32s ease 1s forwards/.test(css),
+    splashDuration?.[0] ?? 'no encontrada',
+  )
 
   section('5 · Puntualidad')
 
@@ -995,15 +999,22 @@ async function main() {
 
     check('la pestana Mapas viene apagada de fabrica',
       /experimentalMaps: false/.test(stateSource))
-    check('apagada no aparece en la barra de pestanas',
-      viewsSource.includes('if (!state.settings.experimentalMaps)')
-        && viewsSource.includes('function visibleTabs()'))
-    check('una pestana Mapas guardada no revive al arrancar',
-      /const valid: TabId\[\] = \['inicio', 'buscar', 'monitor', 'seguimiento', 'ajustes'\]/
-        .test(stateSource))
+    // Lo experimental es AHORA el apartado "Como llegar", no la pestana entera:
+    // los horarios de linea salen del GTFS que ya viaja dentro de la app.
+    check('apagado, "Como llegar" no dibuja mapa ni pide ubicacion',
+      viewsSource.includes('function renderComoLlegar()')
+        && viewsSource.includes('if (!state.settings.experimentalMaps)')
+        && viewsSource.includes("'Cómo llegar está apagado'"))
+    check('la pestana Info existe siempre, sin depender del experimento',
+      viewsSource.includes("{ id: 'info', label: 'Info', iconName: 'info' }")
+        && /function visibleTabs\(\): TabDefinition\[\] \{\s*\n\s*return TABS/.test(viewsSource))
+    check('una pestana Mapas guardada aterriza en Info',
+      /const valid: TabId\[\] = \['inicio', 'buscar', 'monitor', 'seguimiento', 'info', 'ajustes'\]/
+        .test(stateSource)
+        && stateSource.includes("raw === 'mapas' ? 'info'"))
     check('al salir de la pestana se suelta el mapa y la ubicacion',
       mainSource.includes('function closeMaps()')
-        && mainSource.includes("if (previous === 'mapas' && tab !== 'mapas')")
+        && mainSource.includes("if (previous === 'info' && tab !== 'info')")
         && mainSource.includes('function stopWatchingLocation()'))
     check('el manifiesto pide los permisos de ubicacion',
       manifest.includes('android.permission.ACCESS_COARSE_LOCATION')
@@ -1197,8 +1208,8 @@ async function main() {
     // pruebas. Se pide al entrar en "Rutas".
     {
       const mainSource = await fs.readFile(path.join(projectRoot, 'src', 'main.ts'), 'utf8')
-      check('el callejero se carga solo al entrar en la pestana Mapas',
-        mainSource.includes("if (tab === 'mapas' && previous !== 'mapas') {")
+      check('el callejero se carga solo al abrir "Como llegar"',
+        mainSource.includes("if (tab === 'info' && state.info.section === 'llegar' && state.settings.experimentalMaps) {")
           && mainSource.includes('void loadStreetGraph()')
           && !mainSource.includes('await loadStreetGraph()'))
     }
@@ -1294,19 +1305,22 @@ async function main() {
       mainSource.includes('async function ensureStopFresh(')
         && mainSource.includes('await ensureStopFresh(stopId)'))
 
-    // La animacion de bienvenida dura 1,5 s exactos.
+    // La animacion de bienvenida dura 1 s exacto, y el numero vive en UN sitio:
+    // la hoja de estilo y main.ts tienen que decir lo mismo o la pantalla se
+    // retira a media animacion.
     {
       const css = await fs.readFile(path.join(projectRoot, 'src', 'style.css'), 'utf8')
-      check('la animacion de inicio dura 1,5 s',
-        /animation: splash-out 0\.32s ease 1\.5s forwards/.test(css)
-          && mainSource.includes('Math.max(0, 1500 - elapsed)'))
+      check('la animacion de inicio dura 1 s',
+        /animation: splash-out 0\.32s ease 1s forwards/.test(css)
+          && mainSource.includes('const SPLASH_MS = 1_000')
+          && mainSource.includes('Math.max(0, SPLASH_MS - elapsed)'))
     }
 
     // Ubicacion: se lleva a quien mira hasta donde se activa.
     check('se ofrece activar la ubicacion del sistema',
       mainSource.includes('DeviceSettings.openLocationSettings()')
         && viewsSource.includes("data-action=\"open-location-settings\""))
-    check('el mapa de la pestana Mapas se puede ampliar',
+    check('el mapa de "Como llegar" se puede ampliar',
       viewsSource.includes("data-action=\"maps-expand\"")
         && mainSource.includes("case 'maps-expand':"))
   }
@@ -1360,7 +1374,9 @@ async function main() {
     check('se avisa al servicio de si el recorrido se está mirando',
       mainSource.includes('function isWatchingRoute()')
         && mainSource.includes('BusTracking.setRouteWatch({ watching })')
-        && /goToTab[\s\S]{0,2000}void syncRouteWatch\(\)/.test(mainSource)
+        // La ventana es holgada a proposito: lo que se comprueba es que goToTab
+        // avise al servicio, no cuantas lineas mida la funcion.
+        && /async function goToTab[\s\S]{0,3000}void syncRouteWatch\(\)/.test(mainSource)
         && /visibilitychange[\s\S]{0,400}void syncRouteWatch\(\)/.test(mainSource))
 
     // Fuera de la pestana se degrada: sigue avisando, deja de dibujar.
@@ -1488,9 +1504,21 @@ async function main() {
           && service.includes('static void setRouteWatch(boolean watching)'))
       // Lo consultado se comparte con la web en vez de tirarse: es lo que le
       // permite dibujar el recorrido sin pedir una sola consulta mas.
+      // Parada a parada, en cuanto se sabe: agrupado al final del barrido, el
+      // recorrido dibujado se quedaba quince segundos inmovil.
       check('el servicio comparte lo que ve en cada parada',
-        service.includes('plugin.emitRouteUpdate(job.id, job.lineId, seen)')
+        service.includes('plugin.emitRouteUpdate(job.id, job.lineId, one)')
           && plugin.includes('notifyListeners("routeUpdate", payload)'))
+      // Y ademas cuenta por donde VA, que es lo unico que puede encender el
+      // punto de estado de cada parada mientras el servicio tiene la cola.
+      check('el servicio cuenta por que parada va el barrido',
+        service.includes('emitRouteProgress(job, queuedFrom(job, index + 1), job.route[index])')
+          && service.includes('emitRouteProgress(job, new JSONArray(), null)')
+          && plugin.includes('notifyListeners("routeProgress", payload)'))
+      check('la web pinta ese estado parada a parada',
+        mainSourceForUpdates.includes("BusTracking.addListener('routeProgress'")
+          && /routeProgress[\s\S]{0,700}state\.stopSync\[stopId\] = 'queued'/.test(mainSourceForUpdates)
+          && /routeProgress[\s\S]{0,900}state\.stopSync\[update\.loading\] = 'loading'/.test(mainSourceForUpdates))
       check('la web integra ese barrido en su propia cache',
         mainSourceForUpdates.includes("BusTracking.addListener('routeUpdate'")
           && /routeUpdate[\s\S]{0,900}state\.feeds\[stop\.stopId\] = \{/.test(mainSourceForUpdates))

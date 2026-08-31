@@ -17,6 +17,8 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
+import { resolveVersion } from './version.mjs'
+
 const CHROME_CANDIDATES = [
   'C:/Program Files/Google/Chrome/Application/chrome.exe',
   'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
@@ -26,8 +28,14 @@ const CHROME_CANDIDATES = [
 ]
 
 const require = createRequire(import.meta.url)
-/** El tour se abre una vez por version: sin darlo por visto taparia cada captura. */
-const appVersion = `v${require('../package.json').version}`
+/**
+ * El tour se abre una vez por version: sin darlo por visto taparia cada captura.
+ *
+ * La version tiene que ser la MISMA que compila Vite (`resolveVersion`), no la de
+ * package.json: no coinciden —la de Vite sale de las etiquetas de git— y con la
+ * equivocada el tour se daba por no visto y se abria encima de cada pantalla.
+ */
+const appVersion = `v${resolveVersion().versionName}`
 
 const args = process.argv.slice(2)
 const url = valueOf('--url') ?? 'http://localhost:5177/'
@@ -39,7 +47,7 @@ const onlyOverflow = args.includes('--overflow')
     da tiempo a que la app termine de arrancar antes de la captura. */
 const waitMs = Number.parseInt(valueOf('--wait') ?? '', 10)
 const checkStability = args.includes('--stability')
-/** La pestana Mapas viene apagada de fabrica, asi que hay que pedirla a mano. */
+/** "Como llegar" viene apagado de fabrica, asi que hay que pedirlo a mano. */
 const withMaps = args.includes('--maps')
 
 function valueOf(flag) {
@@ -204,7 +212,7 @@ async function main() {
     }
 
     await cdp.send('Page.navigate', { url })
-    // Margen para el splash (1,5 s) y para que la cola de peticiones traiga datos.
+    // Margen para el splash (1 s) y para que la cola de peticiones traiga datos.
     await delay(Number.isFinite(waitMs) ? waitMs : args.includes('--seed') ? 16000 : 3500)
 
     const screens = [
@@ -212,13 +220,17 @@ async function main() {
       { tab: 'buscar', name: 'buscar' },
       { tab: 'seguimiento', name: 'seguimiento' },
       { tab: 'monitor', name: 'puntualidad' },
+      // La pestana Info existe siempre; su apartado "Como llegar" es lo unico
+      // que depende del interruptor experimental. Se entra por "Informacion de
+      // lineas", que es el apartado que no pide la ubicacion.
+      { tab: 'info', name: 'info-lineas', section: 'lineas' },
       { tab: 'ajustes', name: 'ajustes' },
     ]
 
     if (withMaps) {
-      // Va antes de Ajustes en la barra, pero se captura al final: entrar en
-      // ella pide la ubicacion, y el dialogo del permiso taparia lo demas.
-      screens.splice(screens.length - 1, 0, { tab: 'mapas', name: 'mapas' })
+      // Se captura al final: entrar en "Como llegar" pide la ubicacion, y el
+      // dialogo del permiso taparia lo demas.
+      screens.push({ tab: 'info', name: 'info-llegar', section: 'llegar' })
     }
 
     for (const screen of screens) {
@@ -226,6 +238,27 @@ async function main() {
         `document.querySelector('[data-action="tab"][data-tab="${screen.tab}"]')?.click(); true`,
       )
       await delay(700)
+
+      if (screen.section) {
+        await cdp.evaluate(
+          `document.querySelector('[data-action="info-section"][data-section="${screen.section}"]')?.click(); true`,
+        )
+        // Con un sentido elegido, la tabla de horarios se dibuja entera: es el
+        // caso que puede desbordar, no el desplegable vacio.
+        if (screen.section === 'lineas') {
+          await cdp.evaluate(`(() => {
+            const app = window.__salbus;
+            if (!app) return false;
+            const line = app.state.network?.lines?.[0];
+            if (!line) return false;
+            app.state.info.lineId = line.lineId;
+            app.state.info.directionKey = line.directions[0]?.key ?? '';
+            app.render();
+            return true;
+          })()`)
+        }
+        await delay(500)
+      }
 
       const overflow = await cdp.evaluate(`(() => {
         const vw = document.documentElement.clientWidth;

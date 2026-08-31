@@ -73,6 +73,8 @@ import {
   MAX_TRACKING_JOBS,
   type MonitorJob,
   type RoutePoint,
+  type InfoSection,
+  type SettingsSection,
   type TabId,
   type TrackingJob,
   type SearchMode,
@@ -121,6 +123,28 @@ interface RouteUpdate {
   jobId: string
   lineId: string
   stops: RouteStopUpdate[]
+  at: number
+}
+
+/**
+ * Por donde va el barrido del recorrido de un aviso AHORA MISMO.
+ *
+ * `RouteUpdate` cuenta lo ya averiguado; esto cuenta lo que se esta
+ * averiguando. Son datos distintos y hacen falta los dos: con el servicio
+ * nativo vivo, la web no consulta ni una sola de esas paradas, asi que sin este
+ * aviso no tiene forma de saber cual esta en curso ni cuales esperan turno, y
+ * el recorrido se quedaba inmovil un cuarto de minuto sin indicio de estar
+ * trabajando.
+ *
+ * `route` llega entero para poder BORRAR el estado de las paradas de este aviso
+ * antes de aplicar el nuevo: sin la lista completa, una parada que saliera de
+ * la cola se quedaria encendida para siempre.
+ */
+interface RouteProgress {
+  jobId: string
+  route: string[]
+  queued: string[]
+  loading: string | null
   at: number
 }
 
@@ -220,6 +244,10 @@ interface BusTrackingPlugin {
   addListener(
     event: 'routeUpdate',
     handler: (update: RouteUpdate) => void,
+  ): Promise<{ remove: () => Promise<void> }>
+  addListener(
+    event: 'routeProgress',
+    handler: (update: RouteProgress) => void,
   ): Promise<{ remove: () => Promise<void> }>
 
   addListener(
@@ -336,6 +364,17 @@ let mapPaintKey = ''
  * Arranque                                                             *
  * ------------------------------------------------------------------ */
 
+/**
+ * Duracion EXACTA de la pantalla de carga.
+ *
+ * Tiene que coincidir con las animaciones de `.splash` en `style.css`: la
+ * pantalla no se retira antes de que terminen, o el icono se iria a media
+ * entrada. Un segundo es lo que tarda en leerse la marca; mas que eso es hacer
+ * esperar por una animacion a quien solo quiere saber cuanto falta para su
+ * autobus.
+ */
+const SPLASH_MS = 1_000
+
 void bootstrap()
 
 async function bootstrap(): Promise<void> {
@@ -371,9 +410,9 @@ async function bootstrap(): Promise<void> {
     log('error', 'arranque', errorMessage(error))
   }
 
-  // La animación dura 1,5 s exactos; no se retira antes para que no parpadee.
+  // La animación dura 1 s exacto; no se retira antes para que no parpadee.
   const elapsed = Date.now() - splashStartedAt
-  window.setTimeout(() => dismissSplash(), Math.max(0, 1500 - elapsed))
+  window.setTimeout(() => dismissSplash(), Math.max(0, SPLASH_MS - elapsed))
 
   render()
 
@@ -403,6 +442,11 @@ async function bootstrap(): Promise<void> {
       // SISTEMA, y nada dentro de la app avisa de que ha cambiado. Sin releerlo
       // aqui, el aviso seguiria pidiendolo para siempre despues de concederlo.
       void syncInstallPermission()
+      // La ubicación del teléfono también se enciende fuera de la app: si había
+      // una búsqueda de paradas cercanas esperando por eso, arranca sola.
+      void retryNearbyIfServiceBack()
+      // Y se mira si hay versión nueva: abrir la app ES el momento de saberlo.
+      void checkUpdateOnResume()
     }
   })
 
@@ -449,6 +493,10 @@ async function setupUpdates(): Promise<void> {
   // limitando por peticiones, la app tiene que seguir funcionando sin molestar.
   // El precio es que un fallo real se ve igual que «no hay novedades»; para eso
   // esta la comprobacion manual de Ajustes.
+  //
+  // Comparte cronometro con la comprobacion de cada acceso: sin ello, abrir la
+  // app y cambiar de aplicacion disparaba dos peticiones seguidas a GitHub.
+  lastUpdateCheckAt = Date.now()
   const outcome = await checkForUpdate()
 
   if (outcome.status === 'update') {
@@ -475,6 +523,72 @@ async function setupUpdates(): Promise<void> {
   if (outcome.status === 'error') {
     log('warn', 'actualización', outcome.message)
   }
+}
+
+/**
+ * Última vez que se miró si hay versión nueva.
+ *
+ * La comprobación se repite en CADA acceso a la app, no solo al arrancarla: un
+ * móvil puede pasarse semanas sin cerrar SALBUS del todo —Android la mantiene en
+ * memoria— y con la comprobación atada al arranque esa instalación se quedaba
+ * congelada en una versión vieja sin que nada lo dijera.
+ *
+ * El minuto de margen es para el ir y venir normal entre aplicaciones: volver
+ * cinco veces en un minuto no puede ser cinco peticiones a GitHub, que limita
+ * por IP igual que la fuente de llegadas.
+ */
+let lastUpdateCheckAt = 0
+
+const UPDATE_CHECK_MIN_GAP_MS = 60_000
+
+/**
+ * Mira si hay versión nueva al volver a la app.
+ *
+ * Calla sus errores por el mismo motivo que la del arranque: sin cobertura, o
+ * con GitHub limitando, la app tiene que seguir funcionando sin molestar. Quien
+ * quiera saber si la comprobación falla de verdad tiene el botón de Ajustes,
+ * que sí lo cuenta.
+ *
+ * No se pisa una actualización ya en marcha: con una descarga o una instalación
+ * en curso no hay nada que volver a preguntar.
+ */
+async function checkUpdateOnResume(): Promise<void> {
+  const phase = state.update.phase
+
+  if (!isNativeAndroid() || phase === 'downloading' || phase === 'installing' || phase === 'ready') {
+    return
+  }
+
+  if (Date.now() - lastUpdateCheckAt < UPDATE_CHECK_MIN_GAP_MS) {
+    return
+  }
+
+  lastUpdateCheckAt = Date.now()
+
+  const outcome = await checkForUpdate()
+
+  if (outcome.status !== 'update') {
+    return
+  }
+
+  // La misma versión que ya se estaba ofreciendo no vuelve a anunciarse: quien
+  // pulsó "Ahora no" no puede encontrarse el mismo aviso cada vez que cambia de
+  // aplicación y vuelve.
+  if (state.update.release?.versionCode === outcome.release.versionCode) {
+    return
+  }
+
+  state.update.release = outcome.release
+  state.update.dismissed = false
+  state.update.error = null
+  state.update.downloadedPath = await adoptPendingDownload(outcome.release.versionCode)
+  state.update.phase = state.update.downloadedPath ? 'ready' : 'available'
+  log(
+    'info',
+    'actualización',
+    `Disponible la versión ${outcome.release.versionName} (compilación ${outcome.release.versionCode}).`,
+  )
+  render()
 }
 
 /**
@@ -1651,6 +1765,31 @@ async function restoreTrackingService(): Promise<void> {
       render()
     })
 
+    // Por donde va el barrido, mientras ocurre. Es lo que enciende el punto
+    // azul de la parada en curso y el aro de las que esperan turno: con el
+    // servicio vivo la web no pide ni una de esas paradas, así que este aviso es
+    // su ÚNICA fuente de estado. Sin él, el recorrido de la pestaña Seguir se
+    // quedaba quince segundos quieto y sin nada que dijera que se estaba
+    // trabajando.
+    await BusTracking.addListener('routeProgress', (update) => {
+      // Se borra primero TODO lo de este aviso y luego se aplica el estado que
+      // acaba de llegar: al ser un retrato completo y no un incremento, ninguna
+      // parada puede quedarse encendida por un aviso que ya no la mira.
+      for (const stopId of update.route ?? []) {
+        delete state.stopSync[stopId]
+      }
+
+      for (const stopId of update.queued ?? []) {
+        state.stopSync[stopId] = 'queued'
+      }
+
+      if (update.loading) {
+        state.stopSync[update.loading] = 'loading'
+      }
+
+      render()
+    })
+
     await BusTracking.addListener('busPassed', (update) => {
       const job = trackingById(update.jobId)
       if (!job) {
@@ -1792,18 +1931,31 @@ function evaluateTrackingJob(job: TrackingJob, feed: StopFeed): void {
 }
 
 /**
- * Vibración corta de "quedan 3 minutos".
+ * Vibración de "quedan 3 minutos": TRES toques cortos.
  *
- * Una sola por autobús: el indicador `warnedAt3` se reinicia cuando el autobús
- * pasa, no en cada consulta, que serían cuatro zumbidos por minuto.
+ * El toque único y largo de antes se confundía con cualquier otra notificación
+ * del teléfono, que es justo lo que no puede pasar: este aviso significa "sal
+ * ya", y tener que sacar el móvil del bolsillo para ver de quién era le quitaba
+ * el sentido. Tres pulsos seguidos no se parecen a nada más y se reconocen sin
+ * mirar.
+ *
+ * Una sola tanda por autobús: el indicador `warnedAt3` se reinicia cuando el
+ * autobús pasa, no en cada consulta, que serían cuatro zumbidos por minuto.
+ *
+ * El servicio nativo lleva su propia copia del patrón (APPROACH_PATTERN en
+ * BusTrackingService.java): tiene que sonar igual con la app cerrada. El patrón
+ * se lee como espera/vibra/espera/vibra…, y arranca en 0 para que el primer
+ * toque sea inmediato.
  */
+const APPROACH_PATTERN = [0, 90, 120, 90, 120, 90]
+
 function vibrateShort(): void {
   if (!state.settings.vibrateOnApproach) {
     return
   }
 
   try {
-    navigator.vibrate?.(220)
+    navigator.vibrate?.(APPROACH_PATTERN)
   } catch {
     /* el navegador o el sistema pueden tenerlo bloqueado */
   }
@@ -2329,6 +2481,18 @@ appRoot.addEventListener('change', (event) => {
     state.draft.directionKey = target.value
   }
 
+  if (action === 'info-line') {
+    state.info.lineId = target.value
+    // El sentido NO se hereda de la línea anterior: no existe fuera de ella.
+    state.info.directionKey = ''
+    render()
+  }
+
+  if (action === 'info-direction') {
+    state.info.directionKey = target.value
+    render()
+  }
+
   if (action === 'monitor-day') {
     const monitorId = target.dataset.monitor ?? ''
     state.monitorDayView[monitorId] = target.value as 'weekday' | 'saturday' | 'sunday'
@@ -2396,11 +2560,9 @@ async function handleAction(action: string, element: HTMLElement): Promise<void>
 
       // Entrar en "Cerca" sin ubicacion no puede quedarse en un boton: es la
       // unica cosa que esa pantalla sabe hacer, y pedirla es justo lo que se ha
-      // pedido al tocar la pestana. Si ya se sabe donde estamos no se vuelve a
-      // pedir: la lista se dibuja con lo que hay.
-      if (mode === 'cerca' && !state.geo.location && !state.geo.locating && !state.geo.blocked) {
-        locateMe()
-        return
+      // pedido al elegir el modo.
+      if (mode === 'cerca') {
+        void startNearbySearch()
       }
 
       render()
@@ -2578,19 +2740,56 @@ async function handleAction(action: string, element: HTMLElement): Promise<void>
       // Si no, un `watchPosition` seguiría vivo con la pestaña ya invisible.
       if (!enabled) {
         closeMaps()
-        if (state.tab === 'mapas') {
-          state.tab = 'inicio'
-          persistTab()
+        // La pestaña Info NO se cierra: los horarios de línea siguen ahí y no
+        // tienen nada de experimental. Lo que se apaga es su apartado "Cómo
+        // llegar", así que basta con llevar el foco al que sigue existiendo.
+        if (state.tab === 'info') {
+          state.info.section = 'lineas'
         }
       }
 
-      showToast(enabled ? 'Pestaña Mapas activada' : 'Pestaña Mapas desactivada', 'info')
+      showToast(enabled ? '"Cómo llegar" activado' : '"Cómo llegar" desactivado', 'info')
       render()
       return
     }
 
+    case 'info-section': {
+      const section = element.dataset.section as InfoSection | undefined
+      if (!section || section === state.info.section) {
+        return
+      }
+
+      state.info.section = section
+
+      // El callejero solo hace falta para calcular rutas, y son cien mil nodos:
+      // se pide al abrir SU apartado, no al entrar en la pestaña.
+      if (section === 'llegar' && state.settings.experimentalMaps) {
+        void loadStreetGraph()
+      } else if (section === 'lineas') {
+        // El mapa de rutas no puede quedarse vivo detrás de una tabla de
+        // horarios: suelta el seguimiento de la ubicación y la instancia de
+        // Leaflet igual que al salir de la pestaña.
+        closeMaps()
+      }
+
+      render()
+      return
+    }
+
+    case 'settings-section': {
+      const section = element.dataset.section as SettingsSection | undefined
+      if (section) {
+        state.settingsSection = section
+        render()
+      }
+      return
+    }
+
     case 'locate':
-      locateMe()
+      // "Ya está activada, buscar paradas": se vuelve a preguntar al sistema
+      // antes de localizar, porque el interruptor puede seguir apagado y
+      // entonces lo que toca es repetir el aviso, no una búsqueda que fallará.
+      void startNearbySearch(true)
       return
 
     // Lleva a la pantalla del sistema donde de verdad se arregla: el
@@ -2607,7 +2806,7 @@ async function handleAction(action: string, element: HTMLElement): Promise<void>
       }
       return
 
-    // El mapa de la pestaña Mapas, a pantalla completa y de vuelta. Igual que
+    // El mapa de "Cómo llegar", a pantalla completa y de vuelta. Igual que
     // el del buscador, el contenedor NO se mueve del árbol: solo cambia cómo se
     // coloca, porque moverlo obligaría a reconstruir Leaflet cada vez.
     case 'maps-expand':
@@ -2796,16 +2995,17 @@ async function goToTab(tab: TabId): Promise<void> {
   // está mirando. Lo que se reduce es su rastreo del recorrido, y de eso se
   // encarga solo `buildRefreshPlan` mirando la pestaña activa.
 
-  // Al salir de Mapas se suelta TODO lo suyo: el seguimiento de la ubicación, el
-  // mapa y lo calculado. Una función experimental no puede quedarse trabajando
-  // por detrás mientras miras otra pantalla.
-  if (previous === 'mapas' && tab !== 'mapas') {
+  // Al salir de Info se suelta TODO lo del planificador: el seguimiento de la
+  // ubicación, el mapa y lo calculado. Una función experimental no puede
+  // quedarse trabajando por detrás mientras miras otra pantalla.
+  if (previous === 'info' && tab !== 'info') {
     closeMaps()
   }
 
   // El callejero son cien mil nodos por una función en pruebas: se pide al
-  // entrar en la pestaña, no al arrancar la app, y una sola vez por sesión.
-  if (tab === 'mapas' && previous !== 'mapas') {
+  // entrar en su apartado, no al arrancar la app, y una sola vez por sesión.
+  // Los horarios de línea no lo necesitan, así que no lo cargan.
+  if (tab === 'info' && state.info.section === 'llegar' && state.settings.experimentalMaps) {
     void loadStreetGraph()
   }
 
@@ -2822,13 +3022,20 @@ async function goToTab(tab: TabId): Promise<void> {
 
   // Salir de Buscar suelta el seguimiento de la ubicación si no queda quien la
   // mire: es lo único de esa pantalla que sigue trabajando por detrás.
-  if (previous === 'buscar' && tab !== 'buscar' && tab !== 'mapas') {
+  if (previous === 'buscar' && tab !== 'buscar' && tab !== 'info') {
     stopWatchingLocation()
   }
 
   state.tab = tab
   state.sheet = null
   persistTab()
+
+  // Entrar en Buscar con "Cerca" ya elegido es pedir las paradas cercanas, y lo
+  // primero que hay que resolver es si el teléfono puede saber dónde está.
+  if (tab === 'buscar' && state.search.mode === 'cerca') {
+    void startNearbySearch()
+  }
+
   render()
   // El servicio barre el recorrido entero solo mientras se está mirando.
   void syncRouteWatch()
@@ -3570,6 +3777,89 @@ function stopWatchingLocation(): void {
 let pendingLocationField: 'origin' | 'destination' | null = null
 
 /**
+ * Arranca la búsqueda de paradas cercanas, empezando por lo que puede impedirla.
+ *
+ * El orden importa y antes estaba al revés: se llamaba a `geolocation`, se
+ * esperaba a que fallara y ENTONCES se averiguaba por qué. Con el interruptor
+ * de ubicación del teléfono apagado, eso son diez segundos de "buscando tu
+ * ubicación…" para acabar en un error, cuando la respuesta se sabía desde el
+ * principio. Preguntar primero cuesta milisegundos y convierte una espera
+ * inútil en un botón que lleva justo donde hay que ir.
+ *
+ * El permiso de SALBUS no se puede consultar así —quien lo saca es el propio
+ * `geolocation` al pedirlo—, así que ese sigue resolviéndose por el camino de
+ * siempre: se intenta, y si lo deniegan se dice.
+ *
+ * @param force Vuelve a localizar aunque ya se sepa dónde estamos. Lo usan el
+ *   botón "Actualizar" de la lista y el de "ya está activada".
+ */
+async function startNearbySearch(force = false): Promise<void> {
+  const geo = state.geo
+
+  if (geo.checkingService || geo.locating) {
+    return
+  }
+
+  // Ya se sabe dónde estamos: la lista se dibuja con lo que hay y no se gasta
+  // ni una comprobación.
+  if (geo.location && !force) {
+    return
+  }
+
+  // Fuera de Android no hay interruptor de sistema que consultar: el navegador
+  // gestiona permiso y disponibilidad de una sola vez.
+  if (!isNative()) {
+    locateMe()
+    return
+  }
+
+  geo.checkingService = true
+  render()
+
+  try {
+    const { enabled } = await DeviceSettings.isLocationEnabled()
+
+    if (!enabled) {
+      geo.checkingService = false
+      geo.locating = false
+      geo.blocked = 'service'
+      geo.error =
+        'La ubicación del teléfono está apagada. Es un interruptor del sistema, no de SALBUS: hasta que se encienda no hay forma de saber qué paradas tienes al lado.'
+      log('warn', 'ubicación', 'El servicio de ubicación del sistema está desactivado.')
+      render()
+      return
+    }
+
+    geo.checkingService = false
+    geo.blocked = null
+    geo.error = null
+    locateMe()
+  } catch {
+    // No poder preguntarlo no es lo mismo que estar apagado: se intenta
+    // localizar y, si falla, el diagnóstico de siempre dirá por qué.
+    geo.checkingService = false
+    locateMe()
+  }
+}
+
+/**
+ * ¿Se ha encendido la ubicación mientras estábamos fuera de la app?
+ *
+ * Es la otra mitad de `startNearbySearch`: quien toca "activar la ubicación" se
+ * va a los ajustes del sistema, la enciende y vuelve. Sin esto volvía a la misma
+ * pantalla de aviso y tenía que tocar otro botón para pedir lo que ya había
+ * pedido dos veces. Se comprueba solo cuando hay algo esperando —la pestaña
+ * Buscar en modo "Cerca", bloqueada por el servicio—, no en cada regreso.
+ */
+async function retryNearbyIfServiceBack(): Promise<void> {
+  if (state.tab !== 'buscar' || state.search.mode !== 'cerca' || state.geo.blocked !== 'service') {
+    return
+  }
+
+  await startNearbySearch(true)
+}
+
+/**
  * Pide la ubicación.
  *
  * En Android es Capacitor quien saca el diálogo del permiso en cuanto la página
@@ -3625,7 +3915,7 @@ function locateMe(): void {
  */
 function acceptPosition(position: GeolocationPosition): void {
   // Se puede haber salido de las dos pantallas que la usan mientras llegaba.
-  if (state.tab !== 'mapas' && state.tab !== 'buscar') {
+  if (state.tab !== 'info' && state.tab !== 'buscar') {
     stopWatchingLocation()
     return
   }
@@ -3937,7 +4227,7 @@ function estimateWait(
 function syncMapsMap(): void {
   const container = document.querySelector<HTMLDivElement>('#maps-map')
 
-  if (!container || !state.network || state.tab !== 'mapas') {
+  if (!container || !state.network || state.tab !== 'info' || state.info.section !== 'llegar') {
     if (mapsMap) {
       mapsMap.remove()
       mapsMap = null
@@ -3994,7 +4284,7 @@ function syncMapsMap(): void {
   // El contenedor puede seguir cambiando de tamaño cuando se pinta; sin esta
   // segunda pasada el encuadre queda calculado sobre el tamaño anterior.
   window.setTimeout(() => {
-    if (!mapsMap || state.tab !== 'mapas') {
+    if (!mapsMap || state.tab !== 'info') {
       return
     }
     mapsMap.invalidateSize()

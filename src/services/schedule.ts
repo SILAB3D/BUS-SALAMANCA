@@ -118,7 +118,11 @@ export async function loadSchedule(
     }
   }
 
-  return {
+  // Con nombre propio para poder llamarse a si mismo: las salidas de cabecera de
+  // un sentido son las horas programadas en su primera parada, asi que
+  // `getDirectionDepartures` no es mas que `getScheduledTimes` con la parada ya
+  // resuelta. Una sola implementacion, o las dos respuestas podrian discrepar.
+  const dataset: ScheduleDataset = {
     validFrom: formatIsoDate(validFrom),
     validTo: formatIsoDate(validTo),
     stale: isStale(validTo),
@@ -161,7 +165,36 @@ export async function loadSchedule(
 
       return Array.from(result).sort(compareClock)
     },
+
+    /**
+     * Salidas de un sentido desde su cabecera.
+     *
+     * La cabecera es, por definicion, la primera parada del recorrido en la red
+     * oficial: `direction.stops[0]`. Consultando ahi con el sentido ya fijado se
+     * obtienen las salidas de ese sentido y solo de ese, que es lo que se
+     * publica como "horario de la linea".
+     *
+     * Sin red cargada no hay recorrido del que sacar la cabecera, y entonces no
+     * se devuelve nada: inventar una parada daria un horario que parece bueno y
+     * no lo es.
+     */
+    getDirectionDepartures(directionKey: string, dayType: ServiceDayType): string[] {
+      const direction = network?.directionByKey.get(directionKey)
+      const origin = direction?.stops[0]
+      if (!direction || !origin) {
+        return []
+      }
+
+      return dataset.getScheduledTimes(
+        origin.stopId,
+        direction.key.split('|')[0],
+        dayType,
+        direction.key,
+      )
+    },
   }
+
+  return dataset
 }
 
 /**
