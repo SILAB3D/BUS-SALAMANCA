@@ -140,11 +140,20 @@ async function main() {
     })
 
     if (args.includes('--seed')) {
-      // Paradas reales muy transitadas, para ver la interfaz con datos de
-      // verdad. La 350 esta ahi por su nombre: es el mas largo de la red
-      // ("C/ Licenciado Vidriera, s/n (Frente residencia)", 47 caracteres) y
-      // solo se distingue de la 344 por el final, asi que es el caso que dice
-      // si la tarjeta esta recortando nombres.
+      // Paradas reales, y en un orden elegido: las tres primeras son el PEOR
+      // CASO de la tarjeta de parada, y van delante para que entren en la
+      // pantalla y se midan de verdad.
+      //
+      //   350 · el nombre mas largo de la red ("C/ Licenciado Vidriera, s/n
+      //         (Frente residencia)", 47 caracteres). Solo se distingue de la
+      //         344 por el final, asi que dice si se estan recortando nombres.
+      //   344 · renombrada a mano: comprueba que el alias no cambia el tamano
+      //         de la tarjeta.
+      //    41 · la parada con mas lineas de la red (trece): comprueba la franja
+      //         de distintivos y el "+N".
+      //
+      // Detras, dos paradas corrientes y muy transitadas (222 y 301) para ver
+      // la interfaz con datos normales.
       await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
         source: `
           localStorage.setItem('salbus.tourVersion', '${appVersion}');
@@ -156,11 +165,11 @@ async function main() {
             experimentalMaps: ${withMaps ? 'true' : 'false'}
           }));
           localStorage.setItem('salbus.favourites', JSON.stringify([
-            { stopId: '222', alias: null, addedAt: Date.now() },
-            { stopId: '301', alias: 'Casa', addedAt: Date.now() },
-            { stopId: '36', alias: null, addedAt: Date.now() },
             { stopId: '350', alias: null, addedAt: Date.now() },
-            { stopId: '344', alias: 'Trabajo', addedAt: Date.now() }
+            { stopId: '344', alias: 'Trabajo', addedAt: Date.now() },
+            { stopId: '41', alias: null, addedAt: Date.now() },
+            { stopId: '222', alias: null, addedAt: Date.now() },
+            { stopId: '301', alias: 'Casa', addedAt: Date.now() }
           ]));
           // Dos avisos, uno activo y otro en pausa: es el tope, y ensena de una
           // vez la tarjeta trabajando (con su recorrido y su recuento de
@@ -214,6 +223,19 @@ async function main() {
     await cdp.send('Page.navigate', { url })
     // Margen para el splash (1 s) y para que la cola de peticiones traiga datos.
     await delay(Number.isFinite(waitMs) ? waitMs : args.includes('--seed') ? 16000 : 3500)
+
+    // Red de seguridad para el tour: se le da por visto sembrando su version en
+    // localStorage, pero eso depende de que la version sembrada y la que compila
+    // Vite coincidan, y basta una etiqueta de git nueva para que dejen de
+    // hacerlo. Si aun asi ha salido, se cierra: un tour abierto tapa TODAS las
+    // capturas y convierte cada comprobacion de maquetacion en una medida de la
+    // ventana del tour.
+    await cdp.evaluate(`(() => {
+      const app = window.__salbus;
+      if (app && app.state.tour.open) { app.state.tour.open = false; app.render(); return 'cerrado'; }
+      return 'no estaba abierto';
+    })()`)
+    await delay(300)
 
     const screens = [
       { tab: 'inicio', name: 'inicio' },
@@ -295,6 +317,118 @@ async function main() {
     }
 
     if (checkStability) {
+      console.log('\nTarjetas de parada (Inicio): mismo tamano, sin cortes, sin parpadeos')
+
+      await cdp.evaluate(`document.querySelector('[data-action="tab"][data-tab="inicio"]')?.click(); true`)
+      await delay(700)
+
+      // Todas plegadas antes de medir: una desplegada mide otra cosa.
+      await cdp.evaluate(`(() => {
+        const app = window.__salbus;
+        if (app) { app.state.expandedStopId = null; app.render(); }
+        return true;
+      })()`)
+      await delay(500)
+
+      const cards = JSON.parse(await cdp.evaluate(`(() => {
+        const out = Array.from(document.querySelectorAll('.stop-card')).map((card) => {
+          const name = card.querySelector('.stop-name');
+          const lines = card.querySelector('.stop-lines');
+          return {
+            stop: card.getAttribute('data-key'),
+            alto: Math.round(card.getBoundingClientRect().height),
+            // Un contenido mas alto que su hueco es un corte.
+            nombreCortado: name ? name.scrollHeight > name.clientHeight + 1 : false,
+            lineasCortadas: lines ? lines.scrollHeight > lines.clientHeight + 1 : false,
+            // Y mas ancho que su hueco, un desbordamiento.
+            nombreAncho: name ? name.scrollWidth > name.clientWidth + 1 : false,
+            derecha: Math.round(card.getBoundingClientRect().right)
+          };
+        });
+        return JSON.stringify(out);
+      })()`))
+
+      const alturas = [...new Set(cards.map((card) => card.alto))]
+      const vw = Number(await cdp.evaluate('document.documentElement.clientWidth'))
+
+      report('todas las tarjetas plegadas miden lo mismo', cards.length > 1 && alturas.length === 1,
+        `${cards.length} tarjetas · alturas ${alturas.join(', ')} px`)
+      report('ningun nombre de parada se corta',
+        cards.every((card) => !card.nombreCortado && !card.nombreAncho))
+      report('ninguna franja de lineas se corta',
+        cards.every((card) => !card.lineasCortadas))
+      report('ninguna tarjeta se sale de la pantalla',
+        cards.every((card) => card.derecha <= vw + 1))
+
+      // Desplegar: el cuerpo tiene que estar YA en el documento antes de tocar
+      // nada. Si naciera al desplegar no habria nada que animar y la tarjeta
+      // daria el salto seco que se estaba quitando.
+      const antes = JSON.parse(await cdp.evaluate(`(() => {
+        const card = document.querySelector('.stop-card');
+        const body = card.querySelector('.stop-body');
+        window.__stopCard = card;
+        window.__stopBody = body;
+        return JSON.stringify({
+          existe: Boolean(body),
+          inerte: body ? body.hasAttribute('inert') : false,
+          alto: Math.round(body.getBoundingClientRect().height),
+          transicion: getComputedStyle(body).transitionProperty
+        });
+      })()`))
+
+      report('el cuerpo de la tarjeta ya existe plegado', antes.existe)
+      report('plegado no se puede tocar ni tabular (inert)', antes.inerte)
+      report('plegado no ocupa alto', antes.alto <= 1, `${antes.alto} px`)
+      report('el alto del cuerpo es lo que se anima',
+        antes.transicion.includes('grid-template-rows'), antes.transicion)
+
+      await cdp.evaluate(`document.querySelector('.stop-card .stop-open')?.click(); true`)
+      // A media transicion (dura 260 ms): tiene que estar creciendo, no puesto.
+      await delay(120)
+      const medio = JSON.parse(await cdp.evaluate(`(() => {
+        const body = window.__stopBody;
+        return JSON.stringify({
+          mismoNodo: body === window.__stopCard.querySelector('.stop-body'),
+          alto: Math.round(body.getBoundingClientRect().height)
+        });
+      })()`))
+
+      await delay(500)
+      const despues = JSON.parse(await cdp.evaluate(`(() => {
+        const body = window.__stopBody;
+        return JSON.stringify({
+          mismoNodo: body === window.__stopCard.querySelector('.stop-body'),
+          alto: Math.round(body.getBoundingClientRect().height),
+          inerte: body.hasAttribute('inert')
+        });
+      })()`))
+
+      report('desplegar no recrea el cuerpo (sin parpadeo)', medio.mismoNodo && despues.mismoNodo)
+      report('el despliegue se anima en vez de saltar',
+        medio.alto > 1 && medio.alto < despues.alto,
+        `${medio.alto} px a mitad · ${despues.alto} px al final`)
+      report('desplegado deja de ser inerte', !despues.inerte)
+
+      // Y al plegar, lo mismo al reves: el contenido sigue puesto mientras
+      // encoge, que es lo unico que permite animar el cierre.
+      await cdp.evaluate(`document.querySelector('.stop-card .stop-open')?.click(); true`)
+      await delay(120)
+      const cerrando = JSON.parse(await cdp.evaluate(`(() => {
+        const body = window.__stopBody;
+        return JSON.stringify({
+          mismoNodo: body === window.__stopCard.querySelector('.stop-body'),
+          hijos: body.querySelectorAll('*').length,
+          alto: Math.round(body.getBoundingClientRect().height)
+        });
+      })()`))
+
+      report('plegar tampoco recrea nada', cerrando.mismoNodo && cerrando.hijos > 0)
+      report('el plegado se anima en vez de desaparecer',
+        cerrando.alto > 1 && cerrando.alto < despues.alto,
+        `${cerrando.alto} px a mitad del cierre`)
+
+      await delay(500)
+
       console.log('\nEstabilidad del refresco (el repintado no debe destruir la interfaz)')
 
       // Pantalla con desplegables reales: el filtro de linea del buscador, que

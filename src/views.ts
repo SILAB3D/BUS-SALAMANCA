@@ -1391,113 +1391,149 @@ function renderFavouriteCard(stopId: string): string {
   const label = favouriteLabel(stopId, stopName(stopId))
   const lines = state.network?.getLinesForStop(stopId) ?? []
   const syncing = state.stopSync[stopId] !== undefined
-  // El nombre oficial solo aporta algo si la parada se ha renombrado.
+  // El nombre oficial solo aporta algo si la parada se ha renombrado, y como
+  // solo hace falta para comprobar CUÁL es, va dentro: en la cabecera obligaba a
+  // reservarle sitio en las cinco tarjetas para usarlo en una.
   const official = label === stopName(stopId) ? '' : stopName(stopId)
 
   return `
     <section class="card stop-card${expanded ? ' is-expanded' : ''}" data-key="stop-${esc(stopId)}">
       <button
-        class="stop-summary"
+        class="stop-open"
         type="button"
         data-action="expand-stop"
         data-stop="${esc(stopId)}"
         aria-expanded="${expanded}"
       >
         <span class="stop-code">${esc(stopId)}</span>
-        <span class="stop-summary-copy">
-          <span class="stop-name">${esc(label)}</span>
-          ${official ? `<span class="stop-official">${esc(official)}</span>` : ''}
-          ${renderStopLines(lines)}
-        </span>
+        <span class="stop-name">${esc(label)}</span>
         <span class="stop-chevron">${icon('chevron')}</span>
       </button>
 
-      <div class="stop-tools">
-        ${
-          expanded
-            ? `<button class="mini-btn${syncing ? ' is-spinning' : ''}" type="button" data-action="refresh-stop" data-stop="${esc(
-                stopId,
-              )}" aria-label="Actualizar esta parada">${icon('refresh')}</button>`
-            : ''
-        }
-        <button class="mini-btn" type="button" data-action="rename-stop" data-stop="${esc(
-          stopId,
-        )}" aria-label="Cambiar nombre">${icon('pencil')}</button>
-        <button class="mini-btn is-danger" type="button" data-action="remove-favourite" data-stop="${esc(
-          stopId,
-        )}" aria-label="Quitar parada">${icon('trash')}</button>
+      <div class="stop-meta">
+        ${renderStopLines(stopId, lines)}
+        <span class="stop-tools">
+          <button class="mini-btn" type="button" data-action="rename-stop" data-stop="${esc(
+            stopId,
+          )}" aria-label="Cambiar nombre">${icon('pencil')}</button>
+          <button class="mini-btn is-danger" type="button" data-action="remove-favourite" data-stop="${esc(
+            stopId,
+          )}" aria-label="Quitar parada">${icon('trash')}</button>
+        </span>
       </div>
 
       ${
-        expanded
-          ? `
-        <div class="card-divider"></div>
-        <div class="card-body">
-          ${feedPill(feed)}
-
-          ${renderArrivals(stopId, feed)}
-
-          <button class="btn btn-secondary btn-block" type="button" data-action="stop-actions" data-stop="${esc(stopId)}">
-            ${icon('bell')} Avisos y seguimiento
-          </button>
-        </div>
-      `
-          : ''
+        /*
+         * El cuerpo se dibuja SIEMPRE, plegado o no, y lo único que cambia al
+         * desplegar es una clase.
+         *
+         * Es lo que quita los parpadeos. Antes el cuerpo se añadía y se quitaba
+         * del HTML, así que al plegar desaparecía de golpe —no había nada que
+         * animar— y al desplegar aparecía entero de una vez, empujando de un
+         * salto todo lo que tenía debajo. Con los nodos ya puestos, la altura la
+         * anima el CSS (`grid-template-rows: 0fr → 1fr`) en las dos direcciones
+         * y ningún elemento nace ni muere a mitad de la transición.
+         *
+         * Plegado queda `inert`: fuera del tabulador, fuera del lector de
+         * pantalla y sin recibir toques. Sin eso, media pantalla de botones
+         * invisibles seguiría siendo alcanzable.
+         */ ''
       }
+      <div class="stop-body"${expanded ? '' : ' inert'}>
+        <div class="stop-body-inner">
+          <div class="card-divider"></div>
+          <div class="card-body">
+            ${official ? `<p class="stop-official">Nombre oficial: ${esc(official)}</p>` : ''}
+
+            <div class="stop-status">
+              ${feedPill(feed)}
+              <button class="mini-btn${syncing ? ' is-spinning' : ''}" type="button" data-action="refresh-stop" data-stop="${esc(
+                stopId,
+              )}" aria-label="Actualizar esta parada">${icon('refresh')}</button>
+            </div>
+
+            ${renderArrivals(stopId, feed)}
+
+            <button class="btn btn-secondary btn-block" type="button" data-action="stop-actions" data-stop="${esc(stopId)}">
+              ${icon('bell')} Avisos y seguimiento
+            </button>
+          </div>
+        </div>
+      </div>
     </section>
   `
 }
 
 /**
- * Cuántos distintivos de línea caben antes de resumir el resto en un "+N".
+ * Huecos de distintivo que caben en la franja de líneas.
  *
- * Nueve es lo que entra holgadamente en dos filas en la pantalla más estrecha
- * que se contempla (360 px). Por encima, en vez de recortar la franja —que era
- * lo que hacía antes, con un `overflow: hidden` que se comía líneas enteras sin
- * decirlo— se cuenta cuántas quedan. Un "+4" es información; una fila cortada a
- * media altura es una mentira, porque quien la lee da por hecho que ha visto
- * todas las líneas de su parada.
+ * Son HUECOS, no distintivos: el "+N" ocupa uno igual que una línea, y contarlo
+ * aparte era el fallo. Con doce líneas y un "+1" se pedían trece huecos, y en
+ * una pantalla de 320 px solo caben doce: el decimotercero se iba a una tercera
+ * fila que la franja —de alto fijo— recortaba en silencio. Justo lo que este
+ * número existe para impedir.
  *
- * Solo hay una parada en toda la red con trece líneas y otras dos que pasan de
- * nueve, así que el "+N" es la excepción y no la norma.
+ * Doce es lo que entra en las dos filas fijas a 320 px, la pantalla más estrecha
+ * que se contempla (a 360 px caben catorce, y sobra sitio). La parada con más
+ * líneas de toda la red tiene trece y solo tres pasan de nueve, así que el "+N"
+ * aparece en una sola parada de las 349.
+ *
+ * Y existe igualmente por dos motivos. Uno, que la red se regenera desde la web
+ * oficial (`npm run data:network`) y una parada nueva con veinte líneas no puede
+ * romper la maquetación. Y dos, que un recorte silencioso —un `overflow: hidden`
+ * comiéndose líneas— es peor que un número: quien lo lee da por hecho que ha
+ * visto todas las líneas de su parada.
  */
-const STOP_LINES_PREVIEW = 9
+const STOP_LINES_SLOTS = 12
 
 /**
- * Franja de líneas de una parada.
+ * La franja de líneas de una parada.
  *
- * Va dentro del botón que despliega la tarjeta, así que ya no necesita ser un
- * botón aparte ni salirse del recorrido del tabulador: es un solo destino.
+ * Alto FIJO de dos filas, siempre, tenga la parada una línea o trece. Es la
+ * mitad de "todas las tarjetas miden lo mismo": con el alto pegado al contenido,
+ * la lista de paradas guardadas subía y bajaba de escalón en escalón según
+ * cuántas líneas tuviera cada una, y la vista era un serrucho.
  *
- * La altura la marca el contenido y NO se recorta. Que todas las tarjetas
- * plegadas midan exactamente lo mismo dejó de ser el objetivo en cuanto se vio
- * el precio: para conseguirlo había que fijar dos filas y esconder lo que
- * sobrara, y lo que sobraba eran las líneas de las paradas más importantes, que
- * son justamente las que más líneas tienen. Con el "+N" la lista sigue siendo
- * regular —una fila o dos, nunca más— sin ocultar nada.
+ * Y es un alto que NO recorta, que es la otra mitad: doce distintivos entran en
+ * esas dos filas, y lo que pasara de ahí se cuenta con un "+N" que lleva en su
+ * `title` las líneas que resume.
+ *
+ * Es un botón, y no un bloque, porque ocupa el ancho entero justo debajo del
+ * nombre: tocar ahí y que no pase nada se lee como un fallo. Despliega la
+ * parada, igual que la cabecera, y se queda fuera del recorrido del tabulador
+ * (`tabindex="-1"`) para no obligar a pasar dos veces por el mismo destino.
  */
-function renderStopLines(lines: TransitLine[]): string {
+function renderStopLines(stopId: string, lines: TransitLine[]): string {
   if (lines.length === 0) {
-    return '<span class="stop-lines"><span class="stop-lines-empty">Sin líneas registradas</span></span>'
+    return `
+      <button class="stop-lines" type="button" data-action="expand-stop" data-stop="${esc(
+        stopId,
+      )}" tabindex="-1" aria-hidden="true">
+        <span class="stop-lines-empty">Sin líneas registradas</span>
+      </button>
+    `
   }
 
-  const visible = lines.slice(0, STOP_LINES_PREVIEW)
-  const hidden = lines.length - visible.length
+  // Si sobra una sola línea, el "+1" ocuparía el hueco de esa línea y no se
+  // ganaría nada: solo se resume cuando de verdad no caben, y entonces el
+  // resumen se queda con el último hueco.
+  const fits = lines.length <= STOP_LINES_SLOTS
+  const visible = fits ? lines : lines.slice(0, STOP_LINES_SLOTS - 1)
+  const hidden = fits ? [] : lines.slice(STOP_LINES_SLOTS - 1)
 
   return `
-    <span class="stop-lines">
+    <button class="stop-lines" type="button" data-action="expand-stop" data-stop="${esc(
+      stopId,
+    )}" tabindex="-1" aria-hidden="true">
       ${visible.map((line) => lineChip(line.lineId, line.color, 'sm')).join('')}
       ${
-        hidden > 0
+        hidden.length > 0
           ? `<span class="line-chip is-sm is-more" title="${esc(
-              `${hidden} línea(s) más: ${lines
-                .slice(STOP_LINES_PREVIEW)
-                .map((line) => line.lineId)
-                .join(', ')}`,
-            )}">+${hidden}</span>`
+              `${hidden.length} línea(s) más: ${hidden.map((line) => line.lineId).join(', ')}`,
+            )}">+${hidden.length}</span>`
           : ''
       }
-    </span>
+    </button>
   `
 }
 

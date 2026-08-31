@@ -702,13 +702,15 @@ button.card-head {
   flex-direction: column;
 }
 
+/* El titulo de la linea se PARTE, no se recorta. "CAPUCHINOS - HOSPITAL" se
+   quedaba en "CAPUCHINOS - HOS…", y en una linea cuyos dos extremos empiezan
+   igual eso deja de decir cual de las dos es. Dos renglones ocupan doce pixeles
+   mas; leer el destino equivocado cuesta un autobus. */
 .arrival-dest {
   font-size: 14px;
   font-weight: 600;
   line-height: 1.25;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .arrival-meta {
@@ -3030,29 +3032,58 @@ button.card-head {
    pegada al contenido, la lista subía y bajaba de escalón en escalón
    según cuántas líneas tuviera cada parada. */
 
-/* La tarjeta plegada es UN solo botón que ocupa casi todo el ancho, con
-   los tres botones de administrar en su propia fila debajo. Antes eran
-   dos zonas táctiles compitiendo por la misma línea: el nombre tenía que
-   caber entre el código de parada y tres iconos, y con "C/ Licenciado
-   Vidriera, s/n (Frente residencia)" no cabía, así que la cabecera crecía
-   a tres renglones mientras los iconos se quedaban colgando arriba a la
-   derecha. Apilados, el nombre dispone del ancho entero y los botones
-   siempre están donde se espera. */
+/* ==================================================================
+   Tarjeta de parada guardada (Inicio)
+   ==================================================================
+
+   Dos reglas mandan sobre todo lo demás, y tiran la una de la otra:
+
+     1. TODAS las tarjetas plegadas miden EXACTAMENTE lo mismo. Con la
+        altura pegada al contenido, la lista subía y bajaba de escalón
+        en escalón —un nombre largo aquí, siete líneas allá— y recorrer
+        cinco paradas era leer un serrucho.
+     2. NADA se recorta. Ni el nombre, que es lo que dice a qué acera
+        hay que bajar, ni las líneas, que son lo que dice si esa parada
+        sirve para el viaje de hoy.
+
+   Se cumplen las dos reservando hueco para el PEOR caso real, no para
+   el caso medio:
+
+     · Nombre: dos renglones. El nombre más largo de la red son 47
+       caracteres ("C/ Licenciado Vidriera, s/n (Frente residencia)") y
+       el alias que se puede escribir a mano está limitado a 40, así que
+       dos renglones sobran a 360 px.
+     · Líneas: dos filas. Ahí entran doce distintivos; la parada con más
+       líneas de la red tiene trece, y esa decimotercera se cuenta con un
+       "+1" en vez de esconderse.
+     · El nombre oficial de una parada renombrada NO va en la cabecera:
+       se usa para comprobar cuál es, y comprobarlo se hace al abrirla.
+       Arriba obligaba a reservarle sitio en las cinco tarjetas para
+       usarlo en una.
+
+   La estructura es siempre la misma —cabecera, franja de líneas y
+   cuerpo— y desplegar solo cambia una clase. Es lo que quita los
+   parpadeos: ningún nodo nace ni muere a mitad de la transición. */
+
 .stop-card {
-  transition: border-color 0.15s ease;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
 .stop-card.is-expanded {
-  border-color: color-mix(in srgb, var(--brand-500) 34%, var(--border));
+  border-color: color-mix(in srgb, var(--brand-500) 38%, var(--border));
+  box-shadow: var(--shadow-2);
 }
 
-.stop-summary {
+/* Cabecera: código, nombre y galón. Ocupa el ancho entero porque el
+   nombre necesita ese ancho; los botones de administrar bajan a la
+   franja de abajo, donde sobra sitio a la derecha de los distintivos. */
+.stop-open {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: start;
-  gap: 10px;
+  align-items: center;
+  gap: 12px;
   width: 100%;
-  padding: 12px 14px 4px;
+  padding: 13px 14px 9px;
   border: 0;
   background: transparent;
   text-align: left;
@@ -3060,66 +3091,25 @@ button.card-head {
   cursor: pointer;
 }
 
-.stop-summary-copy {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  min-width: 0;
-}
-
-/* El nombre NO se recorta ni se corta. Un tercio de las paradas de
-   Salamanca pasa de 24 caracteres, y "…(Frente residencia)" y
-   "…(Junto Residencia)" son dos paradas distintas en aceras distintas:
-   con puntos suspensivos las dos se leen igual. Vale más una tarjeta de
-   tres renglones que plantarse enfrente. */
+/* Dos renglones reservados, y sin recorte de ninguna clase: un nombre
+   que necesitara un tercero se leería entero antes que dejar a nadie
+   plantado en la acera de enfrente. Con los datos actuales no ocurre. */
 .stop-name {
-  font-size: 15.5px;
-  font-weight: 700;
-  line-height: 1.28;
-  overflow-wrap: anywhere;
-}
-
-/* El nombre oficial solo aparece si la parada se ha renombrado, y es
-   justo el dato que dice CUÁL es: tampoco se recorta. */
-.stop-official {
-  font-size: 12px;
-  line-height: 1.3;
-  color: var(--text-3);
-  overflow-wrap: anywhere;
-}
-
-/* La franja de líneas fluye y no se recorta: lo que no cabe en las dos
-   filas se cuenta en un "+N", que es información, en vez de esconderse
-   detrás de un `overflow: hidden`, que es una mentira. */
-.stop-lines {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  gap: 5px;
-  min-width: 0;
-}
-
-.stop-lines-empty {
-  font-size: 12.5px;
-  color: var(--text-3);
-}
-
-/* El "+N" no es una línea: no lleva color de línea ni parece pulsable. */
-.line-chip.is-more {
-  background: var(--surface-3) !important;
-  color: var(--text-2) !important;
-  box-shadow: inset 0 0 0 1px var(--border-strong);
+  min-height: 2.6em;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
 }
 
 .stop-chevron {
   display: grid;
   place-items: center;
   flex: none;
-  /* A la altura de la primera línea del nombre, no centrado sobre una
-     tarjeta que puede medir el doble según lo largo que sea. */
-  height: 22px;
   color: var(--text-3);
-  transition: transform 0.18s ease;
+  transition: transform 0.24s cubic-bezier(0.4, 0, 0.2, 1), color 0.2s ease;
 }
 
 .stop-chevron svg {
@@ -3132,25 +3122,136 @@ button.card-head {
   color: var(--brand-500);
 }
 
-/* Los tres botones de administrar, en su propia fila y alineados a la
-   derecha. Fuera del botón que despliega —un botón dentro de otro no es
-   HTML válido— y sin robarle ancho al nombre. */
-.stop-tools {
-  display: flex;
-  justify-content: flex-end;
+/* Franja de líneas y botones de administrar, en la misma banda. */
+.stop-meta {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 6px;
-  padding: 0 10px 8px;
+  gap: 10px;
+  padding: 0 12px 12px;
 }
 
-/* Un punto mas pequenos que los de las demas tarjetas: aqui son cinco o seis
-   tarjetas en pantalla y los botones de administrar no son lo que se viene a
-   hacer, sino lo que se hace de vez en cuando. */
+/* Alto FIJO de dos filas: 2 × 22 px de distintivo + 5 de hueco. El
+   `overflow` es una red de seguridad que con los datos actuales nunca
+   llega a actuar, porque el "+N" de `renderStopLines` recorta la lista
+   antes de que sobre nada. */
+.stop-lines {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: center;
+  gap: 5px;
+  height: 49px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  color: inherit;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.stop-lines-empty {
+  font-size: 12.5px;
+  color: var(--text-3);
+}
+
+/* El "+N" no es una línea: ni lleva color de línea ni debe parecerlo. */
+.line-chip.is-more {
+  background: var(--surface-3) !important;
+  color: var(--text-2) !important;
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+
+.stop-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+/* Un punto más pequeños que los de las demás tarjetas: aquí hay cinco o
+   seis tarjetas en pantalla y administrar una parada no es lo que se
+   viene a hacer, sino lo que se hace de vez en cuando. */
 .stop-tools .mini-btn {
   width: 32px;
   height: 32px;
 }
 
+/* El despliegue -----------------------------------------------------
+
+   `grid-template-rows: 0fr → 1fr` es lo que permite animar hasta una
+   altura que no se conoce de antemano (depende de cuántos autobuses
+   devuelva la parada) sin medirla con JavaScript.
+
+   El cuerpo está SIEMPRE en el documento; plegar y desplegar solo
+   cambian una clase. Por eso la animación funciona en las dos
+   direcciones: si el contenido se quitara al plegar, no quedaría nada
+   que encoger y la tarjeta daría un salto seco. */
+.stop-body {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.26s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.stop-card.is-expanded .stop-body {
+  grid-template-rows: 1fr;
+}
+
+/* `min-height: 0` es obligatorio: sin él la fila del grid no baja de la
+   altura del contenido y no hay nada que animar. */
+.stop-body-inner {
+  min-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.stop-card.is-expanded .stop-body-inner {
+  opacity: 1;
+  /* Entra con un poco de retraso, cuando ya hay altura donde caber, y se
+     va deprisa, para no quedarse visible sobre una tarjeta que ya se ha
+     cerrado. */
+  transition: opacity 0.2s ease 0.08s;
+}
+
+/* Plegado no se toca ni se recorre: `inert` lo saca del tabulador y del
+   lector de pantalla, y esto remata los toques en los navegadores que
+   todavía no lo entienden. */
+.stop-card:not(.is-expanded) .stop-body {
+  pointer-events: none;
+}
+
+/* Y sus animaciones se paran: cuatro esqueletos parpadeando detrás de
+   una tarjeta cerrada son cuatro animaciones que nadie ve. */
+.stop-card:not(.is-expanded) .stop-body * {
+  animation: none !important;
+}
+
+/* Estado de la parada y su botón de actualizar, en la misma línea. */
+.stop-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+/* El nombre oficial de una parada renombrada. Vive aquí dentro porque
+   sirve para comprobar cuál es, y eso se comprueba al abrirla. */
+p.stop-official {
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--text-3);
+  overflow-wrap: anywhere;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stop-body,
+  .stop-body-inner,
+  .stop-chevron {
+    transition: none;
+  }
+}
 
 /* ==================================================================
    Horarios de línea (pestaña Info)
