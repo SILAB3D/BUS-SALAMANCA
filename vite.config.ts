@@ -28,7 +28,7 @@ export default defineConfig({
         target: 'https://salamancadetransportes.com',
         changeOrigin: true,
         secure: true,
-        rewrite: (path) => path.replace(/^\/api\/arrivals/, '/tiempos-de-llegada/'),
+        rewrite: (path) => path.replace(/^\/api\/arrivals/, '/api/siri/arrivals'),
         headers: {
           'User-Agent':
             'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',

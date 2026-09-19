@@ -1,6 +1,6 @@
 import { Capacitor, CapacitorHttp } from '@capacitor/core'
 
-import { buildFeed, parseStopFeed } from './arrival-parser'
+import { buildFeed, looksLikeChallenge, parseStopFeed } from './arrival-parser'
 import type { StopFeed } from '../types'
 
 export { parseStopFeed } from './arrival-parser'
@@ -9,7 +9,8 @@ export { parseStopFeed } from './arrival-parser'
  * Cliente de llegadas contra la web oficial de Salamanca de Transportes.
  *
  * La fuente esta detras de Cloudflare con un limitador por IP que se comporta como
- * un cubo de fichas (medido el 2026-08-17 contra `?ref=<parada>`):
+ * un cubo de fichas (medido el 2026-08-17 contra el HTML `?ref=<parada>`, y
+ * reverificado el 2026-09-19 contra la API `/api/siri/arrivals`):
  *
  *   - capacidad ~6-8 peticiones en rafaga desde reposo,
  *   - reposicion aproximada de 1 ficha cada ~1,2 s,
@@ -18,12 +19,27 @@ export { parseStopFeed } from './arrival-parser'
  *
  * Ademas devuelve 403 si el User-Agent no es de navegador.
  *
- * Por eso TODAS las peticiones pasan por una unica cola serializada con espaciado
- * minimo. Nunca se lanzan peticiones en paralelo: es justamente lo que bloqueaba
- * la app cuando refrescaba varias paradas a la vez.
+ * Y PASARSE NO CUESTA UN 429, CUESTA UN MURO. Insistiendo de verdad (unas 37
+ * peticiones en tres segundos, midiendolo) Cloudflare deja de contestar 429 y
+ * planta su pagina de verificacion: un HTML con un 403 que dura varios minutos
+ * y bloquea TODA la IP, no solo la parada pedida. De ahi que el cupo de aqui
+ * abajo sea deliberadamente mas corto que lo medido.
+ *
+ * Por eso TODAS las peticiones pasan por una unica cola con espaciado minimo y
+ * un tope de peticiones en vuelo (MAX_IN_FLIGHT). Lo que bloqueaba la app era
+ * refrescar varias paradas SIN NINGUN limite; el tope actual deja solapar unas
+ * pocas, que es lo que aprovecha la rafaga sin acercarse al muro.
  */
 
-const OFFICIAL_BASE_URL = 'https://salamancadetransportes.com/tiempos-de-llegada/'
+/**
+ * API de llegadas de la web oficial.
+ *
+ * Es la misma que consume su propia pagina de "Tiempos de llegada". Sustituye
+ * al raspado del HTML de `/tiempos-de-llegada/?ref=<parada>`, que dejo de traer
+ * ningun dato cuando el sitio se rehizo en Next.js: el panel pasó a pintarse en
+ * el navegador y la app veia siempre una pagina sin llegadas.
+ */
+const OFFICIAL_BASE_URL = 'https://salamancadetransportes.com/api/siri/arrivals'
 
 /** En web (dev) se pasa por el proxy de Vite para evitar CORS. */
 const PROXY_BASE_URL = '/api/arrivals'
@@ -523,9 +539,27 @@ async function requestStopFeed(stopId: string, signal?: AbortSignal): Promise<St
       return buildFeed(stopId, 'throttled', [], null, 'La fuente oficial esta limitando las consultas. Reintentando…')
     }
 
+    /*
+     * Cloudflare no siempre contesta 429. Cuando se le insiste, planta su muro
+     * de verificacion: una pagina HTML con un 403 (a veces un 503) que dura
+     * unos minutos y afecta a TODA la IP. Es un limite de ritmo, no un rechazo
+     * definitivo, asi que se trata como tal —espera, reintento y se conserva el
+     * ultimo dato bueno— en vez de dejar la parada en "Sin conexion".
+     */
+    if (looksLikeChallenge(body)) {
+      registerThrottle()
+      return buildFeed(stopId, 'throttled', [], null, 'La fuente oficial esta pidiendo verificacion. Reintentando…')
+    }
+
     if (status === 403) {
       health.errorCount += 1
       return buildFeed(stopId, 'error', [], null, 'La fuente oficial rechazo la consulta (403).')
+    }
+
+    // La API devuelve 400 con `{"error":"..."}`: el mensaje lo pone el parser.
+    if (status === 400) {
+      health.errorCount += 1
+      return parseStopFeed(stopId, body)
     }
 
     if (status !== 200) {
@@ -545,10 +579,12 @@ async function requestStopFeed(stopId: string, signal?: AbortSignal): Promise<St
 async function httpGet(stopId: string, signal?: AbortSignal): Promise<{ status: number, body: string }> {
   if (Capacitor.isNativePlatform()) {
     const response = await CapacitorHttp.get({
-      url: `${OFFICIAL_BASE_URL}?ref=${encodeURIComponent(stopId)}`,
+      url: `${OFFICIAL_BASE_URL}?stop=${encodeURIComponent(stopId)}`,
       headers: {
+        // Sin User-Agent de navegador la fuente responde 403. Sigue siendo asi
+        // con la API nueva: se comprueba en `npm run test:live`.
         'User-Agent': USER_AGENT,
-        'Accept': 'text/html,application/xhtml+xml',
+        'Accept': 'application/json',
         'Accept-Language': 'es-ES,es;q=0.9',
       },
       // Evita que una respuesta colgada bloquee la cola indefinidamente.
@@ -556,13 +592,20 @@ async function httpGet(stopId: string, signal?: AbortSignal): Promise<{ status: 
       readTimeout: 12_000,
     })
 
+    /*
+     * CapacitorHttp DESERIALIZA solo cuando el tipo es `application/json`, que
+     * es justo lo que devuelve la API nueva. El parser trabaja con texto, asi
+     * que hay que rehacerlo: `String(objeto)` daba "[object Object]" y todas
+     * las paradas quedaban ilegibles en el movil aunque funcionaran en el
+     * navegador, donde `fetch` entrega el cuerpo tal cual.
+     */
     return {
       status: response.status,
-      body: typeof response.data === 'string' ? response.data : String(response.data ?? ''),
+      body: typeof response.data === 'string' ? response.data : JSON.stringify(response.data ?? null),
     }
   }
 
-  const response = await fetch(`${PROXY_BASE_URL}?ref=${encodeURIComponent(stopId)}`, { signal })
+  const response = await fetch(`${PROXY_BASE_URL}?stop=${encodeURIComponent(stopId)}`, { signal })
   return { status: response.status, body: await response.text() }
 }
 

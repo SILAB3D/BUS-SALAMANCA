@@ -1,10 +1,17 @@
 /**
  * Por donde viene un autobus: en cual de las paradas anteriores esta.
  *
- * LA FUENTE NO LO DICE. La web oficial no publica posiciones ni identificadores
- * de vehiculo: por cada parada dice "linea N, M minutos" y nada mas. Lo unico
- * que delata una presencia fisica es que ese contador caiga a cero o uno, o que
- * la fuente escriba "LLEGANDO A PARADA". Todo lo demas es deduccion.
+ * SE DEDUCE CONTANDO PARADAS. Lo unico que delata una presencia fisica en los
+ * minutos que maneja este modulo es que el contador de una parada caiga a cero
+ * o uno. Todo lo demas es deduccion.
+ *
+ * Cuando se escribio, esa era la unica via: la web oficial daba "linea N, M
+ * minutos" por parada y nada mas. La API de 2026 SI publica `vehicleId`,
+ * `latitude` y `longitude` en cada llegada, asi que esto se podria resolver con
+ * el dato real y sin gastar una consulta por cada parada anterior. No se ha
+ * hecho: el recuento por paradas funciona y el servicio nativo lleva la misma
+ * regla portada a Java, de modo que cambiarlo son dos implementaciones a la
+ * vez. Queda anotado como el sitio por donde seguir.
  *
  * La deduccion consiste en mirar ese mismo indicio en las paradas ANTERIORES
  * del recorrido —que vienen ya en el orden real del trayecto— y quedarse con la

@@ -128,8 +128,8 @@ while (Date.now() - startedAt < durationMs) {
 
   try {
     const response = await fetch(
-      `https://salamancadetransportes.com/tiempos-de-llegada/?ref=${encodeURIComponent(stopId)}`,
-      { headers: { 'User-Agent': USER_AGENT, Accept: 'text/html' } },
+      `https://salamancadetransportes.com/api/siri/arrivals?stop=${encodeURIComponent(stopId)}`,
+      { headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' } },
     )
 
     feed = response.status === 429

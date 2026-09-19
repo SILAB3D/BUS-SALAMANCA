@@ -37,43 +37,39 @@ function section(title) {
 }
 
 /* ------------------------------------------------------------------ *
- * Parser de la version 3.4 (solo para la prueba de regresion)          *
- * ------------------------------------------------------------------ */
-
-/**
- * Recorria el HTML con una unica expresion global y perezosa que saltaba desde
- * `<b>Linea N:</b>` hasta el siguiente `… minutos`. Las filas "LLEGANDO A PARADA"
- * no llevan minutos, asi que se emparejaban con el tiempo de la fila siguiente:
- * desaparecian los autobuses inminentes y los tiempos se corrian de linea.
- */
-function parseLegacy(html) {
-  const normalized = html.replace(/\s+/g, ' ')
-  const regex = /<b>\s*L[ií]nea\s*([^:<]+?)\s*:\s*<\/b>.*?<span[^>]*class="right"[^>]*>\s*(\d+)\s*minutos?/gi
-
-  const rows = []
-  let match = null
-  while ((match = regex.exec(normalized)) !== null) {
-    rows.push({ lineId: match[1].trim(), minutesUntil: Number.parseInt(match[2], 10) })
-  }
-  return rows
-}
-
-/* ------------------------------------------------------------------ *
  * Fixtures sinteticos                                                  *
  * ------------------------------------------------------------------ */
 
-function buildRow(lineId, value) {
-  return `<div class="arrival_times_results_row">
-    <div><b>Línea ${lineId}:</b></div>
-    <div><span class="right">${value}</span></div>
-</div>`
+/**
+ * Instante de referencia de los fixtures.
+ *
+ * La fuente ya no da un contador de minutos sino la HORA de paso, asi que los
+ * minutos dependen de cuando se consulte. Se fija aqui y se le pasa al parser
+ * como `observedAt` para que las pruebas no dependan del reloj.
+ */
+const NOW = Date.parse('2026-09-19T12:00:00+02:00')
+
+/** Una fila del JSON oficial, con la forma real medida el 2026-09-19. */
+function siriRow(lineCode, minutesFromNow, extra = {}) {
+  return {
+    lineCode,
+    lineName: `Línea ${lineCode}`,
+    distance: extra.distance ?? `${1000 + minutesFromNow * 100} m`,
+    expectedArrival: new Date(NOW + minutesFromNow * 60_000).toISOString(),
+    aimedArrival: '2026-09-19T12:00:00',
+    vehicleId: extra.vehicleId ?? `bus-${lineCode}-${minutesFromNow}`,
+    bearing: '0',
+    speed: '0',
+    longitude: '-5.6544',
+    latitude: '40.9776',
+    directionName: extra.directionName ?? 'Origen (1) > Destino (2)',
+    delay: extra.delay ?? 'PT0S',
+    ...extra,
+  }
 }
 
-function buildPage(stopId, stopName, rows) {
-  return `<div id="arrival_times_results">
-    <p>Próximos autobuses que pasarán por la parada ${stopId}, <b>${stopName}</b></p><br />
-    ${rows.join('\n')}
-</div></div>`
+function buildPayload(rows) {
+  return JSON.stringify({ data: rows })
 }
 
 async function main() {
@@ -95,67 +91,116 @@ async function main() {
   section('1 · Parser de llegadas')
 
   {
-    const html = buildPage('103', 'Pº. Canalejas, 12', [
-      buildRow('4', '4 minutos'),
-      buildRow('13', '12 minutos'),
-      buildRow('92', '28 minutos'),
-    ])
-    const feed = parseStopFeed('103', html)
+    const body = buildPayload([siriRow('4', 4), siriRow('13', 12), siriRow('92', 28)])
+    const feed = parseStopFeed('103', body, NOW)
     check('lee una parada normal', feed.status === 'ok' && feed.arrivals.length === 3)
-    check('extrae el nombre oficial de la parada', feed.stopName === 'Pº. Canalejas, 12', feed.stopName ?? 'null')
     check(
       'asigna cada tiempo a su línea',
       feed.arrivals[0].lineId === '4' && feed.arrivals[0].minutesUntil === 4,
       JSON.stringify(feed.arrivals[0]),
     )
+    check(
+      'la hora de paso sale de la fuente, no de sumar minutos',
+      feed.arrivals[0].estimatedClock === '12:04',
+      feed.arrivals[0].estimatedClock,
+    )
+    check(
+      'ordena por tiempo restante',
+      feed.arrivals.map((item) => item.minutesUntil).join() === '4,12,28',
+    )
   }
 
   {
-    // Caso real de la parada 222: dos buses "LLEGANDO A PARADA" seguidos de tiempos.
-    const html = buildPage('222', 'C/ Gran Vía, 38', [
-      buildRow('9', 'LLEGANDO A PARADA'),
-      buildRow('1', 'LLEGANDO A PARADA'),
-      buildRow('4', '1 minutos'),
-      buildRow('4', '6 minutos'),
-      buildRow('3', '9 minutos'),
+    // Un autobus encima de la parada: 0 minutos y a 0 metros.
+    const body = buildPayload([
+      siriRow('9', 0, { distance: '0 m' }),
+      siriRow('1', 1, { distance: '35 m' }),
+      siriRow('4', 6),
     ])
-
-    const feed = parseStopFeed('222', html)
-    check('no pierde los buses "LLEGANDO A PARADA"', feed.arrivals.length === 5, `${feed.arrivals.length} filas`)
+    const feed = parseStopFeed('222', body, NOW)
     check(
       'marca los inminentes con estado "arriving"',
       feed.arrivals.filter((item) => item.status === 'arriving').length === 2,
+      JSON.stringify(feed.arrivals.map((item) => [item.lineId, item.minutesUntil, item.status])),
     )
     check(
-      'la línea 4 conserva su tiempo real (1 min)',
-      feed.arrivals.some((item) => item.lineId === '4' && item.minutesUntil === 1),
-    )
-
-    const legacy = parseLegacy(html)
-    check(
-      'el parser anterior fallaba (regresión cubierta)',
-      legacy.length === 3 && legacy[0].lineId === '9' && legacy[0].minutesUntil === 1,
-      `parser v3.4 devolvió ${JSON.stringify(legacy)}`,
+      'no marca "arriving" lo que aún tarda',
+      feed.arrivals.find((item) => item.lineId === '4').status === 'scheduled',
     )
   }
 
   {
-    const html = buildPage('212', 'Avda. Aldehuela de los Guzmanes, s/n', [])
-      .replace('<br />', '<br /><p>No hay datos actuales de líneas que circulen por la parada seleccionada.</p>')
-    const feed = parseStopFeed('212', html)
+    /*
+     * Regresion de cabecera. La fuente publica el mismo vehiculo una vez por
+     * sentido: en una cabecera aparece como el que llega Y como el que sale.
+     * Si las dos filas caen en el mismo minuto son la misma expedicion contada
+     * dos veces y en pantalla serian dos renglones identicos; si caen en
+     * minutos distintos son dos pasos de verdad y los dos interesan.
+     */
+    const body = buildPayload([
+      siriRow('11', 0, { vehicleId: '158', distance: '0 m', directionName: 'Los Cipreses (268) > Buenos Aires (16)' }),
+      siriRow('11', 0, { vehicleId: '158', distance: '0 m', directionName: 'Buenos Aires (16) > Los Cipreses (268)' }),
+      siriRow('1', 1, { vehicleId: '151', distance: '0 m', directionName: 'Buenos Aires (16) > Chinchibarra (351)' }),
+      siriRow('1', 9, { vehicleId: '151', distance: '20 m', directionName: 'Chinchibarra (351) > Buenos Aires (16)' }),
+    ])
+    const feed = parseStopFeed('16', body, NOW)
+    check(
+      'no repite el mismo autobús por venir en los dos sentidos',
+      feed.arrivals.filter((item) => item.lineId === '11').length === 1,
+      `${feed.arrivals.filter((item) => item.lineId === '11').length} filas de la línea 11`,
+    )
+    check(
+      'conserva los dos pasos reales por una cabecera',
+      feed.arrivals.filter((item) => item.lineId === '1').length === 2,
+    )
+    check(
+      'el autobús parado en cabecera no es "llegando" si aún tarda',
+      feed.arrivals.find((item) => item.lineId === '1' && item.minutesUntil === 9).status === 'scheduled',
+    )
+  }
+
+  {
+    const feed = parseStopFeed('212', buildPayload([]), NOW)
     check('distingue "sin servicio" de un error', feed.status === 'empty' && feed.arrivals.length === 0)
   }
 
   {
-    const feed = parseStopFeed('1', '<html><body>Error 500</body></html>')
-    check('marca como error una respuesta sin panel de llegadas', feed.status === 'error')
+    const feed = parseStopFeed('1', '<html><body>Error 500</body></html>', NOW)
+    check('marca como error una respuesta que no es JSON', feed.status === 'error')
   }
 
   {
-    const html = buildPage('9', 'Prueba', [buildRow('1', '1 minuto'), buildRow('2', 'En parada')])
-    const feed = parseStopFeed('9', html)
-    check('acepta el singular "1 minuto"', feed.arrivals.some((item) => item.lineId === '1' && item.minutesUntil === 1))
-    check('acepta "En parada"', feed.arrivals.some((item) => item.lineId === '2' && item.status === 'arriving'))
+    const feed = parseStopFeed('1', JSON.stringify({ error: "El parámetro 'stop' es obligatorio" }), NOW)
+    check(
+      'traslada el error que declara la API',
+      feed.status === 'error' && feed.message.includes('obligatorio'),
+      feed.message ?? 'null',
+    )
+  }
+
+  {
+    // El muro de Cloudflare es un limite de ritmo, no una avería: si se tratara
+    // como error la parada quedaria en "Sin conexión" y perderia el último dato.
+    const challenge =
+      '<!DOCTYPE html><html><head><title>Just a moment...</title></head>'
+      + '<body><script>window._cf_chl_opt = {};</script></body></html>'
+    const feed = parseStopFeed('103', challenge, NOW)
+    check('el muro de verificación se trata como saturación, no como error',
+      feed.status === 'throttled', feed.status)
+  }
+
+  {
+    // Sin hora prevista no se puede situar el paso: la fila se descarta sin
+    // romper las demas.
+    const body = buildPayload([
+      { lineCode: '4', expectedArrival: 'no es una fecha' },
+      { lineCode: '', expectedArrival: new Date(NOW).toISOString() },
+      siriRow('8', 3),
+    ])
+    const feed = parseStopFeed('103', body, NOW)
+    check('descarta filas ilegibles sin perder el resto',
+      feed.status === 'ok' && feed.arrivals.length === 1 && feed.arrivals[0].lineId === '8',
+      JSON.stringify(feed.arrivals))
   }
 
   section('2 · Red oficial')
@@ -389,20 +434,27 @@ async function main() {
     const userAgent =
       'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36'
 
-    const withUa = await fetch('https://salamancadetransportes.com/tiempos-de-llegada/?ref=103', {
-      headers: { 'User-Agent': userAgent },
-    })
+    const endpoint = 'https://salamancadetransportes.com/api/siri/arrivals?stop=103'
+
+    const withUa = await fetch(endpoint, { headers: { 'User-Agent': userAgent } })
     check('la fuente responde 200 con User-Agent de navegador', withUa.status === 200, `HTTP ${withUa.status}`)
 
     const feed = parseStopFeed('103', await withUa.text())
     check('la respuesta real se parsea', feed.status === 'ok' || feed.status === 'empty', feed.status)
     console.log(`  info parada 103 → ${feed.arrivals.map((item) => `L${item.lineId}:${item.minutesUntil}`).join(' ')}`)
 
+    // Las líneas que devuelve la API tienen que ser líneas que la app conozca:
+    // si la fuente renumerara, los tiempos no se podrían atribuir a nada.
+    const knownLines = new Set(network.lines.map((line) => line.lineId))
+    check(
+      'las líneas que devuelve la fuente existen en la red descargada',
+      feed.arrivals.every((item) => knownLines.has(item.lineId)),
+      feed.arrivals.map((item) => item.lineId).join(','),
+    )
+
     await new Promise((resolve) => setTimeout(resolve, 2500))
 
-    const withoutUa = await fetch('https://salamancadetransportes.com/tiempos-de-llegada/?ref=103', {
-      headers: { 'User-Agent': '' },
-    })
+    const withoutUa = await fetch(endpoint, { headers: { 'User-Agent': '' } })
     check('sin User-Agent de navegador la fuente rechaza', withoutUa.status === 403, `HTTP ${withoutUa.status}`)
   }
 

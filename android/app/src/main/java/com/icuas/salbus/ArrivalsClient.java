@@ -5,18 +5,29 @@ import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import java.util.Locale;
+import java.util.Set;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 /**
  * Cliente de llegadas para el servicio en segundo plano.
  *
- * Replica la misma logica que `src/services/arrivals.ts`:
- *  - envia un User-Agent de navegador (sin el, la web oficial responde 403),
- *  - parsea fila a fila para no confundir las filas "LLEGANDO A PARADA",
- *  - distingue "sin servicio" de un error de red.
+ * Replica la misma logica que `src/services/arrival-parser.ts`:
+ *  - envia un User-Agent de navegador (sin el, la fuente responde 403),
+ *  - lee el JSON de la API oficial y calcula los minutos desde la hora prevista,
+ *  - descarta la fila repetida que las cabeceras publican por cada sentido,
+ *  - distingue "sin servicio" de un error de red, y el muro de verificacion de
+ *    Cloudflare de un rechazo de verdad.
+ *
+ * LA FUENTE CAMBIO: hasta 2026 esto raspaba el HTML de `/tiempos-de-llegada/`.
+ * El sitio se rehizo en Next.js y ese HTML ya no trae llegadas.
  */
 final class ArrivalsClient {
 
@@ -25,21 +36,21 @@ final class ArrivalsClient {
     static final int STATUS_THROTTLED = 2;
     static final int STATUS_ERROR = 3;
 
-    private static final String BASE_URL = "https://salamancadetransportes.com/tiempos-de-llegada/";
+    private static final String BASE_URL = "https://salamancadetransportes.com/api/siri/arrivals";
 
     private static final String USER_AGENT =
         "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) "
             + "Chrome/120.0.0.0 Mobile Safari/537.36";
 
-    private static final Pattern LINE_PATTERN =
-        Pattern.compile("<b>\\s*L[ií]nea\\s*([^:<]+)\\s*:\\s*</b>", Pattern.CASE_INSENSITIVE);
+    /** Mismo umbral que la web: por debajo de esto el autobus esta entrando. */
+    private static final int ARRIVING_DISTANCE_METERS = 200;
 
-    private static final Pattern VALUE_PATTERN =
-        Pattern.compile("<span[^>]*class=\"right\"[^>]*>(.*?)</span>",
-            Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
-
-    private static final Pattern MINUTES_PATTERN =
-        Pattern.compile("(\\d+)\\s*minuto", Pattern.CASE_INSENSITIVE);
+    /**
+     * Y ademas dentro de este minuto. La distancia sola no basta: en una
+     * cabecera el autobus que acaba de llegar esta a veinte metros pero no sale
+     * hasta dentro de nueve minutos.
+     */
+    private static final int ARRIVING_MAX_MINUTES = 1;
 
     private ArrivalsClient() {
     }
@@ -82,10 +93,10 @@ final class ArrivalsClient {
         HttpURLConnection connection = null;
 
         try {
-            String url = BASE_URL + "?ref=" + URLEncoder.encode(stopId, "UTF-8");
+            String url = BASE_URL + "?stop=" + URLEncoder.encode(stopId, "UTF-8");
             connection = (HttpURLConnection) new URL(url).openConnection();
             connection.setRequestProperty("User-Agent", USER_AGENT);
-            connection.setRequestProperty("Accept", "text/html,application/xhtml+xml");
+            connection.setRequestProperty("Accept", "application/json");
             connection.setRequestProperty("Accept-Language", "es-ES,es;q=0.9");
             connection.setConnectTimeout(12000);
             connection.setReadTimeout(12000);
@@ -96,20 +107,20 @@ final class ArrivalsClient {
                 return new Result(STATUS_THROTTLED);
             }
 
+            String body = readBody(connection, code);
+
+            // El muro de verificacion de Cloudflare llega como un 403 con una
+            // pagina HTML. Es un limite de ritmo, no un rechazo: hay que
+            // esperar y reintentar, no dar la parada por perdida.
+            if (looksLikeChallenge(body)) {
+                return new Result(STATUS_THROTTLED);
+            }
+
             if (code != 200) {
                 return new Result(STATUS_ERROR);
             }
 
-            StringBuilder body = new StringBuilder();
-            try (BufferedReader reader =
-                     new BufferedReader(new InputStreamReader(connection.getInputStream(), "UTF-8"))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    body.append(line).append('\n');
-                }
-            }
-
-            return parse(body.toString());
+            return parse(body, System.currentTimeMillis());
         } catch (Exception error) {
             return new Result(STATUS_ERROR);
         } finally {
@@ -119,55 +130,89 @@ final class ArrivalsClient {
         }
     }
 
-    static Result parse(String html) {
-        int blockStart = html.indexOf("id=\"arrival_times_results\"");
-        if (blockStart < 0) {
+    private static String readBody(HttpURLConnection connection, int code) throws Exception {
+        StringBuilder body = new StringBuilder();
+        java.io.InputStream stream =
+            code >= 400 ? connection.getErrorStream() : connection.getInputStream();
+
+        if (stream == null) {
+            return "";
+        }
+
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(stream, "UTF-8"))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                body.append(line).append('\n');
+            }
+        }
+
+        return body.toString();
+    }
+
+    static boolean looksLikeChallenge(String body) {
+        return body != null
+            && (body.contains("_cf_chl_opt")
+                || body.contains("/cdn-cgi/challenge-platform")
+                || body.contains("<title>Just a moment...</title>"));
+    }
+
+    static Result parse(String body, long observedAt) {
+        JSONArray rows;
+
+        try {
+            JSONObject payload = new JSONObject(body);
+            if (payload.optString("error", "").length() > 0) {
+                return new Result(STATUS_ERROR);
+            }
+            rows = payload.optJSONArray("data");
+        } catch (Exception error) {
             return new Result(STATUS_ERROR);
         }
 
-        String block = html.substring(blockStart, Math.min(html.length(), blockStart + 20000));
-
-        if (block.contains("No hay datos actuales de l")) {
-            return new Result(STATUS_EMPTY);
+        if (rows == null) {
+            return new Result(STATUS_ERROR);
         }
 
         Result result = new Result(STATUS_OK);
 
-        // Se trocea por filas: cada fila se parsea de forma independiente para que
-        // una fila sin minutos no se empareje con el tiempo de la siguiente.
-        String[] rows = block.split("<div\\s+class=\"arrival_times_results_row\">");
+        // Una cabecera publica el mismo vehiculo dos veces, una por sentido.
+        // Si las dos caen en el mismo minuto son la misma expedicion.
+        Set<String> seen = new HashSet<>();
 
-        for (int index = 1; index < rows.length; index += 1) {
-            String row = rows[index];
-            int end = row.indexOf("</div></div>");
-            if (end >= 0) {
-                row = row.substring(0, end + 12);
-            }
-
-            Matcher lineMatcher = LINE_PATTERN.matcher(row);
-            Matcher valueMatcher = VALUE_PATTERN.matcher(row);
-
-            if (!lineMatcher.find() || !valueMatcher.find()) {
+        for (int index = 0; index < rows.length(); index += 1) {
+            JSONObject row = rows.optJSONObject(index);
+            if (row == null) {
                 continue;
             }
 
-            String lineId = lineMatcher.group(1).trim();
-            String raw = valueMatcher.group(1).replaceAll("<[^>]+>", " ").replaceAll("\\s+", " ").trim();
-
-            if (raw.toLowerCase().contains("llegando") || raw.toLowerCase().contains("en parada")) {
-                result.arrivals.add(new Arrival(lineId, 0, true));
+            String lineId = row.optString("lineCode", "").trim();
+            if (lineId.isEmpty()) {
                 continue;
             }
 
-            Matcher minutesMatcher = MINUTES_PATTERN.matcher(raw);
-            if (minutesMatcher.find()) {
-                try {
-                    result.arrivals.add(
-                        new Arrival(lineId, Integer.parseInt(minutesMatcher.group(1)), false));
-                } catch (NumberFormatException ignored) {
-                    // Fila con formato inesperado: se descarta sin romper el resto.
-                }
+            long expectedAt = parseInstant(row.optString("expectedArrival", ""));
+            if (expectedAt < 0) {
+                expectedAt = parseInstant(row.optString("aimedArrival", ""));
             }
+            if (expectedAt < 0) {
+                continue;
+            }
+
+            int minutes = (int) Math.max(0, Math.round((expectedAt - observedAt) / 60000.0));
+
+            String vehicle = row.optString("vehicleId", "");
+            if (vehicle.isEmpty()) {
+                vehicle = row.optString("directionName", "");
+            }
+            if (!seen.add(lineId + "|" + vehicle + "|" + minutes)) {
+                continue;
+            }
+
+            int distance = parseDistance(row.optString("distance", ""));
+            boolean arriving = minutes <= 0
+                || (distance >= 0 && distance <= ARRIVING_DISTANCE_METERS && minutes <= ARRIVING_MAX_MINUTES);
+
+            result.arrivals.add(new Arrival(lineId, minutes, arriving));
         }
 
         if (result.arrivals.isEmpty()) {
@@ -175,5 +220,70 @@ final class ArrivalsClient {
         }
 
         return result;
+    }
+
+    /** "1234 m" -> 1234. Devuelve -1 si no se entiende. */
+    private static int parseDistance(String value) {
+        if (value == null) {
+            return -1;
+        }
+
+        StringBuilder digits = new StringBuilder();
+        for (int index = 0; index < value.length(); index += 1) {
+            char character = value.charAt(index);
+            if (character >= '0' && character <= '9') {
+                digits.append(character);
+            } else if (digits.length() > 0) {
+                break;
+            }
+        }
+
+        if (digits.length() == 0) {
+            return -1;
+        }
+
+        try {
+            return Integer.parseInt(digits.toString());
+        } catch (NumberFormatException error) {
+            return -1;
+        }
+    }
+
+    /**
+     * ISO-8601 a epoch ms, o -1 si no se entiende.
+     *
+     * La fuente manda `expectedArrival` con huso ("...+02:00") y `aimedArrival`
+     * sin el. `SimpleDateFormat` con "Z" no acepta los dos puntos del huso, asi
+     * que se quitan antes; sin huso se interpreta en la zona del dispositivo,
+     * que para esta app es la de Salamanca.
+     */
+    private static long parseInstant(String value) {
+        if (value == null || value.isEmpty()) {
+            return -1;
+        }
+
+        String normalized = value.trim();
+        boolean zoned = normalized.length() > 6
+            && (normalized.charAt(normalized.length() - 6) == '+'
+                || normalized.charAt(normalized.length() - 6) == '-')
+            && normalized.charAt(normalized.length() - 3) == ':';
+
+        String pattern;
+        if (normalized.endsWith("Z")) {
+            normalized = normalized.substring(0, normalized.length() - 1) + "+0000";
+            pattern = "yyyy-MM-dd'T'HH:mm:ssZ";
+        } else if (zoned) {
+            normalized = normalized.substring(0, normalized.length() - 3)
+                + normalized.substring(normalized.length() - 2);
+            pattern = "yyyy-MM-dd'T'HH:mm:ssZ";
+        } else {
+            pattern = "yyyy-MM-dd'T'HH:mm:ss";
+        }
+
+        try {
+            return new SimpleDateFormat(pattern, Locale.US).parse(normalized).getTime();
+        } catch (ParseException error) {
+            return -1;
+        }
     }
 }

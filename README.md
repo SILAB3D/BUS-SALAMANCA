@@ -52,7 +52,7 @@ Todo procede de **Salamanca de Transportes**:
 
 | Dato | Origen | Actualización |
 | --- | --- | --- |
-| Llegadas en tiempo real | `salamancadetransportes.com/tiempos-de-llegada/?ref=<parada>` | En vivo |
+| Llegadas en tiempo real | `salamancadetransportes.com/api/siri/arrivals?stop=<parada>` | En vivo |
 | Líneas, sentidos y paradas | `salamancadetransportes.com/informacion-de-lineas/lineas/` | `npm run data:network` |
 | Horario programado | `public/data/gtfs.zip` (GTFS estático) | Manual |
 | Calles para los paseos | OpenStreetMap vía Overpass | `npm run data:streets` |
@@ -62,6 +62,46 @@ La página de líneas incrusta, por cada línea, los atributos
 cada sentido** (referencia, nombre y coordenadas). De ahí sale `network.json`,
 que cubre las 27 líneas, sus 80 trayectos y las 349 paradas de la red.
 
+### La fuente de llegadas cambió en 2026
+
+Hasta septiembre de 2026 las llegadas se **raspaban del HTML** de
+`/tiempos-de-llegada/?ref=<parada>`: una página PHP que traía ya pintado un
+panel con una fila por línea («4 minutos», «LLEGANDO A PARADA»).
+
+El sitio oficial se rehízo en Next.js y ese panel pasó a pintarlo el navegador
+**después** de cargar la página. El HTML dejó de contener ninguna llegada, así
+que el raspado devolvía siempre «La respuesta no contiene el panel de llegadas»
+y **todas las paradas aparecían como «Sin conexión»** aunque hubiera cobertura.
+
+Ahora se lee el JSON de `/api/siri/arrivals?stop=<parada>`, que es el que
+consume la propia web. Trae **más** información que el panel anterior:
+
+| Campo | Contenido |
+| --- | --- |
+| `lineCode`, `lineName` | Línea y su nombre (los códigos coinciden con `network.json`) |
+| `expectedArrival` | **Hora** de paso prevista, con huso — no un contador ya redondeado |
+| `aimedArrival` | Hora programada |
+| `delay` | Desvío sobre el horario, duración ISO-8601 con signo (`-PT8M`) |
+| `distance` | Distancia del vehículo a la parada (`"1234 m"`) |
+| `vehicleId`, `latitude`, `longitude` | Identificador y **posición** del autobús |
+| `directionName` | Sentido, con las referencias de cabecera y destino |
+
+Dos consecuencias en el parser (`src/services/arrival-parser.ts`):
+
+- **Los minutos se calculan**, restando la hora prevista al instante de la
+  consulta, en vez de leerse. La hora de paso que se muestra ya no se deduce
+  sumando minutos: la dice la fuente.
+- **Hay que descartar la fila repetida de las cabeceras.** La fuente publica
+  cada paso por sentido, y en una cabecera el mismo vehículo figura a la vez
+  como el que llega y como el que sale. Si las dos filas caen en el mismo
+  minuto son la misma expedición contada dos veces; si caen en minutos
+  distintos (llega a y cuarto, sale a y media) son dos pasos de verdad.
+
+Y un matiz de `«llegando»`: la web oficial lo marca por distancia (menos de
+200 m). La distancia **sola** no vale, porque en una cabecera el autobús que
+acaba de terminar está a veinte metros pero no sale hasta dentro de nueve
+minutos. Hace falta además que quede un minuto o menos.
+
 > El GTFS incluido declara servicio del 2026-03-16 al 2026-03-31. Está caducado y
 > la app lo advierte: solo se usa como horario teórico en la pantalla de
 > puntualidad, nunca como tiempo de llegada.
@@ -69,12 +109,22 @@ que cubre las 27 líneas, sus 80 trayectos y las 349 paradas de la red.
 ## Ritmo de consultas a la fuente
 
 La web oficial está tras Cloudflare con un limitador por IP. Medido el
-2026-08-17 contra `?ref=<parada>`:
+2026-08-17 contra el HTML `?ref=<parada>` y reverificado el 2026-09-19 contra
+`/api/siri/arrivals?stop=<parada>`:
 
-- responde **403** si el `User-Agent` no es de navegador;
+- responde **403** si el `User-Agent` no es de navegador (sigue igual);
+- la API nueva contesta en **~0,4 s**, frente a los ~3 s de la página HTML;
 - admite una ráfaga de **6–8 peticiones** desde reposo y luego devuelve **429**;
 - se recupera en **6–10 s**;
 - **1 petición cada 2 s se sostiene indefinidamente** sin ningún bloqueo.
+
+> **Pasarse no cuesta un 429, cuesta un muro.** Insistiendo de verdad (unas 37
+> peticiones en tres segundos, midiendo) Cloudflare deja de responder 429 y
+> planta su **página de verificación**: un HTML con un **403** que dura varios
+> minutos y afecta a **toda la IP**, no solo a la parada que se pidió. Por eso
+> el cliente lo reconoce (`looksLikeChallenge`) y lo trata como saturación
+> —espera, reintenta y conserva el último dato bueno— en lugar de como un
+> rechazo, que dejaba la parada en «Sin conexión» y tiraba lo que ya sabía.
 
 Por eso todas las consultas pasan por **una sola cola**, que lleva un cubo de
 fichas calcado del de la fuente pero más corto (4 fichas, una cada 1,4 s, frente
@@ -488,11 +538,17 @@ rastreo— y se le deja lo esencial: la hora. La pestaña lo dice donde se ve.
 
 ## En qué parada está el autobús
 
-**La fuente no lo dice.** La web oficial no publica posiciones ni identificadores
-de vehículo: por cada parada dice «línea N, M minutos» y nada más. Lo único que
-delata una presencia física es que ese contador caiga a cero o uno, o que la
-fuente escriba «LLEGANDO A PARADA». Todo lo demás es deducción, y vive en
-`src/services/bus-position.ts`.
+**Se deduce contando paradas**, en `src/services/bus-position.ts`. Lo único que
+delata una presencia física en los datos que maneja el localizador es que el
+contador de una parada caiga a cero o uno. Todo lo demás es deducción.
+
+> **Esto ya se puede hacer mejor.** Cuando se escribió, la fuente no publicaba
+> posiciones: por cada parada decía «línea N, M minutos» y nada más. La API de
+> 2026 trae `vehicleId`, `latitude` y `longitude` **en cada llegada**, así que
+> el autobús se podría situar sin deducir nada y sin gastar una consulta por
+> parada anterior. El localizador sigue contando paradas —es lo que había y
+> funciona, y el servicio nativo lleva la misma regla portada a Java—, pero es
+> el candidato obvio a rehacerse con el dato real.
 
 La deducción es esta: se mira ese mismo indicio en las paradas **anteriores** del
 recorrido —que salen de `network.json` en el orden real del trayecto, no por
