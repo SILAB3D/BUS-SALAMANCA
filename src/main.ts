@@ -27,6 +27,7 @@ import {
 } from './services/routing'
 import { loadStreetGraph, peekStreetGraph, walkPath } from './services/streets'
 import { currentDayType, loadSchedule } from './services/schedule'
+import { onWidgetStopTap, syncWidgetStops, takeWidgetStop } from './services/widget'
 import {
   cancelNotification,
   ensureNotificationPermission,
@@ -49,6 +50,7 @@ import {
   clearMonitorTrace,
   enforceActiveLimit,
   formatMinutesClock,
+  favouriteLabel,
   isFavourite,
   isWithinWindow,
   localDateKey,
@@ -405,6 +407,9 @@ async function bootstrap(): Promise<void> {
     state.ready = true
     dropStaleFavourites()
     backfillTrackingDirections()
+    // El widget se pinta con lo ultimo que se le mando: esta es la ocasion de
+    // corregirlo si la red oficial acaba de tirar alguna parada guardada.
+    refreshWidget()
   } catch (error) {
     state.bootError = `No se pudo iniciar la aplicación: ${errorMessage(error)}`
     log('error', 'arranque', errorMessage(error))
@@ -417,6 +422,10 @@ async function bootstrap(): Promise<void> {
   render()
 
   void setupPermissions()
+  // Si la app se ha abierto pulsando una parada del widget, su hoja del aviso
+  // sale ahora: la red ya esta cargada y hay lineas que ofrecer.
+  void checkWidgetTap()
+  void onWidgetStopTap(() => void checkWidgetTap())
   await restoreTrackingService()
 
   window.setInterval(tick, TICK_MS)
@@ -435,6 +444,9 @@ async function bootstrap(): Promise<void> {
 
     if (document.visibilityState === 'visible') {
       void refreshVisible('manual')
+      // Pulsar el widget trae la app desde segundo plano: la parada elegida
+      // espera en la parte nativa y se recoge justo aqui.
+      void checkWidgetTap()
       // Mientras la app no estaba delante, quien medía era el servicio nativo.
       void drainNativePasses()
       void syncPermissions()
@@ -798,6 +810,87 @@ function dropStaleFavourites(): void {
     persistFavourites()
     log('warn', 'paradas', 'Se eliminaron paradas guardadas que ya no existen en la red oficial.')
   }
+}
+
+/* ------------------------------------------------------------------ *
+ * Widget de la pantalla de inicio                                      *
+ * ------------------------------------------------------------------ */
+
+/**
+ * Baja al widget los nombres de las paradas guardadas.
+ *
+ * Se llama cada vez que esa lista cambia —al guardar, al quitar y al renombrar—
+ * porque el widget no tiene refresco propio: ensena lo ultimo que se le dejo.
+ * El nombre que se manda es el MISMO que se lee en Inicio, alias incluido; un
+ * widget que llamara a la parada de otra forma que la app se leeria como una
+ * parada distinta.
+ */
+function refreshWidget(): void {
+  void syncWidgetStops(
+    state.favourites.map((favourite) => ({
+      stopId: favourite.stopId,
+      label: favouriteLabel(favourite.stopId, stopName(favourite.stopId)),
+    })),
+  )
+}
+
+/**
+ * Parada pulsada en el widget que todavia no se ha podido abrir.
+ *
+ * El toque puede llegar con la app arrancando, y la hoja del aviso necesita la
+ * red oficial para ofrecer lineas: hasta que la red esta, la parada espera aqui.
+ */
+let pendingWidgetStopId: string | null = null
+
+/** Recoge el toque en el widget, si lo hay, y lo atiende. */
+async function checkWidgetTap(): Promise<void> {
+  const stopId = await takeWidgetStop()
+
+  if (stopId) {
+    pendingWidgetStopId = stopId
+  }
+
+  await openWidgetStop()
+}
+
+/**
+ * Abre la hoja de "Avisarme del proximo bus" de la parada pulsada en el widget.
+ *
+ * Es la misma hoja que sale desde la app —incluida la pregunta de cual se
+ * sustituye cuando ya no caben mas avisos— y no una pantalla aparte: el widget
+ * es un atajo a una funcion que ya existe, y dos versiones de la misma ventana
+ * acabarian ofreciendo cosas distintas.
+ */
+async function openWidgetStop(): Promise<void> {
+  const stopId = pendingWidgetStopId
+  if (!stopId) {
+    return
+  }
+
+  // Sin red no hay lineas que ofrecer. La parada se queda esperando y el
+  // arranque vuelve a pasar por aqui en cuanto la red esta cargada.
+  if (!state.ready || !state.network) {
+    return
+  }
+
+  pendingWidgetStopId = null
+
+  if (!state.network.stopById.has(stopId)) {
+    showToast('Esa parada ya no existe en la red oficial', 'error')
+    return
+  }
+
+  if (state.tab !== 'inicio') {
+    await goToTab('inicio')
+  }
+
+  if (state.trackings.length >= MAX_TRACKING_JOBS) {
+    state.sheet = { kind: 'replace-job', stopId }
+    render()
+    return
+  }
+
+  openPickLine(stopId, 'tracking')
 }
 
 /* ------------------------------------------------------------------ *
@@ -2642,12 +2735,14 @@ async function handleAction(action: string, element: HTMLElement): Promise<void>
         showToast('Parada guardada', 'success')
       }
       persistFavourites()
+      refreshWidget()
       render()
       return
 
     case 'remove-favourite':
       state.favourites = state.favourites.filter((item) => item.stopId !== stopId)
       persistFavourites()
+      refreshWidget()
       showToast('Parada quitada', 'info')
       render()
       return
@@ -2664,6 +2759,7 @@ async function handleAction(action: string, element: HTMLElement): Promise<void>
         const alias = state.draft.alias.trim()
         favourite.alias = alias.length > 0 ? alias : null
         persistFavourites()
+        refreshWidget()
       }
       state.sheet = null
       render()

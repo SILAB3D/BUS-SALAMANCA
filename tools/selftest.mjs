@@ -1673,6 +1673,104 @@ async function main() {
     }
   }
 
+  section('13 · Widget de paradas favoritas')
+
+  {
+    const androidJava = (file) => path.join(
+      projectRoot, 'android', 'app', 'src', 'main', 'java', 'com', 'icuas', 'salbus', file)
+
+    const widgetJava = await fs.readFile(androidJava('FavouritesWidget.java'), 'utf8')
+    const storeJava = await fs.readFile(androidJava('WidgetStore.java'), 'utf8')
+    const widgetInfo = await fs.readFile(
+      path.join(projectRoot, 'android', 'app', 'src', 'main', 'res', 'xml',
+        'widget_favourites_info.xml'),
+      'utf8',
+    )
+    const widgetTs = await fs.readFile(
+      path.join(projectRoot, 'src', 'services', 'widget.ts'), 'utf8')
+    const appManifest = await fs.readFile(
+      path.join(projectRoot, 'android', 'app', 'src', 'main', 'AndroidManifest.xml'), 'utf8')
+    const main = await fs.readFile(path.join(projectRoot, 'src', 'main.ts'), 'utf8')
+
+    const number = (source, pattern) => Number(pattern.exec(source)?.[1] ?? -1)
+
+    // Sin el receptor declarado el widget no existe para el lanzador: no sale
+    // en la lista de widgets y nadie puede llegar a colocarlo.
+    check('el widget está declarado en el manifiesto',
+      appManifest.includes('android:name=".FavouritesWidget"')
+        && appManifest.includes('android.appwidget.action.APPWIDGET_UPDATE')
+        && appManifest.includes('@xml/widget_favourites_info'))
+
+    // El tamaño personalizable del widget es justo esto: sin `vertical` el
+    // número de paradas quedaría clavado en el que cupiera al colocarlo.
+    check('el widget se puede redimensionar a lo alto',
+      /resizeMode="[^"]*vertical/.test(widgetInfo))
+
+    // El tope de la web y el de la copia nativa tienen que ser el mismo: si la
+    // web mandara menos, el widget más grande saldría con huecos.
+    check('web y widget cuentan las mismas paradas como máximo',
+      number(widgetTs, /WIDGET_MAX_STOPS = (\d+)/) === number(storeJava, /MAX_STOPS = (\d+)/)
+        && number(widgetTs, /WIDGET_MAX_STOPS = (\d+)/) === 4)
+
+    // La altura mínima vive en dos archivos —la ficha del widget y el cálculo
+    // de filas—; si dejan de coincidir se dibujan filas que no caben.
+    check('la altura mínima del widget dice lo mismo en los dos sitios',
+      number(widgetInfo, /minResizeHeight="(\d+)dp"/)
+        === number(widgetJava, /MIN_HEIGHT_DP = (\d+)/))
+
+    const rowHeight = number(widgetJava, /ROW_HEIGHT_DP = (\d+)/)
+    const chrome = number(widgetJava, /CHROME_HEIGHT_DP = (\d+)/)
+    const minHeight = number(widgetJava, /MIN_HEIGHT_DP = (\d+)/)
+    const rowsFor = (height) =>
+      Math.max(1, Math.min(4, Math.floor((Math.max(height, minHeight) - chrome) / rowHeight)))
+
+    // Alturas de la rejilla del lanzador: n celdas de alto miden 70n-30 dp.
+    check('cada celda de alto añade una parada al widget',
+      rowsFor(110) === 1 && rowsFor(180) === 2 && rowsFor(250) === 3 && rowsFor(320) === 4,
+      `110dp ${rowsFor(110)} · 180dp ${rowsFor(180)} · 250dp ${rowsFor(250)} · 320dp ${rowsFor(320)}`)
+    check('por muy grande que se haga no enseña una quinta parada',
+      rowsFor(600) === 4)
+
+    // Dos PendingIntent se consideran el mismo cuando coinciden acción, datos y
+    // código: los extras NO cuentan. Sin un código por fila, las cuatro paradas
+    // acabarían abriendo la primera.
+    check('cada parada del widget abre la suya',
+      widgetJava.includes('widgetId * (WidgetStore.MAX_STOPS + 1) + index'))
+
+    // Lo que promete el widget: pulsar una parada lleva al aviso de ESA parada,
+    // no a su ficha.
+    check('pulsar una parada abre «Avisarme del próximo bus»',
+      /async function openWidgetStop/.test(main)
+        && /openWidgetStop[\s\S]{0,1200}?openPickLine\(stopId, 'tracking'\)/.test(main))
+
+    // Es la MISMA hoja que dentro de la app, con su pregunta de cuál se
+    // sustituye cuando ya no caben más avisos. Dos versiones de la misma
+    // ventana acabarían ofreciendo cosas distintas.
+    check('desde el widget también se puede sustituir un aviso lleno',
+      /openWidgetStop[\s\S]{0,1200}?state\.trackings\.length >= MAX_TRACKING_JOBS/.test(main))
+
+    // El widget no tiene refresco propio: si una de estas tres acciones no lo
+    // avisa, se queda enseñando un nombre que ya no es el de esa parada.
+    const favouriteWrites = main.split('persistFavourites()').slice(1)
+    check('guardar, quitar y renombrar una parada repintan el widget',
+      favouriteWrites.filter((tail) => tail.slice(0, 140).includes('refreshWidget()')).length === 3,
+      `${favouriteWrites.length} escrituras de favoritas`)
+
+    // La cuarta escritura es la limpieza de paradas desaparecidas de la red, que
+    // corre en el arranque: ahí el repintado va después, en el propio arranque.
+    check('el arranque deja el widget al día',
+      /dropStaleFavourites\(\)[\s\S]{0,400}?refreshWidget\(\)/.test(main))
+
+    // Pulsar el widget trae la app desde cero o desde segundo plano, y en los
+    // dos casos el aviso llegaría antes de que la página tuviera oyentes: la
+    // parada se pregunta al arrancar y al volver a primer plano.
+    check('el toque en el widget se recoge al abrir y al volver a la app',
+      (main.match(/void checkWidgetTap\(\)/g) ?? []).length >= 2)
+    check('la parada pulsada se atiende una sola vez',
+      widgetTs.includes('Widget.pendingStop()')
+        && main.includes('pendingWidgetStopId = null'))
+  }
+
   console.log(`\n${passed} correctas · ${failed} fallidas`)
   process.exitCode = failed > 0 ? 1 : 0
 }

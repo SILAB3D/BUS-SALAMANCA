@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Colores del widget de la pantalla de inicio.
+
+    El widget se dibuja FUERA de la app: no hay hoja de estilos ni variables CSS
+    a las que acudir, asi que los tokens de `src/style.css` se repiten aqui a
+    mano. Si alli cambia la marca, este archivo (y su copia de values-night) es
+    el otro sitio donde hay que cambiarla.
+-->
+<resources>
+    <color name="widget_brand">#0D47C8</color>
+    <color name="widget_surface">#FFFFFF</color>
+    <color name="widget_row">#F5F7FC</color>
+    <color name="widget_text">#0F1B33</color>
+    <color name="widget_text_soft">#5A6A8A</color>
+    <color name="widget_border">#DBE3F0</color>
+</resources>

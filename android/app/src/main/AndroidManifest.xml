@@ -47,6 +47,26 @@
             servicio se apaga; esta alarma lo trae de vuelta a su hora, y el
             arranque del movil vuelve a programarla.
         -->
+        <!--
+            Widget de paradas favoritas de la pantalla de inicio.
+
+            exported="true" es obligatorio: quien lo dibuja y le manda
+            APPWIDGET_UPDATE es el lanzador, que es otra aplicacion. No expone
+            nada propio: solo responde a las difusiones del sistema de widgets.
+        -->
+        <receiver
+            android:name=".FavouritesWidget"
+            android:enabled="true"
+            android:exported="true"
+            android:label="@string/widget_title">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_favourites_info" />
+        </receiver>
+
         <receiver
             android:name=".BusTrackingReceiver"
             android:enabled="true"

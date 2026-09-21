@@ -10,6 +10,7 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(BusTrackingPlugin.class);
         registerPlugin(DeviceSettingsPlugin.class);
         registerPlugin(UpdaterPlugin.class);
+        registerPlugin(WidgetPlugin.class);
         super.onCreate(savedInstanceState);
     }
 }

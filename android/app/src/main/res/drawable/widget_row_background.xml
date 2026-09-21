@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Fondo de cada parada. Es un selector para que la pulsacion se vea: un widget
+    no tiene estados de foco propios, y sin esto no habria ninguna senal de que
+    la fila responde al dedo.
+-->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_pressed="true">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/widget_border" />
+            <corners android:radius="14dp" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="@color/widget_row" />
+            <corners android:radius="14dp" />
+        </shape>
+    </item>
+</selector>

@@ -4,4 +4,10 @@
     <string name="title_activity_main">SALBUS</string>
     <string name="package_name">com.icuas.bussalamanca</string>
     <string name="custom_url_scheme">com.icuas.bussalamanca</string>
+
+    <!-- Widget de paradas favoritas. -->
+    <string name="widget_title">Mis paradas</string>
+    <string name="widget_empty">Guarda paradas en SALBUS y aparecerán aquí</string>
+    <string name="widget_row_action">Avisarme del próximo bus</string>
+    <string name="widget_description">Tus paradas guardadas, con acceso directo a «Avisarme del próximo bus».</string>
 </resources>

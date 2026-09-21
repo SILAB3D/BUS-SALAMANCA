@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Ficha del widget de paradas favoritas.
+
+    TAMANO PERSONALIZABLE: `resizeMode` horizontal|vertical es lo que deja
+    estirarlo, y de la altura resultante sale cuantas paradas se ensenan (1 a 4,
+    ver FavouritesWidget.rowsForHeight).
+
+    Las alturas siguen la rejilla del lanzador, donde n celdas de alto miden
+    70n-30 dp: 110dp dos celdas, 180dp tres, 250dp cuatro y 320dp cinco. El
+    minimo son dos celdas porque en una sola no cabe una fila entera (cabecera
+    mas nombre mas numero de parada), y una fila cortada es peor que un widget
+    algo mas alto. Arranca en 3x3 —dos paradas—, que es donde ya es util sin
+    ocupar media pantalla.
+
+    updatePeriodMillis="0": aqui no hay nada que caduque solo. El contenido son
+    los nombres de las paradas guardadas, y quien sabe que han cambiado es la
+    app, que redibuja el widget al guardarlas (WidgetPlugin.sync). Un refresco
+    periodico solo gastaria bateria para volver a pintar lo mismo.
+-->
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:minWidth="180dp"
+    android:minHeight="110dp"
+    android:minResizeWidth="110dp"
+    android:minResizeHeight="110dp"
+    android:maxResizeWidth="320dp"
+    android:maxResizeHeight="320dp"
+    android:targetCellWidth="3"
+    android:targetCellHeight="3"
+    android:updatePeriodMillis="0"
+    android:initialLayout="@layout/widget_favourites"
+    android:previewLayout="@layout/widget_favourites"
+    android:previewImage="@mipmap/ic_launcher"
+    android:description="@string/widget_description"
+    android:resizeMode="horizontal|vertical"
+    android:widgetCategory="home_screen" />

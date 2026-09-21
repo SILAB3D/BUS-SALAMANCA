@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Widget de paradas favoritas.
+
+    Las filas NO estan escritas aqui: se anaden en tiempo de ejecucion a
+    `widget_rows` con RemoteViews.addView(), porque cuantas caben depende del
+    tamano al que se haya estirado el widget y eso solo se sabe en
+    FavouritesWidget.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="@drawable/widget_background"
+    android:padding="10dp">
+
+    <!-- Cabecera: solo cabe a partir de dos filas, asi que se oculta en el tamano minimo. -->
+    <LinearLayout
+        android:id="@+id/widget_header"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingStart="6dp"
+        android:paddingEnd="6dp"
+        android:paddingBottom="6dp">
+
+        <TextView
+            android:id="@+id/widget_title"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/widget_title"
+            android:textColor="@color/widget_brand"
+            android:textSize="12sp"
+            android:textStyle="bold"
+            android:maxLines="1"
+            android:ellipsize="end" />
+    </LinearLayout>
+
+    <!-- Contenedor de las paradas. -->
+    <LinearLayout
+        android:id="@+id/widget_rows"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:orientation="vertical" />
+
+    <!--
+        Sin paradas guardadas no hay nada que pulsar: se explica que hacer.
+
+        Arranca VISIBLE porque este mismo archivo es el `initialLayout` y el
+        `previewLayout` del widget: en el selector del lanzador, y en el hueco
+        que queda mientras se pinta por primera vez, un widget en blanco no
+        dice nada de lo que hace.
+    -->
+    <TextView
+        android:id="@+id/widget_empty"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:padding="10dp"
+        android:text="@string/widget_empty"
+        android:textColor="@color/widget_text_soft"
+        android:textSize="12sp" />
+</LinearLayout>

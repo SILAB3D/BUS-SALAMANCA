@@ -24,6 +24,7 @@ src/
     network.ts             Red oficial de líneas, sentidos y paradas
     schedule.ts            Horario programado a partir del GTFS estático
     notifications.ts       Notificaciones locales
+    widget.ts              Puente con el widget de la pantalla de inicio
 public/data/
   network.json             Red oficial generada (27 líneas · 80 sentidos)
   streets.json             Callejero peatonal de OpenStreetMap (carga diferida)
@@ -535,6 +536,86 @@ perderse una sola consulta de **esa** parada, y dibujar un recorrido pide ocho
 por ciclo. Pero apagar el aviso entero durante la franja sería apagar una
 notificación que alguien está esperando, así que se le quita lo caro —el
 rastreo— y se le deja lo esencial: la hora. La pestaña lo dice donde se ve.
+
+## El widget de la pantalla de inicio
+
+Entre **una y cuatro** paradas guardadas, y cada una es un atajo a «Avisarme del
+próximo bus» de **esa** parada. Es lo único que hace: no enseña tiempos.
+
+Que no los enseñe es una decisión, no una carencia. Un widget que dijera «3 min»
+tendría que consultar la fuente por su cuenta, y la fuente **admite una petición
+cada dos segundos por IP**: un widget refrescándose en segundo plano competiría
+con el aviso de próximo bus y con la app abierta por el mismo cupo, y el precio
+lo pagaría justo lo que sí es tiempo real. Lo que el widget ahorra es otra cosa:
+los **cuatro toques** que separaban la pantalla de inicio de un aviso creado.
+
+### Cuántas paradas se ven
+
+**Lo decide el tamaño al que lo hayas estirado**, y nada más. El widget es
+redimensionable, el lanzador avisa de cada estirón en
+`onAppWidgetOptionsChanged`, y de la altura que reporta salen las filas:
+
+| Alto | Paradas |
+| --- | --- |
+| 110 dp (2 celdas) | 1 |
+| 180 dp (3 celdas) | 2 |
+| 250 dp (4 celdas) | 3 |
+| 320 dp (5 celdas) | 4 |
+
+El mínimo son **dos celdas** porque en una sola no cabe una fila entera —nombre
+y número de parada—, y una fila cortada por la mitad es peor que un widget algo
+más alto. La división es hacia abajo por lo mismo: mejor un hueco al final que
+una cuarta parada asomando.
+
+**No hay un ajuste dentro de la app para esto**, a propósito. El tamaño ya se
+elige arrastrando el widget; un número aparte en Ajustes permitiría pedir cuatro
+paradas en un widget donde solo caben dos, y entonces habría que decidir cuál de
+las dos cifras gana.
+
+### Por qué el widget no lee las paradas guardadas
+
+Porque no puede. Las favoritas viven en el `localStorage` de la WebView y el
+widget se dibuja **fuera** de ella: cuando el lanzador pide pintarlo, la app
+puede llevar días sin abrirse y no hay ninguna página a la que preguntar.
+
+Así que la app le deja una **copia** en `SharedPreferences` (`WidgetStore`) cada
+vez que esa lista cambia —al guardar, al quitar y al renombrar— y en cada
+arranque. El widget lee solo de esa copia, y por eso `updatePeriodMillis` es
+**0**: no hay nada que caduque solo, y un refresco periódico solo gastaría
+batería para volver a pintar lo mismo.
+
+El nombre que se copia es el **mismo que se lee en Inicio**, alias incluido. Un
+widget que llamara a la parada de otra forma que la app se leería como una parada
+distinta.
+
+Con la app recién instalada y nunca abierta la copia está vacía, y el widget lo
+dice en vez de mentir con una lista a medias. Pulsar ese texto abre SALBUS, que
+es exactamente lo que hace falta para llenarlo.
+
+### El toque se pregunta, no se emite
+
+Pulsar una parada abre la app con un intent propio
+(`FavouritesWidget.ACTION_OPEN_STOP`) que lleva dentro el código de la parada, y
+la web levanta con él la hoja de siempre. **La misma hoja**, incluida la pregunta
+de cuál se sustituye cuando ya hay dos avisos: el widget es un atajo a una
+función que ya existe, y dos versiones de la misma ventana acabarían ofreciendo
+cosas distintas. La elección de línea y sentido necesita la red oficial, que solo
+existe en la parte web, así que el widget no podría resolverla por su cuenta
+aunque quisiera.
+
+La parada **se pregunta** (`Widget.pendingStop()`), no llega por evento. Pulsar
+el widget trae la app desde cero o desde segundo plano, y en los dos casos el
+aviso llegaría antes de que la página tuviera oyentes. La parte nativa la guarda
+y la web la recoge al arrancar y cada vez que vuelve a primer plano; al leerla se
+olvida, porque si no, volver a la app dentro de tres días abriría la hoja de un
+toque que ya se atendió.
+
+Dos detalles que parecen menores y no lo son. El extra del intent **se borra**
+tras leerlo: sin eso, girar el teléfono reconstruye la actividad, se vuelve a
+leer el mismo intent y reaparece una hoja que ya se había cerrado. Y cada fila
+lleva un **código de petición distinto**: dos `PendingIntent` se consideran el
+mismo cuando coinciden acción, datos y código —los extras *no* cuentan—, así que
+sin eso las cuatro paradas acabarían abriendo la primera.
 
 ## En qué parada está el autobús
 
