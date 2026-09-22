@@ -9,8 +9,14 @@
 -->
 <resources>
     <color name="widget_brand">#0D47C8</color>
+    <!-- Fondo de la insignia del numero de parada y del circulo de la campana: `info-soft`. -->
+    <color name="widget_brand_soft">#E6EFFF</color>
+    <!-- La caja no es de un solo tono: degrada del tono de superficie al siguiente. -->
     <color name="widget_surface">#FFFFFF</color>
-    <color name="widget_row">#F5F7FC</color>
+    <color name="widget_surface_alt">#F1F5FD</color>
+    <color name="widget_row">#FFFFFF</color>
+    <color name="widget_row_border">#E4EAF6</color>
+    <color name="widget_press">#DDE6F8</color>
     <color name="widget_text">#0F1B33</color>
     <color name="widget_text_soft">#5A6A8A</color>
     <color name="widget_border">#DBE3F0</color>

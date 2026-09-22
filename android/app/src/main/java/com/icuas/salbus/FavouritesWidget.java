@@ -47,7 +47,7 @@ public class FavouritesWidget extends AppWidgetProvider {
 
     /*
      * Altura de una fila de parada, con su separacion: 8+8 dp de relleno, el
-     * nombre a 14sp, el numero de parada a 11sp y 6 dp hasta la siguiente.
+     * nombre a 14sp, la linea de accion a 11sp y 6 dp hasta la siguiente.
      */
     private static final int ROW_HEIGHT_DP = 56;
 
@@ -56,6 +56,18 @@ public class FavouritesWidget extends AppWidgetProvider {
 
     /** Altura minima declarada en res/xml/widget_favourites_info.xml. */
     private static final int MIN_HEIGHT_DP = 110;
+
+    /** Ancho minimo declarado en res/xml/widget_favourites_info.xml. */
+    private static final int MIN_WIDTH_DP = 180;
+
+    /**
+     * Por debajo de este ancho la fila se queda en una linea.
+     *
+     * Al nombre de la parada le quedan unos 80 dp cuando el widget mide el
+     * minimo: con la segunda linea puesta, las dos salen cortadas. Sin ella el
+     * nombre sigue cortado a veces, pero es lo unico que se corta.
+     */
+    private static final int COMPACT_WIDTH_DP = 220;
 
     @Override
     public void onUpdate(Context context, AppWidgetManager manager, int[] widgetIds) {
@@ -109,13 +121,20 @@ public class FavouritesWidget extends AppWidgetProvider {
         if (stops.isEmpty()) {
             // Sin paradas no hay atajos: el widget entero abre la app, que es
             // donde se guardan.
+            views.setViewVisibility(R.id.widget_rows, View.GONE);
             views.setViewVisibility(R.id.widget_empty, View.VISIBLE);
             views.setOnClickPendingIntent(R.id.widget_empty, openApp(context, widgetId, null, 0));
             manager.updateAppWidget(widgetId, views);
             return;
         }
 
+        views.setViewVisibility(R.id.widget_rows, View.VISIBLE);
         views.setViewVisibility(R.id.widget_empty, View.GONE);
+
+        // Widget estrecho: la linea de accion no cabe entera y se quedaria en
+        // «Avisarme d...», que no dice nada y le roba el sitio al nombre de la
+        // parada, que es lo unico que hay que poder leer.
+        boolean compact = widthDp(manager, widgetId) < COMPACT_WIDTH_DP;
 
         int shown = Math.min(capacity, stops.size());
 
@@ -123,8 +142,12 @@ public class FavouritesWidget extends AppWidgetProvider {
             WidgetStore.Stop stop = stops.get(index);
             RemoteViews row = new RemoteViews(context.getPackageName(), R.layout.widget_favourites_row);
 
+            // La segunda linea de la fila (que pulsarla avisa del proximo bus) es
+            // fija y ya viene del layout: aqui solo se rellena lo que cambia de
+            // una parada a otra.
+            row.setTextViewText(R.id.widget_row_badge, stop.id);
             row.setTextViewText(R.id.widget_row_name, stop.label);
-            row.setTextViewText(R.id.widget_row_meta, "Parada " + stop.id);
+            row.setViewVisibility(R.id.widget_row_meta, compact ? View.GONE : View.VISIBLE);
             row.setOnClickPendingIntent(
                 R.id.widget_row,
                 openApp(context, widgetId, stop.id, index)
@@ -151,20 +174,32 @@ public class FavouritesWidget extends AppWidgetProvider {
         return Math.max(1, Math.min(WidgetStore.MAX_STOPS, rows));
     }
 
+    private static int widthDp(AppWidgetManager manager, int widgetId) {
+        return optionDp(manager, widgetId, AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH, MIN_WIDTH_DP);
+    }
+
     private static int heightDp(AppWidgetManager manager, int widgetId) {
+        return optionDp(manager, widgetId, AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT, MIN_HEIGHT_DP);
+    }
+
+    /**
+     * Una de las medidas que reporta el lanzador, en dp.
+     *
+     * Se piden siempre las MINIMAS, que son las del telefono en vertical: es la
+     * peor de las dos orientaciones, y dibujar para la buena dejaria filas
+     * cortadas al girar el telefono.
+     */
+    private static int optionDp(AppWidgetManager manager, int widgetId, String key, int fallback) {
         try {
             Bundle options = manager.getAppWidgetOptions(widgetId);
             if (options == null) {
-                return MIN_HEIGHT_DP;
+                return fallback;
             }
 
-            // La altura MINIMA es la del widget en vertical, que es la peor de
-            // las dos orientaciones: dibujar para la buena dejaria filas
-            // cortadas al girar el telefono.
-            int height = options.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT, 0);
-            return height > 0 ? height : MIN_HEIGHT_DP;
+            int value = options.getInt(key, 0);
+            return value > 0 ? value : fallback;
         } catch (Exception error) {
-            return MIN_HEIGHT_DP;
+            return fallback;
         }
     }
 

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Anadidos que SOLO existen en la compilacion de debug. El fusionador de
+    manifiestos los pega sobre el de main, asi que nada de esto viaja en la APK
+    de release.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!--
+            Banco de pruebas del widget: lo dibuja a los tamanos de la rejilla
+            del lanzador dentro de una actividad normal, que es lo unico que se
+            puede abrir con `adb shell am start` y capturar sin tener que
+            arrastrar el widget a mano en el emulador.
+        -->
+        <activity
+            android:name="com.icuas.salbus.WidgetPreviewActivity"
+            android:exported="true"
+            android:label="Widget · vista previa" />
+    </application>
+</manifest>

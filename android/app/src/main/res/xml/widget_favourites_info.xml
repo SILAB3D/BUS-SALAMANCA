@@ -6,6 +6,10 @@
     estirarlo, y de la altura resultante sale cuantas paradas se ensenan (1 a 4,
     ver FavouritesWidget.rowsForHeight).
 
+    ANCHO MINIMO 180dp: por debajo de eso la insignia del numero y la campana
+    se comen la fila entera y el nombre de la parada se queda sin sitio, que es
+    justo lo unico que hay que leer.
+
     Las alturas siguen la rejilla del lanzador, donde n celdas de alto miden
     70n-30 dp: 110dp dos celdas, 180dp tres, 250dp cuatro y 320dp cinco. El
     minimo son dos celdas porque en una sola no cabe una fila entera (cabecera
@@ -21,7 +25,7 @@
 <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
     android:minWidth="180dp"
     android:minHeight="110dp"
-    android:minResizeWidth="110dp"
+    android:minResizeWidth="180dp"
     android:minResizeHeight="110dp"
     android:maxResizeWidth="320dp"
     android:maxResizeHeight="320dp"

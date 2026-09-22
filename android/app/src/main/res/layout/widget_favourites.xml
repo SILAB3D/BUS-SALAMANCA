@@ -21,9 +21,20 @@
         android:layout_height="wrap_content"
         android:orientation="horizontal"
         android:gravity="center_vertical"
-        android:paddingStart="6dp"
-        android:paddingEnd="6dp"
-        android:paddingBottom="6dp">
+        android:paddingStart="4dp"
+        android:paddingEnd="4dp"
+        android:paddingBottom="8dp">
+
+        <!--
+            El autobus hace de logo: el widget se ve entre los de otras apps y
+            «Mis paradas» a solas no dice de cual es.
+        -->
+        <ImageView
+            android:layout_width="16dp"
+            android:layout_height="16dp"
+            android:layout_marginEnd="6dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_bus" />
 
         <TextView
             android:id="@+id/widget_title"
@@ -34,16 +45,31 @@
             android:textColor="@color/widget_brand"
             android:textSize="12sp"
             android:textStyle="bold"
+            android:letterSpacing="0.04"
             android:maxLines="1"
             android:ellipsize="end" />
     </LinearLayout>
 
-    <!-- Contenedor de las paradas. -->
+    <!--
+        Contenedor de las paradas.
+
+        Ocupa el hueco entero y centra lo que lleve dentro: las alturas de la
+        rejilla del lanzador no son multiplos exactos de una fila y siempre
+        sobran dp, que repartidos arriba y abajo no se notan y amontonados al
+        final dejan el widget cojo. Cuando no hay paradas se oculta desde
+        FavouritesWidget y el hueco pasa entero al mensaje de abajo.
+
+        Arranca oculto por lo mismo que el mensaje arranca visible: este archivo
+        es tambien el `previewLayout`, y sin paradas que pintar lo que tiene que
+        verse en el selector del lanzador es el mensaje, centrado.
+    -->
     <LinearLayout
         android:id="@+id/widget_rows"
+        android:visibility="gone"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
+        android:gravity="center_vertical"
         android:orientation="vertical" />
 
     <!--
@@ -54,13 +80,30 @@
         que queda mientras se pinta por primera vez, un widget en blanco no
         dice nada de lo que hace.
     -->
-    <TextView
+    <LinearLayout
         android:id="@+id/widget_empty"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:orientation="vertical"
         android:gravity="center"
-        android:padding="10dp"
-        android:text="@string/widget_empty"
-        android:textColor="@color/widget_text_soft"
-        android:textSize="12sp" />
+        android:padding="8dp">
+
+        <ImageView
+            android:layout_width="26dp"
+            android:layout_height="26dp"
+            android:layout_marginBottom="6dp"
+            android:alpha="0.45"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_bus" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:text="@string/widget_empty"
+            android:textColor="@color/widget_text_soft"
+            android:textSize="12sp"
+            android:lineSpacingExtra="2dp" />
+    </LinearLayout>
 </LinearLayout>

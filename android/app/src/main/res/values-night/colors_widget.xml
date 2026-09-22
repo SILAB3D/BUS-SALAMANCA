@@ -2,8 +2,12 @@
 <!-- Tema oscuro del widget. Mismos tokens que `src/style.css` en su bloque oscuro. -->
 <resources>
     <color name="widget_brand">#4D8BFF</color>
+    <color name="widget_brand_soft">#1B2C55</color>
     <color name="widget_surface">#141C30</color>
+    <color name="widget_surface_alt">#0F1727</color>
     <color name="widget_row">#1C2540</color>
+    <color name="widget_row_border">#26314F</color>
+    <color name="widget_press">#2E3B5E</color>
     <color name="widget_text">#EAF0FB</color>
     <color name="widget_text_soft">#A9B7D4</color>
     <color name="widget_border">#2A3654</color>

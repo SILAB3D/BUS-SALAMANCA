@@ -2,6 +2,11 @@
 <!--
     Una parada del widget. Pulsarla abre SALBUS directamente en "Avisarme del
     proximo bus" de ESA parada.
+
+    ALTURA: 8+8 dp de relleno, dos lineas de texto y 6 dp hasta la siguiente
+    parada suman los 56 dp que FavouritesWidget.ROW_HEIGHT_DP usa para decidir
+    cuantas caben. Tocar rellenos o tamanos de letra aqui obliga a repasar esa
+    constante, o el widget dibujara mas filas de las que entran.
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/widget_row"
@@ -10,16 +15,38 @@
     android:orientation="horizontal"
     android:gravity="center_vertical"
     android:background="@drawable/widget_row_background"
-    android:paddingStart="12dp"
-    android:paddingEnd="12dp"
+    android:paddingStart="8dp"
+    android:paddingEnd="8dp"
     android:paddingTop="8dp"
     android:paddingBottom="8dp"
     android:layout_marginBottom="6dp">
+
+    <!--
+        Numero de parada. Es el dato con el que se piden los tiempos y el que la
+        gente se sabe de memoria, asi que va delante y en insignia; antes era
+        texto gris en la segunda linea, donde pesaba lo mismo que el nombre.
+    -->
+    <TextView
+        android:id="@+id/widget_row_badge"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:minWidth="34dp"
+        android:background="@drawable/widget_badge"
+        android:gravity="center"
+        android:paddingStart="6dp"
+        android:paddingEnd="6dp"
+        android:paddingTop="5dp"
+        android:paddingBottom="5dp"
+        android:textColor="@color/widget_brand"
+        android:textSize="13sp"
+        android:textStyle="bold"
+        android:maxLines="1" />
 
     <LinearLayout
         android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:layout_weight="1"
+        android:layout_marginStart="10dp"
         android:orientation="vertical">
 
         <TextView
@@ -32,10 +59,16 @@
             android:maxLines="1"
             android:ellipsize="end" />
 
+        <!--
+            Que hace la fila, no de que parada es: el numero ya esta en la
+            insignia y repetirlo aqui dejaba sin explicar por que hay una
+            campana al final.
+        -->
         <TextView
             android:id="@+id/widget_row_meta"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:text="@string/widget_row_action"
             android:textColor="@color/widget_text_soft"
             android:textSize="11sp"
             android:maxLines="1"
@@ -44,9 +77,11 @@
 
     <ImageView
         android:id="@+id/widget_row_icon"
-        android:layout_width="20dp"
-        android:layout_height="20dp"
-        android:layout_marginStart="8dp"
+        android:layout_width="28dp"
+        android:layout_height="28dp"
+        android:layout_marginStart="6dp"
+        android:background="@drawable/widget_icon_circle"
+        android:padding="6dp"
         android:contentDescription="@string/widget_row_action"
         android:src="@drawable/widget_bell" />
 </LinearLayout>

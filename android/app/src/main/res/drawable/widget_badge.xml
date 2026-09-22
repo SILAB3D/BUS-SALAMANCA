@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Insignia con el numero de parada, al principio de cada fila.
+
+    El numero estaba antes en la segunda linea, como texto («Parada 123»), y
+    competia con el nombre. Convertido en insignia se lee de un vistazo y deja
+    la segunda linea libre para decir que hace la fila al pulsarla.
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <solid android:color="@color/widget_brand_soft" />
+    <corners android:radius="10dp" />
+</shape>

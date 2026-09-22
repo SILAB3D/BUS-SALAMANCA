@@ -572,6 +572,45 @@ elige arrastrando el widget; un número aparte en Ajustes permitiría pedir cuat
 paradas en un widget donde solo caben dos, y entonces habría que decidir cuál de
 las dos cifras gana.
 
+### Cómo se ve una parada
+
+Cada fila lleva tres cosas, en este orden: el **número de parada** en una
+insignia azul, el **nombre** en negrita y una **campana** al final. El número va
+delante porque es lo que la gente se sabe de memoria y lo que distingue dos
+paradas que se llaman parecido; antes era texto gris debajo del nombre, donde
+pesaba lo mismo que él. La campana tampoco es un adorno: es lo que anuncia que
+pulsar abre el aviso y no la ficha de la parada, y por eso la segunda línea pone
+«Avisarme del próximo bus».
+
+**Por debajo de 220 dp de ancho esa segunda línea se quita.** En un widget
+estrecho no cabe entera y se quedaba en «Avisarme d…», que no dice nada y encima
+le robaba el sitio al nombre. Y el ancho mínimo al que el lanzador deja
+encogerlo es **180 dp**: más estrecho, la insignia y la campana se comen la fila
+y el nombre desaparece del todo.
+
+Las paradas van **centradas en vertical**. Las alturas de la rejilla no son
+múltiplos exactos de una fila y siempre sobran dp: repartidos arriba y abajo no
+se notan, amontonados al final dejaban el widget cojo.
+
+### Verlo sin arrastrarlo al escritorio
+
+Mirar un cambio de estética en el widget de verdad cuesta una instalación, una
+visita al selector de widgets y un arrastre por cada tamaño y cada tema. La
+compilación de **debug** trae una actividad que dibuja los mismos layouts a los
+tamaños de la rejilla, todos en una pantalla:
+
+```bash
+cd android && gradlew installDebug
+adb shell am start -n com.icuas.bussalamanca/com.icuas.salbus.WidgetPreviewActivity
+adb shell cmd uimode night yes   # y el tema oscuro
+```
+
+No es el widget: no hay `RemoteViews` ni `PendingIntent`, porque lo que se
+comprueba es cómo se ve, no a dónde lleva. Las filas se rellenan igual que en
+`FavouritesWidget` y las paradas que caben salen de su misma
+`rowsForHeight`. **Solo existe en debug**: el fusionador de manifiestos la añade
+desde `app/src/debug`, y de la APK de release no forma parte.
+
 ### Por qué el widget no lee las paradas guardadas
 
 Porque no puede. Las favoritas viven en el `localStorage` de la WebView y el

@@ -1718,6 +1718,19 @@ async function main() {
       number(widgetInfo, /minResizeHeight="(\d+)dp"/)
         === number(widgetJava, /MIN_HEIGHT_DP = (\d+)/))
 
+    // Y el ancho mínimo, por lo mismo: es el que decide si al nombre de la
+    // parada le queda sitio una vez puestas la insignia y la campana.
+    check('el ancho mínimo del widget dice lo mismo en los dos sitios',
+      number(widgetInfo, /minResizeWidth="(\d+)dp"/)
+        === number(widgetJava, /MIN_WIDTH_DP = (\d+)/))
+
+    // En un widget estrecho la fila se queda en una línea. Con el umbral por
+    // debajo del ancho mínimo no se estrecharía nunca, y volvería el «Avisarme
+    // d...» que le come el sitio al nombre de la parada.
+    check('el widget más estrecho posible enseña la fila en una sola línea',
+      number(widgetJava, /COMPACT_WIDTH_DP = (\d+)/)
+        > number(widgetJava, /MIN_WIDTH_DP = (\d+)/))
+
     const rowHeight = number(widgetJava, /ROW_HEIGHT_DP = (\d+)/)
     const chrome = number(widgetJava, /CHROME_HEIGHT_DP = (\d+)/)
     const minHeight = number(widgetJava, /MIN_HEIGHT_DP = (\d+)/)

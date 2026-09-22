@@ -3,18 +3,23 @@
     Fondo de cada parada. Es un selector para que la pulsacion se vea: un widget
     no tiene estados de foco propios, y sin esto no habria ninguna senal de que
     la fila responde al dedo.
+
+    Lleva borde porque la fila y la caja comparten tono en el tema claro; sin el
+    las paradas se perderian dentro del widget.
 -->
 <selector xmlns:android="http://schemas.android.com/apk/res/android">
     <item android:state_pressed="true">
         <shape android:shape="rectangle">
-            <solid android:color="@color/widget_border" />
-            <corners android:radius="14dp" />
+            <solid android:color="@color/widget_press" />
+            <corners android:radius="16dp" />
+            <stroke android:width="1dp" android:color="@color/widget_press" />
         </shape>
     </item>
     <item>
         <shape android:shape="rectangle">
             <solid android:color="@color/widget_row" />
-            <corners android:radius="14dp" />
+            <corners android:radius="16dp" />
+            <stroke android:width="1dp" android:color="@color/widget_row_border" />
         </shape>
     </item>
 </selector>
