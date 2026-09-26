@@ -132,23 +132,82 @@ export async function showTrackingNotification(payload: TrackingNotification): P
   }
 }
 
+/** Lo necesario para volver a crear un aviso desde el boton "Siguiente bus". */
+export interface NextBusTarget {
+  stopId: string
+  lineId: string
+  directionKey: string | null
+}
+
+const NEXT_BUS_TYPE = 'salbus-next-bus'
+const NEXT_BUS_ACTION = 'next-bus'
+
+let nextBusTypeReady = false
+
+/**
+ * Registra el boton "Siguiente bus" de la notificacion final.
+ *
+ * Es el de la notificacion que publica la web cuando no hay servicio nativo;
+ * el servicio pone el suyo en su propia notificacion.
+ */
+async function ensureNextBusType(): Promise<void> {
+  if (nextBusTypeReady) {
+    return
+  }
+
+  try {
+    await LocalNotifications.registerActionTypes({
+      types: [{ id: NEXT_BUS_TYPE, actions: [{ id: NEXT_BUS_ACTION, title: 'Siguiente bus' }] }],
+    })
+    nextBusTypeReady = true
+  } catch {
+    /* sin boton, el aviso completado sigue saliendo igual */
+  }
+}
+
+/** Avisa cuando se pulsa "Siguiente bus" en una notificacion publicada desde la web. */
+export async function onNextBusAction(handler: (target: NextBusTarget) => void): Promise<void> {
+  if (!isNative()) {
+    return
+  }
+
+  try {
+    await LocalNotifications.addListener('localNotificationActionPerformed', (event) => {
+      const target = event.notification?.extra?.nextBus as NextBusTarget | undefined
+      if (event.actionId === NEXT_BUS_ACTION && target?.stopId && target.lineId) {
+        void LocalNotifications.cancel({ notifications: [{ id: event.notification.id }] }).catch(() => {})
+        handler(target)
+      }
+    })
+  } catch {
+    /* ignorado a proposito */
+  }
+}
+
 /**
  * Aviso puntual de que un autobus ya ha pasado.
  *
  * Se reutiliza siempre el mismo `id` a lo largo de un seguimiento para que cada
  * paso sustituya al anterior en lugar de apilar avisos sueltos.
+ *
+ * @param nextBus Solo en el aviso completado: pone el boton "Siguiente bus",
+ *     que vuelve a crear el aviso que acaba de borrarse.
  */
 export async function showArrivalAlert(
   id: number,
   lineId: string,
   stopName: string,
   progress?: { seen: number, target: number },
+  nextBus?: NextBusTarget,
 ): Promise<void> {
   if (!isNative()) {
     return
   }
 
   await ensureChannel()
+  if (nextBus) {
+    await ensureNextBusType()
+  }
 
   const done = progress ? progress.seen >= progress.target : true
 
@@ -173,6 +232,9 @@ export async function showArrivalAlert(
           smallIcon: SMALL_ICON,
           ongoing: false,
           autoCancel: true,
+          ...(nextBus && nextBusTypeReady
+            ? { actionTypeId: NEXT_BUS_TYPE, extra: { nextBus } }
+            : {}),
         },
       ],
     })

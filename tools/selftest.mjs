@@ -868,6 +868,45 @@ async function main() {
     service.includes('static String[] readStoredMonitors(Context context)')
       && service.includes('storeMonitors(this, incoming)'))
 
+  // "Siguiente bus": el aviso completado se borra para no ocupar hueco, y solo
+  // sigue si se pulsa el boton de su notificacion final.
+  {
+    const plugin = await fs.readFile(
+      path.join(projectRoot, 'android', 'app', 'src', 'main', 'java', 'com', 'icuas',
+        'salbus', 'BusTrackingPlugin.java'),
+      'utf8',
+    )
+    const finishBody = /private void finish\(Job job, int slot\) \{[\s\S]*?\n    \}/.exec(service)?.[0] ?? ''
+
+    check('el aviso completado ofrece "Siguiente bus"',
+      finishBody.includes('"Siguiente bus"') && finishBody.includes('renewIntent(job, summaryId)'))
+    check('sin pulsarlo, el aviso completado se retira del servicio',
+      finishBody.includes('jobs.remove(job);'))
+    check('con la app cerrada, el aviso completado no se revive al abrirla',
+      finishBody.includes('rememberStopped(job.id)'))
+    check('el boton arranca el servicio aunque este apagado',
+      service.includes('PendingIntent.getForegroundService(this, requestCode, intent, flags)')
+        && service.includes('return renewJob(intent);'))
+    check('el aviso renovado empieza con la cuenta a cero',
+      /job\.lineId, job\.destination, "0",/.test(service))
+    check('el renovado deja de contar como detenido',
+      service.includes('forgetStopped(job.id);'))
+    check('la app recoge los renovados con la app abierta y con ella cerrada',
+      plugin.includes('notifyListeners("jobRenewed", job)')
+        && plugin.includes('public void takeRenewed(PluginCall call)')
+        && mainSource.includes("BusTracking.addListener('jobRenewed'")
+        && mainSource.includes('await BusTracking.takeRenewed()'))
+    // Antes de sincronizar: la primera sincronizacion con la lista antigua lo
+    // quitaria del servicio justo despues de renovarlo.
+    check('los renovados se recogen antes de la primera sincronizacion',
+      /await BusTracking\.takeRenewed\(\)[\s\S]*?await syncTrackingService\(\)/.test(mainSource))
+    check('el sentido elegido viaja con el aviso para no perderlo al renovar',
+      plugin.includes('clean(job.optString("directionKey", ""))')
+        && mainSource.includes("directionKey: job.directionKey ?? '',"))
+    check('sin servicio nativo, la notificacion de la web tambien lleva el boton',
+      /showArrivalAlert\([\s\S]{0,200}\{ stopId: job\.stopId, lineId: job\.lineId, directionKey: job\.directionKey \}/.test(mainSource))
+  }
+
   /* ---------------------------------------------------------------- *
    * 9 · Mapas: cercanas y rutas (experimental)                         *
    * ---------------------------------------------------------------- */

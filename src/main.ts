@@ -33,6 +33,7 @@ import {
   ensureNotificationPermission,
   isNative,
   notificationId,
+  onNextBusAction,
   showArrivalAlert,
   showOngoingNotification,
   showTrackingNotification,
@@ -190,6 +191,20 @@ interface TrackingJobPayload {
   busesSeen: number
   /** Paradas anteriores del recorrido, de la mas cercana a la mas lejana. */
   routeStops: string[]
+  /**
+   * Sentido elegido. El servicio no lo usa: lo devuelve tal cual si el aviso se
+   * renueva desde "Siguiente bus", para no tener que volver a preguntarlo.
+   */
+  directionKey: string
+}
+
+/** Un aviso que se vuelve a crear con el botón "Siguiente bus" de su notificación final. */
+interface RenewedJob {
+  id: string
+  stopId: string
+  stopName: string
+  lineId: string
+  directionKey: string | null
 }
 
 /** Un control de puntualidad tal y como lo entiende el servicio nativo. */
@@ -239,6 +254,8 @@ interface BusTrackingPlugin {
 
   /** Entrega los pasos medidos en segundo plano Y los borra: solo se leen una vez. */
   takePasses(): Promise<{ passes: NativePass[] }>
+  /** Avisos renovados con "Siguiente bus" con la app cerrada. Se leen una sola vez. */
+  takeRenewed(): Promise<{ jobs: RenewedJob[] }>
   addListener(
     event: 'arrivalUpdate',
     handler: (update: TrackingUpdate) => void,
@@ -259,6 +276,10 @@ interface BusTrackingPlugin {
   addListener(
     event: 'jobStopped',
     handler: (update: { jobId: string }) => void,
+  ): Promise<{ remove: () => Promise<void> }>
+  addListener(
+    event: 'jobRenewed',
+    handler: (update: RenewedJob) => void,
   ): Promise<{ remove: () => Promise<void> }>
 }
 
@@ -1506,6 +1527,7 @@ async function syncTrackingService(): Promise<void> {
         // El servicio las recorre en ese orden y para en la primera que tenga
         // el autobús encima: la más cercana que lo tenga es donde está.
         routeStops: trackingRouteStops(job),
+        directionKey: job.directionKey ?? '',
       })),
       monitors: monitors.map((monitor) => ({
         id: monitor.id,
@@ -1672,22 +1694,7 @@ async function createTracking(
     return
   }
 
-  const job: TrackingJob = {
-    id,
-    stopId,
-    stopName: stopName(stopId),
-    lineId,
-    directionKey: resolveTrackingDirection(stopId, lineId, directionKey),
-    active: true,
-    startedAt: Date.now(),
-    lastMinutes: null,
-    lastNotifiedAt: 0,
-    armed: false,
-    missingStreak: 0,
-    busesSeen: 0,
-    warnedAt3: false,
-  }
-
+  const job = newTrackingJob(stopId, lineId, directionKey)
   state.trackings = [...state.trackings, job]
 
   // El recién creado es el que interesa: si con él se pasa del tope de avisos
@@ -1707,6 +1714,82 @@ async function createTracking(
 
   await syncTrackingService()
   await refreshOneStop(stopId)
+}
+
+function newTrackingJob(stopId: string, lineId: string, directionKey?: string): TrackingJob {
+  return {
+    id: `${stopId}|${lineId}`,
+    stopId,
+    stopName: stopName(stopId),
+    lineId,
+    directionKey: resolveTrackingDirection(stopId, lineId, directionKey),
+    active: true,
+    startedAt: Date.now(),
+    lastMinutes: null,
+    lastNotifiedAt: 0,
+    armed: false,
+    missingStreak: 0,
+    busesSeen: 0,
+    warnedAt3: false,
+  }
+}
+
+/**
+ * "Siguiente bus": vuelve a crear un aviso que acaba de completarse.
+ *
+ * Al terminar, el aviso se borra para no ocupar uno de los dos huecos; este
+ * botón de la notificación final es la única forma de que siga. Con el
+ * servicio nativo, él ya lo ha puesto en marcha y aquí solo se refleja; sin él,
+ * se crea como cualquier aviso nuevo.
+ *
+ * @param sync `false` durante la reconexión al abrir la app, que sincroniza
+ *     una sola vez al final.
+ */
+async function renewTracking(renewed: RenewedJob, sync = true): Promise<void> {
+  let job = trackingById(renewed.id)
+
+  if (!job) {
+    // Mientras tanto se ha creado otro aviso y no queda hueco. La
+    // sincronización lo retira también del servicio.
+    if (state.trackings.length >= MAX_TRACKING_JOBS) {
+      log('warn', 'aviso', `No se pudo renovar el aviso de la línea ${renewed.lineId}: no queda hueco.`)
+      showToast(`No hay hueco para seguir la línea ${renewed.lineId}: ya tienes ${MAX_TRACKING_JOBS} avisos`, 'error')
+      if (sync) {
+        await syncTrackingService()
+      }
+      return
+    }
+
+    job = newTrackingJob(renewed.stopId, renewed.lineId, renewed.directionKey ?? undefined)
+    state.trackings = [...state.trackings, job]
+  } else {
+    // Pulsado dos veces, o reentregado por el sistema: se reinicia la cuenta.
+    job.active = true
+    job.busesSeen = 0
+    job.armed = false
+    job.lastMinutes = null
+    job.missingStreak = 0
+    job.warnedAt3 = false
+  }
+
+  // Lo recién renovado es lo último que se ha tocado: si hay otro activo, se
+  // pausa, igual que al crear o reanudar uno.
+  const turnedOff = enforceActiveLimit(job.id)
+  persistTrackings()
+
+  log('info', 'aviso', `Aviso renovado con el siguiente bus: línea ${job.lineId} en ${job.stopName}.`)
+  showToast(
+    turnedOff.length > 0
+      ? 'Siguiente bus en marcha; se ha pausado el otro aviso'
+      : `Te avisaremos del siguiente bus de la línea ${job.lineId}`,
+    'success',
+  )
+
+  if (sync) {
+    await syncTrackingService()
+    render()
+    await refreshOneStop(job.stopId)
+  }
 }
 
 /** Quita un aviso por completo (ya no existe ni en reposo). */
@@ -1780,6 +1863,12 @@ async function restoreTrackingService(): Promise<void> {
   if (!isNative()) {
     return
   }
+
+  // "Siguiente bus" de la notificación que publica la propia web cuando no hay
+  // servicio nativo. Con servicio, el botón es suyo y llega por `jobRenewed`.
+  void onNextBusAction((renewed) => {
+    void renewTracking({ ...renewed, id: `${renewed.stopId}|${renewed.lineId}`, stopName: stopName(renewed.stopId) })
+  })
 
   try {
     await BusTracking.addListener('arrivalUpdate', (update) => {
@@ -1927,6 +2016,11 @@ async function restoreTrackingService(): Promise<void> {
       void removeTracking(update.jobId, false)
     })
 
+    // "Siguiente bus" con la app abierta: el servicio ya lo ha puesto en marcha.
+    await BusTracking.addListener('jobRenewed', (update) => {
+      void renewTracking(update)
+    })
+
     const status = await BusTracking.status()
 
     // Un aviso que se detuvo desde su notificación NO se revive: antes se
@@ -1940,6 +2034,13 @@ async function restoreTrackingService(): Promise<void> {
         log('info', 'aviso', `${removed.length} aviso(s) detenidos desde la notificación.`)
       }
       await BusTracking.clearStopped()
+    }
+
+    // Y al revés: los renovados con "Siguiente bus" con la app cerrada. Van
+    // antes de sincronizar, que si no los quitaría del servicio.
+    const { jobs: renewed } = await BusTracking.takeRenewed()
+    for (const job of renewed) {
+      await renewTracking(job, false)
     }
 
     // Los avisos que ya vieron sus tres autobuses con la app cerrada se cierran
@@ -2118,10 +2219,13 @@ async function finishTracking(id: string, alreadyNotified = false): Promise<void
   const target = trackingBusTarget()
 
   if (!alreadyNotified) {
-    await showArrivalAlert(notificationId(`${job.id}|done`), job.lineId, job.stopName, {
-      seen: target,
-      target,
-    })
+    await showArrivalAlert(
+      notificationId(`${job.id}|done`),
+      job.lineId,
+      job.stopName,
+      { seen: target, target },
+      { stopId: job.stopId, lineId: job.lineId, directionKey: job.directionKey },
+    )
   }
 
   const cuantos = target > 1 ? `${target} autobuses` : 'el autobús'
