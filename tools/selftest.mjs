@@ -1478,6 +1478,19 @@ async function main() {
     check('con dos "llegando" gana el más avanzado del recorrido',
       locateBus([0, 5, 6, 1, 8]) === 3)
 
+    // Paradas seguidas y cercanas: el mismo autobus sale "llegando" en dos o
+    // tres a la vez. Esta en la mas lejana de ese tramo, no en la mas avanzada.
+    check('con dos "llegando" seguidos, el autobús está en el más lejano',
+      locateBus([9, 7, 1, 0, 3]) === 2)
+    check('con tres "llegando" seguidos, también en el más lejano',
+      locateBus([9, 1, 0, 1, 4]) === 1)
+    check('el tramo puede acabar en tu propia parada',
+      locateBus([9, 7, 5, 1, 0]) === 3)
+    check('un tramo rezagado más atrás no cuenta',
+      locateBus([1, 0, 6, 1, 0, 8]) === 3)
+    check('un hueco sin dato corta el tramo',
+      locateBus([9, 1, null, 0, 5]) === 3)
+
     check('el autobús en tu propia parada son cero paradas',
       stopsAwayFrom(5, 4) === 0)
     check('una parada antes es una parada',
@@ -1546,6 +1559,7 @@ async function main() {
       check('el servicio busca desde la parada más cercana hacia atrás',
         service.includes('found = index + 1;')
           && service.includes('job.stopsAway = found;')
+          && service.includes('if (atStop && (found < 0 || runOpen))')
           && service.includes('for (int index = 0; index < depth; index += 1)'))
       // Y sale en cuanto lo encuentra... salvo con la pantalla Seguir delante,
       // que dibuja las ocho paradas y por tanto las necesita todas.

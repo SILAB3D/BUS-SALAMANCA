@@ -1090,13 +1090,18 @@ public class BusTrackingService extends Service {
         // busqueda se paraba antes de llegar a el, con lo que el aviso se
         // quedaba sin decir por donde venia justo cuando mas se preguntaba.
         //
-        // Lo que sigue acotando el COSTE es la salida anticipada: en cuanto una
-        // parada tiene el autobus encima, las de mas atras ya no cambian la
-        // respuesta. Salvo con la pantalla "Seguir" delante, que dibuja las ocho
-        // y por tanto las necesita todas.
+        // Lo que sigue acotando el COSTE es la salida anticipada: en cuanto se
+        // cierra el tramo de paradas seguidas con el autobus encima, las de mas
+        // atras ya no cambian la respuesta. Salvo con la pantalla "Seguir"
+        // delante, que dibuja las ocho y por tanto las necesita todas.
         boolean watching = routeWatch;
         int depth = job.route.length;
         int found = -1;
+        // Tramo de paradas SEGUIDAS con el autobus "llegando". Con paradas
+        // cercanas el mismo autobus sale en dos o tres a la vez, y se situa en
+        // la mas lejana de ellas: la busqueda no se cierra al encontrarlo, sino
+        // en la primera parada de mas atras que ya no lo tiene encima.
+        boolean runOpen = false;
 
         // Con la pantalla "Seguir" delante, el barrido se cuenta MIENTRAS ocurre.
         //
@@ -1134,6 +1139,12 @@ public class BusTrackingService extends Service {
             }
 
             if (result.status != ArrivalsClient.STATUS_OK) {
+                // Una parada sin respuesta corta el tramo: no se puede afirmar
+                // que el autobus siga "llegando" en ella.
+                runOpen = false;
+                if (found > 0 && !watching) {
+                    break;
+                }
                 continue;
             }
 
@@ -1163,10 +1174,16 @@ public class BusTrackingService extends Service {
                 /* una parada sin serializar no invalida el resto del barrido */
             }
 
-            if (found < 0 && arrival != null && (arrival.arriving || arrival.minutes <= 1)) {
-                // La primera que lo tiene encima es la mas avanzada: +1 porque
-                // route[0] es la parada ANTERIOR a la del aviso.
+            boolean atStop = arrival != null && (arrival.arriving || arrival.minutes <= 1);
+
+            if (atStop && (found < 0 || runOpen)) {
+                // La primera que lo tiene encima abre el tramo mas avanzado; las
+                // que siguen hacia atras, seguidas, lo llevan a la mas lejana.
+                // +1 porque route[0] es la parada ANTERIOR a la del aviso.
                 found = index + 1;
+                runOpen = true;
+            } else if (!atStop && found > 0) {
+                runOpen = false;
 
                 if (!watching) {
                     break;

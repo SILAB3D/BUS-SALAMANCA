@@ -1309,8 +1309,13 @@ async function refreshVisible(source: 'auto' | 'manual'): Promise<void> {
     let done = 0
 
     const byStop = new Map(plan.map((entry) => [entry.stopId, entry]))
-    // Avisos cuyo autobús ya ha aparecido en este mismo lote: sus paradas de
-    // más atrás dejan de tener nada que decir y se saltan sin pedirlas.
+    // Avisos cuyo autobús ya ha aparecido en este mismo lote Y cuyo tramo de
+    // "llegando" ya se ha cerrado: sus paradas de más atrás dejan de tener nada
+    // que decir y se saltan sin pedirlas. Mientras el tramo sigue abierto
+    // (`sighted`) hay que mirar la anterior, porque con paradas seguidas y
+    // cercanas el mismo autobús sale "llegando" en varias y se sitúa en la más
+    // lejana de ellas.
+    const sighted = new Set<string>()
     const located = new Set<string>()
 
     const onStart = (stopId: string) => {
@@ -1323,11 +1328,16 @@ async function refreshVisible(source: 'auto' | 'manual'): Promise<void> {
       delete state.stopSync[feed.stopId]
       applyFeed(feed)
 
-      // Aquí es donde se cierra la búsqueda hacia atrás: esta parada tiene el
-      // autobús encima, así que las anteriores de ese aviso ya no hacen falta.
+      // Aquí es donde se cierra la búsqueda hacia atrás: en la primera parada
+      // que ya NO tiene el autobús encima después de haberlo visto. Las de más
+      // atrás de ese aviso ya no cambian la respuesta.
       const scan = byStop.get(feed.stopId)?.scan
-      if (scan && busIsAt(feed.stopId, scan.lineId)) {
-        located.add(scan.jobId)
+      if (scan) {
+        if (busIsAt(feed.stopId, scan.lineId)) {
+          sighted.add(scan.jobId)
+        } else if (sighted.has(scan.jobId)) {
+          located.add(scan.jobId)
+        }
       }
 
       state.refreshQueueLabel =
