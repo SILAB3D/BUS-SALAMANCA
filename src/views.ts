@@ -14,7 +14,11 @@ import {
   ROUTE_WINDOW_STOPS,
   stopsAwayFrom,
 } from './services/bus-position'
-import { currentDayType } from './services/schedule'
+import {
+  currentDayType,
+  estimateArrivalsFromSchedule,
+  SCHEDULE_ESTIMATE_ERROR_MINUTES,
+} from './services/schedule'
 import {
   activeJobCount,
   APP_VERSION,
@@ -1584,7 +1588,19 @@ function renderArrivals(stopId: string, feed: StopFeed | undefined): string {
   }
 
   if (feed.status === 'error') {
-    return notice('error', feed.message ?? 'No se pudo consultar la fuente oficial.')
+    return `
+      ${notice('error', feed.message ?? 'No se pudo consultar la fuente oficial.')}
+      ${renderScheduleFallback(stopId)}
+    `
+  }
+
+  // Saturada y sin ningun dato anterior que enseñar es lo mismo que un fallo:
+  // no hay tiempos, y el horario es lo unico que se puede ofrecer.
+  if (feed.status === 'throttled' && feed.arrivals.length === 0) {
+    return `
+      ${notice('warn', feed.message ?? 'La fuente oficial está limitando las consultas.')}
+      ${renderScheduleFallback(stopId)}
+    `
   }
 
   if (feed.arrivals.length === 0) {
@@ -1620,6 +1636,76 @@ function renderArrivals(stopId: string, feed: StopFeed | undefined): string {
            </button>`
         : ''
     }
+  `
+}
+
+/**
+ * Lo que se ofrece cuando no hay tiempos reales: un boton para ver los pasos del
+ * horario GTFS y, una vez pulsado, esos pasos marcados como estimados.
+ *
+ * No se cargan solos. Un horario puede parecer un tiempo real y no lo es —el
+ * GTFS incluido es teorico y puede ir varios minutos desviado—, asi que tiene
+ * que pedirlo quien mira y leer el aviso. Y tampoco se quedan: en cuanto la
+ * fuente vuelve a contestar, `renderArrivals` enseña los datos reales y el
+ * resto de la app olvida la peticion (`applyFeed`).
+ *
+ * Se calculan al dibujar, con el reloj de ese momento, para que la cuenta atras
+ * avance sola sin guardar nada.
+ */
+function renderScheduleFallback(stopId: string): string {
+  const schedule = state.schedule
+  if (!schedule) {
+    return ''
+  }
+
+  if (!state.scheduleFallbackStops[stopId]) {
+    return `
+      <div class="schedule-fallback">
+        <button class="btn btn-secondary btn-block btn-sm" type="button" data-action="show-schedule-estimate" data-stop="${esc(
+          stopId,
+        )}">
+          ${icon('clock')} Ver tiempos estimados por horario
+        </button>
+      </div>
+    `
+  }
+
+  const lineIds = (state.network?.getLinesForStop(stopId) ?? []).map((line) => line.lineId)
+  const estimates = estimateArrivalsFromSchedule(schedule, stopId, lineIds).slice(0, ARRIVALS_PREVIEW * 2)
+  const warning = notice(
+    'warn',
+    `Tiempos estimados por el horario programado (GTFS), no en tiempo real: pueden desviarse ±${SCHEDULE_ESTIMATE_ERROR_MINUTES} min. Se sustituirán solos cuando vuelva la información actualizada.`,
+  )
+
+  if (estimates.length === 0) {
+    return `
+      <div class="schedule-fallback">
+        ${warning}
+        ${emptyState('clock', 'Sin pasos programados', 'El horario no trae ningún paso por esta parada en la próxima hora y media.')}
+      </div>
+    `
+  }
+
+  return `
+    <div class="schedule-fallback">
+      ${warning}
+      <div class="arrivals is-estimated">
+        ${estimates.map((arrival) => renderEstimatedRow(arrival, stopId)).join('')}
+      </div>
+    </div>
+  `
+}
+
+function renderEstimatedRow(arrival: Arrival, stopId: string): string {
+  return `
+    <article class="arrival is-estimated">
+      ${lineChip(arrival.lineId, lineColor(arrival.lineId))}
+      <div class="arrival-copy">
+        <p class="arrival-dest">${esc(lineOf(arrival.lineId)?.title ?? `Línea ${arrival.lineId}`)}</p>
+        <p class="arrival-meta">${esc(`${describeArrival(stopId, arrival.lineId)} · horario ${arrival.estimatedClock}`)}</p>
+      </div>
+      <div class="arrival-eta"><span class="eta-value">≈${arrival.minutesUntil}</span><span class="eta-unit"> min</span></div>
+    </article>
   `
 }
 

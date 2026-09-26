@@ -1431,6 +1431,13 @@ async function refreshOneStop(stopId: string): Promise<void> {
 function applyFeed(feed: StopFeed): void {
   state.feeds[feed.stopId] = feed
 
+  // Con datos reales otra vez, los del horario sobran: la parada vuelve a
+  // enseñar solo lo que dice la fuente, y un fallo posterior vuelve a ofrecer el
+  // boton en lugar de colar el horario sin que nadie lo pida.
+  if (feed.status === 'ok' || feed.status === 'empty') {
+    delete state.scheduleFallbackStops[feed.stopId]
+  }
+
   if (feed.status === 'error' && feed.message) {
     log('error', `parada ${feed.stopId}`, feed.message)
   }
@@ -2827,6 +2834,11 @@ async function handleAction(action: string, element: HTMLElement): Promise<void>
 
     // Lista de llegadas: las que pasan de ARRIVALS_PREVIEW se piden a mano, y
     // solo una parada a la vez puede estar desplegada.
+    case 'show-schedule-estimate':
+      state.scheduleFallbackStops[stopId] = true
+      render()
+      return
+
     case 'expand-arrivals':
       state.arrivalsExpandedStopId = stopId
       render()

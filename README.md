@@ -104,8 +104,11 @@ acaba de terminar está a veinte metros pero no sale hasta dentro de nueve
 minutos. Hace falta además que quede un minuto o menos.
 
 > El GTFS incluido declara servicio del 2026-03-16 al 2026-03-31. Está caducado y
-> la app lo advierte: solo se usa como horario teórico en la pantalla de
-> puntualidad, nunca como tiempo de llegada.
+> la app lo advierte: se usa como horario teórico en la pantalla de
+> puntualidad y, **solo si se pide a mano**, como estimación de llegada en una
+> parada cuya fuente en vivo no contesta (botón «Ver tiempos estimados por
+> horario», marcado ±5 min). Esas estimaciones nunca se mezclan con tiempos
+> reales y desaparecen en cuanto la parada vuelve a recibir datos de la fuente.
 
 ## Ritmo de consultas a la fuente
 
