@@ -82,7 +82,8 @@ public class BusTrackingPlugin extends Plugin {
                         lineId,
                         clean(job.optString("destination", "")),
                         String.valueOf(job.optInt("busesSeen", 0)),
-                        joinStops(job.optJSONArray("routeStops"))));
+                        joinStops(job.optJSONArray("routeStops")),
+                        clean(job.optString("directionKey", ""))));
                 }
             } catch (Exception error) {
                 call.reject("Lista de avisos no valida: " + error.getMessage());
@@ -216,6 +217,28 @@ public class BusTrackingPlugin extends Plugin {
         call.resolve(result);
     }
 
+    /**
+     * Avisos renovados con "Siguiente bus" mientras la app estaba cerrada.
+     *
+     * Se entregan y se borran de una vez, como los pasos: la web los vuelve a
+     * crear ANTES de su primera sincronizacion, que si no los quitaria del
+     * servicio.
+     */
+    @PluginMethod
+    public void takeRenewed(PluginCall call) {
+        JSArray jobs = new JSArray();
+        for (String raw : BusTrackingService.takeRenewedJobs(getContext())) {
+            JSObject job = decodeJob(raw);
+            if (job != null) {
+                jobs.put(job);
+            }
+        }
+
+        JSObject result = new JSObject();
+        result.put("jobs", jobs);
+        call.resolve(result);
+    }
+
     /** La web ya ha aplicado las bajas: se olvidan para no repetirlas. */
     @PluginMethod
     public void clearStopped(PluginCall call) {
@@ -326,7 +349,30 @@ public class BusTrackingPlugin extends Plugin {
         notifyListeners("jobStopped", payload);
     }
 
-    /** El separador de campos del intent no puede colarse dentro de un campo. */
+    /** Renovado desde el boton "Siguiente bus" con la app escuchando. */
+    void emitJobRenewed(String raw) {
+        JSObject job = decodeJob(raw);
+        if (job != null) {
+            notifyListeners("jobRenewed", job);
+        }
+    }
+
+    /** Lo que la web necesita para volver a crear un aviso a partir de su cadena. */
+    private static JSObject decodeJob(String raw) {
+        String[] parts = raw.split(java.util.regex.Pattern.quote(BusTrackingService.FIELD_SEPARATOR), 8);
+        if (parts.length < 5 || parts[0].isEmpty()) {
+            return null;
+        }
+
+        JSObject job = new JSObject();
+        job.put("id", parts[0]);
+        job.put("stopId", parts[1]);
+        job.put("stopName", parts[2]);
+        job.put("lineId", parts[3]);
+        job.put("directionKey", parts.length > 7 && !parts[7].isEmpty() ? parts[7] : JSONObject.NULL);
+        return job;
+    }
+
     /**
      * Recorrido de un aviso: ids de parada separados por comas.
      *
@@ -354,6 +400,7 @@ public class BusTrackingPlugin extends Plugin {
         return joined.toString();
     }
 
+    /** El separador de campos del intent no puede colarse dentro de un campo. */
     private static String clean(String value) {
         return value == null ? "" : value.replace(BusTrackingService.FIELD_SEPARATOR, " ");
     }

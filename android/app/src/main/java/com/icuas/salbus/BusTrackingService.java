@@ -83,12 +83,23 @@ public class BusTrackingService extends Service {
      */
     public static final String ACTION_TICK = "com.icuas.salbus.TRACKING_TICK";
 
+    /**
+     * Boton "Siguiente bus" del aviso de completado: vuelve a crear el aviso
+     * que acaba de terminar, con la cuenta a cero.
+     *
+     * Trae el aviso entero en el intent (mismo formato que {@link #EXTRA_JOBS})
+     * porque para entonces el servicio puede estar apagado y sin recuerdo de el.
+     */
+    public static final String ACTION_RENEW_JOB = "com.icuas.salbus.TRACKING_RENEW_JOB";
+
     public static final String EXTRA_JOBS = "jobs";
     public static final String EXTRA_MONITORS = "monitors";
     public static final String EXTRA_JOB_ID = "jobId";
     public static final String EXTRA_INTERVAL = "intervalSeconds";
     public static final String EXTRA_VIBRATE = "vibrateOnApproach";
     public static final String EXTRA_TARGET = "busTarget";
+    public static final String EXTRA_JOB = "job";
+    public static final String EXTRA_NOTIFICATION_ID = "notificationId";
 
     /**
      * Separador de campos de cada aviso dentro del intent.
@@ -236,6 +247,16 @@ public class BusTrackingService extends Service {
     private static final String PREF_STOPPED = "stoppedJobIds";
 
     /**
+     * Avisos renovados con "Siguiente bus" mientras la app no escuchaba.
+     *
+     * Mismo motivo que {@link #PREF_STOPPED}, al reves: al volver a abrirse, la
+     * app no conoceria el aviso renovado y su primera sincronizacion lo borraria
+     * del servicio. Se guarda la cadena completa del aviso para que la app pueda
+     * volver a crearlo tal cual.
+     */
+    private static final String PREF_RENEWED = "renewedJobs";
+
+    /**
      * Pasos de puntualidad detectados que la app aun no ha recogido.
      *
      * Van a disco porque casi siempre se detectan con la app cerrada: es el
@@ -288,6 +309,12 @@ public class BusTrackingService extends Service {
         final String stopName;
         final String lineId;
         final String destination;
+        /**
+         * Sentido elegido en la app. El servicio no lo usa (le llega ya el
+         * recorrido resuelto), solo lo guarda para devolverlo intacto si el
+         * aviso se renueva con "Siguiente bus".
+         */
+        String directionKey = "";
 
         /** Deteccion de pasos: se arma cuando el bus esta encima y se cierra al alejarse. */
         boolean armed = false;
@@ -517,6 +544,39 @@ public class BusTrackingService extends Service {
             .apply();
     }
 
+    /** Un aviso renovado deja de contar como retirado, o la app lo borraria al abrirse. */
+    private void forgetStopped(String jobId) {
+        Set<String> stored = readStoppedIds(this);
+        if (!stored.remove(jobId)) {
+            return;
+        }
+        getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putStringSet(PREF_STOPPED, stored)
+            .apply();
+    }
+
+    /**
+     * Entrega los avisos renovados con la app cerrada Y los borra: se leen una
+     * sola vez, como los pasos de puntualidad.
+     */
+    static synchronized String[] takeRenewedJobs(Context context) {
+        SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        Set<String> stored = prefs.getStringSet(PREF_RENEWED, new LinkedHashSet<String>());
+        prefs.edit().remove(PREF_RENEWED).apply();
+        return stored.toArray(new String[0]);
+    }
+
+    private synchronized void rememberRenewed(String raw) {
+        SharedPreferences prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        Set<String> stored = new LinkedHashSet<>(prefs.getStringSet(PREF_RENEWED, new LinkedHashSet<String>()));
+        String id = raw.split(Pattern.quote(FIELD_SEPARATOR), 2)[0];
+        // Una sola entrada por aviso: pulsar dos veces no crea dos.
+        stored.removeIf((item) -> item.split(Pattern.quote(FIELD_SEPARATOR), 2)[0].equals(id));
+        stored.add(raw);
+        prefs.edit().putStringSet(PREF_RENEWED, stored).apply();
+    }
+
     @Nullable
     @Override
     public IBinder onBind(Intent intent) {
@@ -551,6 +611,10 @@ public class BusTrackingService extends Service {
         if (ACTION_STOP_JOB.equals(intent.getAction())) {
             stopJob(valueOf(intent.getStringExtra(EXTRA_JOB_ID)));
             return START_REDELIVER_INTENT;
+        }
+
+        if (ACTION_RENEW_JOB.equals(intent.getAction())) {
+            return renewJob(intent);
         }
 
         // Despertar de la alarma: empieza una franja de puntualidad. No trae
@@ -674,14 +738,12 @@ public class BusTrackingService extends Service {
                 break;
             }
 
-            String[] parts = raw.split(Pattern.quote(FIELD_SEPARATOR), 7);
-            if (parts.length < 5) {
+            Job job = parseJob(raw);
+            if (job == null) {
                 continue;
             }
-
-            Job job = new Job(parts[0], parts[1], parts[2], parts[3], parts[4]);
-            job.route = parseRoute(parts, 6);
-            Job previous = findJob(parts[0]);
+            String[] parts = raw.split(Pattern.quote(FIELD_SEPARATOR), 8);
+            Job previous = findJob(job.id);
 
             if (previous != null) {
                 job.armed = previous.armed;
@@ -709,6 +771,92 @@ public class BusTrackingService extends Service {
         jobs.clear();
         jobs.addAll(next);
         cancelSpareNotifications();
+    }
+
+    /**
+     * Un aviso a partir de su cadena: id, parada, nombre, linea, destino,
+     * autobuses vistos, recorrido y sentido, separados por FIELD_SEPARATOR. El
+     * sentido es el ultimo porque llego despues: una cadena sin el sigue valiendo.
+     */
+    @Nullable
+    private static Job parseJob(String raw) {
+        String[] parts = raw.split(Pattern.quote(FIELD_SEPARATOR), 8);
+        if (parts.length < 5) {
+            return null;
+        }
+
+        Job job = new Job(parts[0], parts[1], parts[2], parts[3], parts[4]);
+        job.route = parseRoute(parts, 6);
+        job.directionKey = parts.length > 7 ? parts[7] : "";
+        return job;
+    }
+
+    /** La cadena de un aviso recien empezado, con la cuenta de autobuses a cero. */
+    private static String encodeFresh(Job job) {
+        return String.join(FIELD_SEPARATOR,
+            job.id, job.stopId, job.stopName, job.lineId, job.destination, "0",
+            String.join(",", job.route), job.directionKey);
+    }
+
+    /**
+     * "Siguiente bus": el aviso que acaba de completarse vuelve a empezar.
+     *
+     * Sigue la regla de la app de que solo un aviso esta activo a la vez: el
+     * renovado es lo ultimo que se ha tocado, asi que si hubiera otro vivo se
+     * retira del servicio (en la app queda en pausa, no se borra).
+     */
+    private int renewJob(Intent intent) {
+        // Llega por startForegroundService: hay que ponerse en primer plano
+        // enseguida aunque luego resulte que no hay nada que hacer.
+        String raw = valueOf(intent.getStringExtra(EXTRA_JOB));
+        Job job = parseJob(raw);
+
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        int summaryId = intent.getIntExtra(EXTRA_NOTIFICATION_ID, 0);
+        if (manager != null && summaryId != 0) {
+            manager.cancel(summaryId);
+        }
+
+        if (job == null) {
+            if (!running) {
+                // Sin stopEverything: borraria las franjas de puntualidad
+                // guardadas, que no tienen nada que ver con este boton.
+                startInForeground(buildMonitorNotification());
+                stopForeground(Service.STOP_FOREGROUND_REMOVE);
+                stopSelf();
+            }
+            return START_NOT_STICKY;
+        }
+
+        // El servicio puede venir de estar apagado: recupera lo que habia.
+        if (monitors.isEmpty()) {
+            applyMonitors(readStoredMonitors(this));
+        }
+        intervalMs = Math.max(15, intent.getIntExtra(EXTRA_INTERVAL, 15)) * 1000L;
+        vibrateOnApproach = intent.getBooleanExtra(EXTRA_VIBRATE, vibrateOnApproach);
+        targetBuses = Math.min(MAX_TARGET_BUSES, Math.max(1, intent.getIntExtra(EXTRA_TARGET, targetBuses)));
+
+        // Pulsar otra vez (o que el sistema reentregue el intent) no reinicia un
+        // aviso que ya esta en marcha.
+        if (findJob(job.id) == null) {
+            jobs.clear();
+            jobs.add(job);
+            cancelSpareNotifications();
+            forgetStopped(job.id);
+
+            BusTrackingPlugin plugin = listener;
+            if (plugin != null) {
+                plugin.emitJobRenewed(raw);
+            } else {
+                rememberRenewed(raw);
+            }
+        }
+
+        running = true;
+        startInForeground(buildForegroundNotification());
+        worker.removeCallbacksAndMessages(null);
+        worker.post(this::poll);
+        return START_REDELIVER_INTENT;
     }
 
     /**
@@ -1241,8 +1389,15 @@ public class BusTrackingService extends Service {
         return false;
     }
 
-    /** Aviso final y retirada del seguimiento: ha cumplido su objetivo. */
+    /**
+     * Aviso final y retirada del seguimiento: ha cumplido su objetivo.
+     *
+     * El aviso se BORRA, no se pausa: solo caben dos y uno terminado solo
+     * ocuparia un hueco. Quien quiera seguir con el siguiente autobus tiene el
+     * boton "Siguiente bus" en la propia notificacion, que lo vuelve a crear.
+     */
     private void finish(Job job, int slot) {
+        int summaryId = SUMMARY_NOTIFICATION_ID + slot;
         NotificationManager manager = getSystemService(NotificationManager.class);
         if (manager != null) {
             Notification summary = new Notification.Builder(this, CHANNEL_ID)
@@ -1254,14 +1409,49 @@ public class BusTrackingService extends Service {
                 .setContentIntent(openAppIntent())
                 .setAutoCancel(true)
                 .setCategory(Notification.CATEGORY_TRANSPORT)
+                .addAction(new Notification.Action.Builder(
+                    null, "Siguiente bus", renewIntent(job, summaryId)).build())
                 .build();
-            manager.notify(SUMMARY_NOTIFICATION_ID + slot, summary);
+            manager.notify(summaryId, summary);
         }
 
         jobs.remove(job);
         cancelSpareNotifications();
+
+        BusTrackingPlugin plugin = listener;
+        if (plugin == null) {
+            // Nadie escucha (la app se cerro del todo): se anota como retirado
+            // para que al abrirla no lo reviva con la cuenta antigua.
+            rememberStopped(job.id);
+        }
         // La UI lo lee de `finished` para cerrar el aviso en pantalla.
         notifyUi(job, ArrivalsClient.STATUS_OK, -1, false, true);
+    }
+
+    /**
+     * Boton "Siguiente bus". Lleva el aviso entero y los ajustes con que corria:
+     * al pulsarlo el servicio puede estar apagado y no recordar nada.
+     */
+    private PendingIntent renewIntent(Job job, int summaryId) {
+        Intent intent = new Intent(this, BusTrackingService.class);
+        intent.setAction(ACTION_RENEW_JOB);
+        intent.putExtra(EXTRA_JOB, encodeFresh(job));
+        intent.putExtra(EXTRA_NOTIFICATION_ID, summaryId);
+        intent.putExtra(EXTRA_INTERVAL, (int) (intervalMs / 1000L));
+        intent.putExtra(EXTRA_VIBRATE, vibrateOnApproach);
+        intent.putExtra(EXTRA_TARGET, targetBuses);
+
+        // requestCode propio por ranura y distinto del de "Detener", para que un
+        // boton no herede los extras de otro.
+        int requestCode = 2000 + summaryId;
+        int flags = PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT;
+
+        // Con el servicio apagado hay que arrancarlo en primer plano: un
+        // startService normal lo rechaza Android 8+ desde segundo plano.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            return PendingIntent.getForegroundService(this, requestCode, intent, flags);
+        }
+        return PendingIntent.getService(this, requestCode, intent, flags);
     }
 
     /**
