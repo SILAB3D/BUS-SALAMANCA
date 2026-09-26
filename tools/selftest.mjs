@@ -379,7 +379,9 @@ async function main() {
   section('6 · Horario programado por sentido')
 
   const { buildNetwork } = await import(pathToUrl(path.join(build, 'network.js')))
-  const { loadSchedule, currentDayType } = await import(pathToUrl(path.join(build, 'schedule.js')))
+  const { loadSchedule, currentDayType, estimateArrivalsFromSchedule } = await import(
+    pathToUrl(path.join(build, 'schedule.js')),
+  )
 
   const server = await serveDirectory(path.join(projectRoot, 'public'))
   try {
@@ -424,6 +426,41 @@ async function main() {
     check('las horas vienen en formato HH:MM ordenadas', times.every((clock) => /^\d{2}:\d{2}$/.test(clock))
       && times.join() === [...times].sort().join())
     check('el tipo de dia actual es uno de los tres', ['weekday', 'saturday', 'sunday'].includes(currentDayType()))
+
+    // Estimacion por horario cuando no hay tiempos reales. Un martes a las 10:00
+    // la linea 4 pasa por la 222 varias veces en hora y media.
+    const tuesday = new Date(2026, 8, 22, 10, 0)
+    const estimates = estimateArrivalsFromSchedule(schedule, '222', ['4'], tuesday)
+    check('el horario da pasos estimados de la linea 4 en la 222', estimates.length > 0, `${estimates.length} pasos`)
+    check('como mucho tres pasos por linea', estimates.length <= 3)
+    check(
+      'los pasos estimados estan dentro de la hora y media y ordenados',
+      estimates.every((item, index) => item.minutesUntil >= 0 && item.minutesUntil <= 90
+        && (index === 0 || estimates[index - 1].minutesUntil <= item.minutesUntil)),
+    )
+    check(
+      'la hora estimada cuadra con los minutos que faltan',
+      estimates.every((item) => {
+        const [h, m] = item.estimatedClock.split(':').map(Number)
+        return h * 60 + m === 600 + item.minutesUntil
+      }),
+    )
+    check(
+      'cada paso estimado existe en el horario programado',
+      estimates.every((item) => times.includes(item.estimatedClock)),
+    )
+    check(
+      'una linea que no pasa por la parada no da estimaciones',
+      estimateArrivalsFromSchedule(schedule, '222', ['no-existe'], tuesday).length === 0,
+    )
+
+    // Cerca de medianoche se cuentan los pasos del dia siguiente.
+    const lastWeekday = times[times.length - 1]
+    const [lastH, lastM] = lastWeekday.split(':').map(Number)
+    const beforeLast = new Date(2026, 8, 22, lastH, lastM - 10)
+    const lateEstimates = estimateArrivalsFromSchedule(schedule, '222', ['4'], beforeLast)
+    check('el ultimo paso del dia sale diez minutos antes', lateEstimates.some((item) => item.minutesUntil === 10),
+      `ultimo ${lastWeekday}: ${lateEstimates.map((item) => item.estimatedClock).join(', ')}`)
   } finally {
     await server.close()
   }

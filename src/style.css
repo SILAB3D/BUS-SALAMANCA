@@ -695,6 +695,25 @@ button.card-head {
   border-color: color-mix(in srgb, var(--warn) 32%, transparent);
 }
 
+/* Pasos del horario GTFS cuando la fuente en vivo no contesta. Borde
+   discontinuo y cifra atenuada: tienen que leerse de un vistazo como estimados,
+   no como un tiempo real. */
+.schedule-fallback {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.arrival.is-estimated {
+  background: transparent;
+  border: 1px dashed var(--text-3);
+}
+
+.arrival.is-estimated .eta-value {
+  color: var(--text-2);
+}
+
 .arrival-copy {
   flex: 1;
   min-width: 0;

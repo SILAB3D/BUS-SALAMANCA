@@ -2,14 +2,16 @@ import JSZip from 'jszip'
 import Papa from 'papaparse'
 
 import type { Network } from './network'
-import type { ScheduleDataset, ServiceDayType } from '../types'
+import type { Arrival, ScheduleDataset, ServiceDayType } from '../types'
 
 /**
  * Horario programado a partir del GTFS estatico (`public/data/gtfs.zip`).
  *
- * Solo se usa como REFERENCIA de horario teorico (columna "hora prevista" de la
- * monitorizacion). Los tiempos que se muestran como llegadas provienen siempre de
- * la fuente en tiempo real; nunca se mezclan ambos origenes.
+ * Se usa como REFERENCIA de horario teorico (columna "hora prevista" de la
+ * monitorizacion). Los tiempos que se muestran como llegadas provienen de la
+ * fuente en tiempo real; solo cuando esta no contesta, y a peticion, la parada
+ * enseña los pasos del horario marcados como estimados
+ * (`estimateArrivalsFromSchedule`). Nunca se mezclan ambos origenes.
  *
  * Nota: el feed distribuido declara servicio dia a dia en `calendar_dates.txt` con
  * un `service_id` distinto por fecha, por lo que caduca. `stale` avisa de ello.
@@ -342,4 +344,81 @@ export function currentDayType(reference = new Date()): ServiceDayType {
     return 'saturday'
   }
   return 'weekday'
+}
+
+/** Margen con el que se avisa de que una estimacion por horario puede fallar. */
+export const SCHEDULE_ESTIMATE_ERROR_MINUTES = 5
+
+/**
+ * Proximos pasos programados de las lineas de una parada, con la forma de una
+ * llegada.
+ *
+ * Es el recurso para cuando la fuente en tiempo real no contesta: la persona lo
+ * pide a mano en la parada y la pantalla lo marca como estimado (+/- 5 min).
+ * Nunca se mezcla con llegadas reales: en cuanto la fuente vuelve a dar datos,
+ * la parada vuelve a enseñar solo esos.
+ *
+ * Cerca de medianoche se miran tambien los pasos del dia siguiente con SU tipo
+ * de dia, y las horas de madrugada del dia de hoy (los "25:10" del GTFS, que
+ * `toClock` deja en "01:10" y pertenecen al servicio del dia que empezo).
+ */
+export function estimateArrivalsFromSchedule(
+  schedule: ScheduleDataset,
+  stopId: string,
+  lineIds: string[],
+  now = new Date(),
+  horizonMinutes = 90,
+  perLine = 3,
+): Arrival[] {
+  const nowMinutes = now.getHours() * 60 + now.getMinutes()
+  const today = currentDayType(now)
+  const tomorrow = currentDayType(new Date(now.getTime() + 24 * 60 * 60_000))
+  const result: Arrival[] = []
+
+  for (const lineId of lineIds) {
+    const minutesAhead = new Set<number>()
+
+    for (const clock of schedule.getScheduledTimes(stopId, lineId, today)) {
+      const at = clockToMinutes(clock)
+      const diff = at - nowMinutes
+      if (diff >= 0 && diff <= horizonMinutes) {
+        minutesAhead.add(diff)
+      } else if (at < 5 * 60 && diff + 1440 <= horizonMinutes) {
+        minutesAhead.add(diff + 1440)
+      }
+    }
+
+    if (nowMinutes + horizonMinutes >= 1440) {
+      for (const clock of schedule.getScheduledTimes(stopId, lineId, tomorrow)) {
+        const diff = clockToMinutes(clock) + 1440 - nowMinutes
+        if (diff <= horizonMinutes) {
+          minutesAhead.add(diff)
+        }
+      }
+    }
+
+    const next = Array.from(minutesAhead).sort((left, right) => left - right).slice(0, perLine)
+    for (const minutesUntil of next) {
+      result.push({
+        stopId,
+        lineId,
+        minutesUntil,
+        status: 'scheduled',
+        estimatedClock: formatMinutesOfDay(nowMinutes + minutesUntil),
+        observedAt: now.getTime(),
+      })
+    }
+  }
+
+  return result.sort((left, right) => left.minutesUntil - right.minutesUntil)
+}
+
+function clockToMinutes(clock: string): number {
+  const [hours, minutes] = clock.split(':').map((part) => Number.parseInt(part, 10))
+  return hours * 60 + minutes
+}
+
+function formatMinutesOfDay(total: number): string {
+  const wrapped = ((total % 1440) + 1440) % 1440
+  return `${String(Math.floor(wrapped / 60)).padStart(2, '0')}:${String(wrapped % 60).padStart(2, '0')}`
 }

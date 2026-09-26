@@ -327,6 +327,12 @@ export interface AppState {
   toast: { message: string, tone: 'info' | 'error' | 'success' } | null
 
   feeds: Record<string, StopFeed>
+  /**
+   * Paradas en las que se han pedido los pasos del horario GTFS porque la fuente
+   * en tiempo real no contestaba. Solo en memoria: se borra en cuanto la parada
+   * vuelve a recibir datos reales, y el siguiente fallo vuelve a ofrecer el boton.
+   */
+  scheduleFallbackStops: Record<string, true>
   /** Paradas en cola o en curso dentro del ciclo de refresco actual. */
   stopSync: Record<string, StopSyncPhase>
   refreshing: boolean
@@ -702,6 +708,7 @@ export const state: AppState = {
   toast: null,
 
   feeds: {},
+  scheduleFallbackStops: {},
   stopSync: {},
   refreshing: false,
   refreshQueueLabel: null,
