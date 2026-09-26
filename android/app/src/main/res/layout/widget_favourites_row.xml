@@ -3,85 +3,98 @@
     Una parada del widget. Pulsarla abre SALBUS directamente en "Avisarme del
     proximo bus" de ESA parada.
 
-    ALTURA: 8+8 dp de relleno, dos lineas de texto y 6 dp hasta la siguiente
-    parada suman los 56 dp que FavouritesWidget.ROW_HEIGHT_DP usa para decidir
-    cuantas caben. Tocar rellenos o tamanos de letra aqui obliga a repasar esa
-    constante, o el widget dibujara mas filas de las que entran.
--->
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    android:id="@+id/widget_row"
-    android:layout_width="match_parent"
-    android:layout_height="wrap_content"
-    android:orientation="horizontal"
-    android:gravity="center_vertical"
-    android:background="@drawable/widget_row_background"
-    android:paddingStart="8dp"
-    android:paddingEnd="8dp"
-    android:paddingTop="8dp"
-    android:paddingBottom="8dp"
-    android:layout_marginBottom="6dp">
+    ALTURA ELASTICA: la raiz es un hueco con peso 1 dentro de `widget_rows`, asi
+    que las paradas que se ensenan se reparten el alto entero del widget y no
+    queda espacio vacio debajo, tenga el widget el tamano que tenga. La
+    separacion entre paradas es el relleno superior del hueco, que
+    FavouritesWidget quita en la primera. El tamano de letra, las lineas del
+    nombre y si se ve la linea de accion tambien los decide FavouritesWidget
+    segun el alto que le toque a cada parada (FavouritesWidget.fit).
 
-    <!--
-        Numero de parada. Es el dato con el que se piden los tiempos y el que la
-        gente se sabe de memoria, asi que va delante y en insignia; antes era
-        texto gris en la segunda linea, donde pesaba lo mismo que el nombre.
-    -->
-    <TextView
-        android:id="@+id/widget_row_badge"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:minWidth="34dp"
-        android:background="@drawable/widget_badge"
-        android:gravity="center"
-        android:paddingStart="6dp"
-        android:paddingEnd="6dp"
-        android:paddingTop="5dp"
-        android:paddingBottom="5dp"
-        android:textColor="@color/widget_brand"
-        android:textSize="13sp"
-        android:textStyle="bold"
-        android:maxLines="1" />
+    FavouritesWidget.MIN_ROW_DP es lo minimo que necesita la fila tal y como
+    esta escrita aqui: tocar rellenos o tamanos de letra obliga a repasarla.
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_row_slot"
+    android:layout_width="match_parent"
+    android:layout_height="0dp"
+    android:layout_weight="1"
+    android:paddingTop="6dp">
 
     <LinearLayout
-        android:layout_width="0dp"
-        android:layout_height="wrap_content"
-        android:layout_weight="1"
-        android:layout_marginStart="10dp"
-        android:orientation="vertical">
-
-        <TextView
-            android:id="@+id/widget_row_name"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:textColor="@color/widget_text"
-            android:textSize="14sp"
-            android:textStyle="bold"
-            android:maxLines="1"
-            android:ellipsize="end" />
+        android:id="@+id/widget_row"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:background="@drawable/widget_row_background"
+        android:paddingStart="10dp"
+        android:paddingEnd="8dp"
+        android:paddingTop="6dp"
+        android:paddingBottom="6dp">
 
         <!--
-            Que hace la fila, no de que parada es: el numero ya esta en la
-            insignia y repetirlo aqui dejaba sin explicar por que hay una
-            campana al final.
+            Numero de parada. Es el dato con el que se piden los tiempos y el que la
+            gente se sabe de memoria, asi que va delante y en insignia; antes era
+            texto gris en la segunda linea, donde pesaba lo mismo que el nombre.
         -->
         <TextView
-            android:id="@+id/widget_row_meta"
-            android:layout_width="match_parent"
+            android:id="@+id/widget_row_badge"
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="@string/widget_row_action"
-            android:textColor="@color/widget_text_soft"
-            android:textSize="11sp"
-            android:maxLines="1"
-            android:ellipsize="end" />
-    </LinearLayout>
+            android:minWidth="34dp"
+            android:background="@drawable/widget_badge"
+            android:gravity="center"
+            android:paddingStart="6dp"
+            android:paddingEnd="6dp"
+            android:paddingTop="5dp"
+            android:paddingBottom="5dp"
+            android:textColor="@color/widget_brand"
+            android:textSize="13sp"
+            android:textStyle="bold"
+            android:maxLines="1" />
 
-    <ImageView
-        android:id="@+id/widget_row_icon"
-        android:layout_width="28dp"
-        android:layout_height="28dp"
-        android:layout_marginStart="6dp"
-        android:background="@drawable/widget_icon_circle"
-        android:padding="6dp"
-        android:contentDescription="@string/widget_row_action"
-        android:src="@drawable/widget_bell" />
-</LinearLayout>
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="10dp"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/widget_row_name"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textColor="@color/widget_text"
+                android:textSize="14sp"
+                android:textStyle="bold"
+                android:maxLines="1"
+                android:ellipsize="end" />
+
+            <!--
+                Que hace la fila, no de que parada es: el numero ya esta en la
+                insignia y repetirlo aqui dejaba sin explicar por que hay una
+                campana al final.
+            -->
+            <TextView
+                android:id="@+id/widget_row_meta"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/widget_row_action"
+                android:textColor="@color/widget_text_soft"
+                android:textSize="11sp"
+                android:maxLines="1"
+                android:ellipsize="end" />
+        </LinearLayout>
+
+        <ImageView
+            android:id="@+id/widget_row_icon"
+            android:layout_width="28dp"
+            android:layout_height="28dp"
+            android:layout_marginStart="6dp"
+            android:background="@drawable/widget_icon_circle"
+            android:padding="6dp"
+            android:contentDescription="@string/widget_row_action"
+            android:src="@drawable/widget_bell" />
+    </LinearLayout>
+</FrameLayout>

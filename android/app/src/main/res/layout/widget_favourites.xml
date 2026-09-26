@@ -14,7 +14,10 @@
     android:background="@drawable/widget_background"
     android:padding="10dp">
 
-    <!-- Cabecera: solo cabe a partir de dos filas, asi que se oculta en el tamano minimo. -->
+    <!--
+        Cabecera. FavouritesWidget la oculta cuando quitarla deja sitio para
+        una parada guardada mas: una parada vale mas que el titulo.
+    -->
     <LinearLayout
         android:id="@+id/widget_header"
         android:layout_width="match_parent"
@@ -53,11 +56,12 @@
     <!--
         Contenedor de las paradas.
 
-        Ocupa el hueco entero y centra lo que lleve dentro: las alturas de la
-        rejilla del lanzador no son multiplos exactos de una fila y siempre
-        sobran dp, que repartidos arriba y abajo no se notan y amontonados al
-        final dejan el widget cojo. Cuando no hay paradas se oculta desde
-        FavouritesWidget y el hueco pasa entero al mensaje de abajo.
+        Ocupa el hueco entero y las filas que se le anaden llevan peso 1 cada
+        una, asi que se reparten todo el alto: con una parada guardada en un
+        widget de cuatro, esa parada ocupa el widget entero (y con letra mas
+        grande) en vez de quedarse arriba con tres huecos vacios debajo. Cuando
+        no hay paradas se oculta desde FavouritesWidget y el hueco pasa entero
+        al mensaje de abajo.
 
         Arranca oculto por lo mismo que el mensaje arranca visible: este archivo
         es tambien el `previewLayout`, y sin paradas que pintar lo que tiene que
@@ -69,7 +73,6 @@
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
-        android:gravity="center_vertical"
         android:orientation="vertical" />
 
     <!--

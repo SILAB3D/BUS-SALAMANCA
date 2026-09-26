@@ -34,9 +34,9 @@ import java.util.List;
  *
  * NO es el widget de verdad: no hay RemoteViews ni PendingIntent, porque lo que
  * se esta comprobando es como se ve, no a donde lleva. Las filas se rellenan
- * igual que en {@link FavouritesWidget} y el numero de paradas sale de
- * {@link FavouritesWidget#rowsForHeight}, asi que la relacion tamano-filas que
- * se ve aqui es la misma que dara el lanzador.
+ * igual que en {@link FavouritesWidget} y el reparto (cuantas paradas, con que
+ * letra, si va la cabecera) sale de {@link FavouritesWidget#fit}, asi que lo que
+ * se ve aqui es lo mismo que dara el lanzador.
  */
 public class WidgetPreviewActivity extends Activity {
 
@@ -47,6 +47,13 @@ public class WidgetPreviewActivity extends Activity {
         { 320, 250 },
         { 320, 320 },
         { 180, 320 }
+    };
+
+    /** Tamanos grandes con pocas paradas guardadas: donde antes sobraba hueco. */
+    private static final int[][] FEW_STOPS = {
+        { 320, 320, 1 },
+        { 250, 250, 2 },
+        { 180, 180, 1 }
     };
 
     @Override
@@ -65,6 +72,10 @@ public class WidgetPreviewActivity extends Activity {
             addSample(page, size[0], size[1], sampleStops());
         }
 
+        for (int[] sample : FEW_STOPS) {
+            addSample(page, sample[0], sample[1], sampleStops().subList(0, sample[2]));
+        }
+
         // Y el estado sin paradas, que es ademas lo que ensena el selector del
         // lanzador antes de colocar el widget.
         addSample(page, 250, 180, new ArrayList<WidgetStore.Stop>());
@@ -75,14 +86,11 @@ public class WidgetPreviewActivity extends Activity {
     }
 
     private void addSample(LinearLayout page, int widthDp, int heightDp, List<WidgetStore.Stop> stops) {
-        int capacity = FavouritesWidget.rowsForHeight(heightDp);
-        // Mismo umbral que FavouritesWidget.COMPACT_WIDTH_DP.
-        boolean compact = widthDp < 220;
-        int shown = Math.min(capacity, stops.size());
+        FavouritesWidget.Fit fit = FavouritesWidget.fit(widthDp, heightDp, stops.size());
 
         TextView caption = new TextView(this);
-        caption.setText(widthDp + "x" + heightDp + " dp · caben " + capacity + (compact ? " · estrecha" : "")
-            + (stops.isEmpty() ? " · sin paradas guardadas" : " · se ven " + shown));
+        caption.setText(widthDp + "x" + heightDp + " dp · caben " + fit.capacity
+            + (stops.isEmpty() ? " · sin paradas guardadas" : " · se ven " + fit.shown + " de " + fit.rowDp + " dp"));
         caption.setTextColor(Color.WHITE);
         caption.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         caption.setPadding(0, dp(12), 0, dp(6));
@@ -98,14 +106,34 @@ public class WidgetPreviewActivity extends Activity {
         } else {
             rows.setVisibility(View.VISIBLE);
             widget.findViewById(R.id.widget_empty).setVisibility(View.GONE);
+            widget.findViewById(R.id.widget_header).setVisibility(fit.header ? View.VISIBLE : View.GONE);
 
-            for (int index = 0; index < shown; index++) {
+            for (int index = 0; index < fit.shown; index++) {
                 WidgetStore.Stop stop = stops.get(index);
                 View row = LayoutInflater.from(this).inflate(R.layout.widget_favourites_row, rows, false);
 
-                ((TextView) row.findViewById(R.id.widget_row_badge)).setText(stop.id);
-                ((TextView) row.findViewById(R.id.widget_row_name)).setText(stop.label);
-                row.findViewById(R.id.widget_row_meta).setVisibility(compact ? View.GONE : View.VISIBLE);
+                if (index == 0) {
+                    row.setPadding(0, 0, 0, 0);
+                }
+
+                TextView badge = row.findViewById(R.id.widget_row_badge);
+                TextView name = row.findViewById(R.id.widget_row_name);
+                TextView meta = row.findViewById(R.id.widget_row_meta);
+
+                badge.setText(stop.id);
+                name.setText(stop.label);
+                badge.setTextSize(TypedValue.COMPLEX_UNIT_SP, fit.badgeSp);
+                name.setTextSize(TypedValue.COMPLEX_UNIT_SP, fit.nameSp);
+                meta.setTextSize(TypedValue.COMPLEX_UNIT_SP, fit.metaSp);
+                name.setMaxLines(fit.nameLines);
+                badge.setPadding(dp(fit.badgePadH), dp(fit.badgePadV), dp(fit.badgePadH), dp(fit.badgePadV));
+
+                if (fit.metaLines > 0) {
+                    meta.setVisibility(View.VISIBLE);
+                    meta.setMaxLines(fit.metaLines);
+                } else {
+                    meta.setVisibility(View.GONE);
+                }
 
                 rows.addView(row);
             }

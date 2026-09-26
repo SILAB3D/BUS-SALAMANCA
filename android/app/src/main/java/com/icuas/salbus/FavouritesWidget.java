@@ -8,6 +8,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.os.Build;
 import android.os.Bundle;
+import android.util.TypedValue;
 import android.view.View;
 import android.widget.RemoteViews;
 
@@ -19,10 +20,11 @@ import java.util.List;
  * Ensena entre 1 y 4 de las paradas guardadas —las primeras de la lista de la
  * app— y cada una es un atajo a "Avisarme del proximo bus" de ESA parada.
  *
- * CUANTAS SE VEN LO DECIDE EL TAMANO. El widget es redimensionable
- * (`resizeMode` en res/xml/widget_favourites_info.xml) y el lanzador avisa de
- * cada estiron en {@link #onAppWidgetOptionsChanged}; de la altura que reporta
- * sale el numero de filas. No hay ajuste dentro de la app para esto a
+ * CUANTAS SE VEN, Y COMO DE GRANDES, LO DECIDE EL TAMANO. El widget es
+ * redimensionable (`resizeMode` en res/xml/widget_favourites_info.xml) y el
+ * lanzador avisa de cada estiron en {@link #onAppWidgetOptionsChanged}; de la
+ * altura que reporta sale el numero de filas, y las filas se reparten el alto
+ * entero para que no quede espacio vacio (ver {@link #fit}). No hay ajuste dentro de la app para esto a
  * proposito: el tamano ya se elige arrastrando el widget, y tener ademas un
  * numero en Ajustes permitiria pedir cuatro paradas en un widget donde solo
  * caben dos.
@@ -45,14 +47,23 @@ public class FavouritesWidget extends AppWidgetProvider {
     /** Parada elegida, dentro del intent anterior. */
     static final String EXTRA_STOP_ID = "com.icuas.salbus.WIDGET_STOP_ID";
 
-    /*
-     * Altura de una fila de parada, con su separacion: 8+8 dp de relleno, el
-     * nombre a 14sp, la linea de accion a 11sp y 6 dp hasta la siguiente.
+    /**
+     * Alto minimo de una parada, con su separacion: 6 dp hasta la anterior,
+     * 6+6 de relleno y dos lineas de texto (14sp y 11sp). Es lo que se usa para
+     * decidir cuantas caben; lo que sobre se reparte entre ellas. Con las
+     * alturas de la rejilla sale 110dp una, 180dp dos, 250dp tres y 320dp
+     * cuatro.
      */
-    private static final int ROW_HEIGHT_DP = 56;
+    static final int MIN_ROW_DP = 56;
 
-    /** Lo que no son filas: el relleno de la caja (10+10) y la cabecera. */
-    private static final int CHROME_HEIGHT_DP = 44;
+    /** Separacion entre paradas: el relleno superior de widget_row_slot. */
+    private static final int ROW_GAP_DP = 6;
+
+    /** Relleno de la caja del widget, arriba mas abajo (10+10). */
+    private static final int BOX_PADDING_DP = 20;
+
+    /** Alto de la cabecera: el autobus de 16dp y 8dp hasta la primera parada. */
+    private static final int HEADER_DP = 24;
 
     /** Altura minima declarada en res/xml/widget_favourites_info.xml. */
     private static final int MIN_HEIGHT_DP = 110;
@@ -61,13 +72,117 @@ public class FavouritesWidget extends AppWidgetProvider {
     private static final int MIN_WIDTH_DP = 180;
 
     /**
-     * Por debajo de este ancho la fila se queda en una linea.
+     * Por debajo de este ancho la linea de accion solo sale si a la parada le
+     * sobra alto para darle dos lineas.
      *
      * Al nombre de la parada le quedan unos 80 dp cuando el widget mide el
-     * minimo: con la segunda linea puesta, las dos salen cortadas. Sin ella el
-     * nombre sigue cortado a veces, pero es lo unico que se corta.
+     * minimo: con la segunda linea puesta en una sola linea, las dos salen
+     * cortadas.
      */
     private static final int COMPACT_WIDTH_DP = 220;
+
+    /**
+     * Como se reparte el widget para un tamano y un numero de paradas dados.
+     *
+     * La idea es que no quede espacio vacio: las paradas que se ensenan se
+     * reparten el alto entero (llevan peso 1 en el layout) y, cuanto mas alto
+     * le toca a cada una, mas grande es la letra y mas lineas tiene el nombre.
+     * Asi una sola parada guardada en un widget de 4x4 lo llena, en vez de
+     * quedarse arriba con el resto de la caja en blanco.
+     *
+     * Es una clase aparte, y sin nada de Android, para que el banco de pruebas
+     * de debug (WidgetPreviewActivity) dibuje exactamente lo mismo.
+     */
+    static final class Fit {
+        /** Si se ve la cabecera con el titulo. */
+        boolean header;
+        /** Cuantas paradas caben (1 a 4), las haya guardadas o no. */
+        int capacity;
+        /** Cuantas se ensenan de verdad. */
+        int shown;
+        /** Alto que le toca a cada parada, sin la separacion, en dp. */
+        int rowDp;
+
+        float badgeSp;
+        float nameSp;
+        float metaSp;
+        int nameLines;
+        /** 0 = la linea de accion no se ve. */
+        int metaLines;
+        /** Relleno de la insignia, en dp: horizontal y vertical. */
+        int badgePadH;
+        int badgePadV;
+    }
+
+    static Fit fit(int widthDp, int heightDp, int stopCount) {
+        int height = Math.max(heightDp, MIN_HEIGHT_DP);
+        Fit fit = new Fit();
+
+        int withHeader = rowsFor(height - BOX_PADDING_DP - HEADER_DP);
+        int withoutHeader = rowsFor(height - BOX_PADDING_DP);
+
+        // La cabecera solo se sacrifica si con ello se ve una parada guardada
+        // mas; si no, se queda, porque es lo que dice de que app es el widget.
+        fit.header = !(withoutHeader > withHeader && stopCount > withHeader);
+        fit.capacity = fit.header ? withHeader : withoutHeader;
+        fit.shown = Math.max(1, Math.min(fit.capacity, stopCount));
+
+        int rowsArea = height - BOX_PADDING_DP - (fit.header ? HEADER_DP : 0);
+        fit.rowDp = rowsArea / fit.shown - ROW_GAP_DP;
+
+        boolean narrow = widthDp < COMPACT_WIDTH_DP;
+
+        if (fit.rowDp >= 110) {
+            fit.badgeSp = 19;
+            fit.nameSp = 20;
+            fit.metaSp = 13;
+            fit.nameLines = 3;
+            fit.metaLines = 2;
+            fit.badgePadH = 10;
+            fit.badgePadV = 8;
+        } else if (fit.rowDp >= 76) {
+            fit.badgeSp = 16;
+            fit.nameSp = 17;
+            fit.metaSp = 12;
+            fit.nameLines = 2;
+            fit.metaLines = narrow ? 2 : 1;
+            fit.badgePadH = 8;
+            fit.badgePadV = 6;
+        } else if (fit.rowDp >= 50) {
+            fit.badgeSp = 13;
+            fit.nameSp = 14;
+            fit.metaSp = 11;
+            fit.nameLines = 1;
+            // Estrecho: la linea de accion se quedaria en «Avisarme d...», que
+            // no dice nada y le roba el sitio al nombre de la parada.
+            fit.metaLines = narrow ? 0 : 1;
+            fit.badgePadH = 6;
+            fit.badgePadV = 5;
+        } else {
+            // Justo: solo el numero y el nombre, en una linea.
+            fit.badgeSp = 12;
+            fit.nameSp = 13;
+            fit.metaSp = 11;
+            fit.nameLines = 1;
+            fit.metaLines = 0;
+            fit.badgePadH = 6;
+            fit.badgePadV = 4;
+        }
+
+        return fit;
+    }
+
+    /**
+     * Cuantas paradas caben en ese alto, de 1 a 4.
+     *
+     * Por division entera y hacia abajo: mas vale repartir el sobrante entre
+     * las que caben que meter una mas aplastada. La primera parada no lleva
+     * separacion encima, de ahi el ROW_GAP_DP que se suma.
+     */
+    private static int rowsFor(int areaDp) {
+        int rows = (areaDp + ROW_GAP_DP) / MIN_ROW_DP;
+        return Math.max(1, Math.min(WidgetStore.MAX_STOPS, rows));
+    }
 
     @Override
     public void onUpdate(Context context, AppWidgetManager manager, int[] widgetIds) {
@@ -112,8 +227,6 @@ public class FavouritesWidget extends AppWidgetProvider {
 
     private static void render(Context context, AppWidgetManager manager, int widgetId) {
         RemoteViews views = new RemoteViews(context.getPackageName(), R.layout.widget_favourites);
-
-        int capacity = rowsForHeight(heightDp(manager, widgetId));
         views.removeAllViews(R.id.widget_rows);
 
         List<WidgetStore.Stop> stops = WidgetStore.readStops(context);
@@ -121,6 +234,7 @@ public class FavouritesWidget extends AppWidgetProvider {
         if (stops.isEmpty()) {
             // Sin paradas no hay atajos: el widget entero abre la app, que es
             // donde se guardan.
+            views.setViewVisibility(R.id.widget_header, View.VISIBLE);
             views.setViewVisibility(R.id.widget_rows, View.GONE);
             views.setViewVisibility(R.id.widget_empty, View.VISIBLE);
             views.setOnClickPendingIntent(R.id.widget_empty, openApp(context, widgetId, null, 0));
@@ -128,26 +242,45 @@ public class FavouritesWidget extends AppWidgetProvider {
             return;
         }
 
+        Fit fit = fit(widthDp(manager, widgetId), heightDp(manager, widgetId), stops.size());
+        float density = context.getResources().getDisplayMetrics().density;
+
+        views.setViewVisibility(R.id.widget_header, fit.header ? View.VISIBLE : View.GONE);
         views.setViewVisibility(R.id.widget_rows, View.VISIBLE);
         views.setViewVisibility(R.id.widget_empty, View.GONE);
 
-        // Widget estrecho: la linea de accion no cabe entera y se quedaria en
-        // «Avisarme d...», que no dice nada y le roba el sitio al nombre de la
-        // parada, que es lo unico que hay que poder leer.
-        boolean compact = widthDp(manager, widgetId) < COMPACT_WIDTH_DP;
-
-        int shown = Math.min(capacity, stops.size());
-
-        for (int index = 0; index < shown; index++) {
+        for (int index = 0; index < fit.shown; index++) {
             WidgetStore.Stop stop = stops.get(index);
             RemoteViews row = new RemoteViews(context.getPackageName(), R.layout.widget_favourites_row);
 
+            // La primera parada no lleva separacion encima: pegaria un hueco
+            // bajo la cabecera, o bajo el borde si la cabecera no esta.
+            if (index == 0) {
+                row.setViewPadding(R.id.widget_row_slot, 0, 0, 0, 0);
+            }
+
             // La segunda linea de la fila (que pulsarla avisa del proximo bus) es
             // fija y ya viene del layout: aqui solo se rellena lo que cambia de
-            // una parada a otra.
+            // una parada a otra, y los tamanos que dependen del alto.
             row.setTextViewText(R.id.widget_row_badge, stop.id);
             row.setTextViewText(R.id.widget_row_name, stop.label);
-            row.setViewVisibility(R.id.widget_row_meta, compact ? View.GONE : View.VISIBLE);
+
+            row.setTextViewTextSize(R.id.widget_row_badge, TypedValue.COMPLEX_UNIT_SP, fit.badgeSp);
+            row.setTextViewTextSize(R.id.widget_row_name, TypedValue.COMPLEX_UNIT_SP, fit.nameSp);
+            row.setTextViewTextSize(R.id.widget_row_meta, TypedValue.COMPLEX_UNIT_SP, fit.metaSp);
+            row.setInt(R.id.widget_row_name, "setMaxLines", fit.nameLines);
+
+            int padH = Math.round(fit.badgePadH * density);
+            int padV = Math.round(fit.badgePadV * density);
+            row.setViewPadding(R.id.widget_row_badge, padH, padV, padH, padV);
+
+            if (fit.metaLines > 0) {
+                row.setViewVisibility(R.id.widget_row_meta, View.VISIBLE);
+                row.setInt(R.id.widget_row_meta, "setMaxLines", fit.metaLines);
+            } else {
+                row.setViewVisibility(R.id.widget_row_meta, View.GONE);
+            }
+
             row.setOnClickPendingIntent(
                 R.id.widget_row,
                 openApp(context, widgetId, stop.id, index)
@@ -157,21 +290,6 @@ public class FavouritesWidget extends AppWidgetProvider {
         }
 
         manager.updateAppWidget(widgetId, views);
-    }
-
-    /**
-     * Cuantas paradas caben en esa altura, de 1 a 4.
-     *
-     * Se cuenta por division entera y hacia abajo: mas vale un hueco al final
-     * que una cuarta parada cortada por la mitad. Con las alturas de la rejilla
-     * del lanzador sale una parada por celda a partir de la segunda: 110dp una,
-     * 180dp dos, 250dp tres y 320dp cuatro.
-     */
-    static int rowsForHeight(int heightDp) {
-        int usable = Math.max(heightDp, MIN_HEIGHT_DP) - CHROME_HEIGHT_DP;
-        int rows = usable / ROW_HEIGHT_DP;
-
-        return Math.max(1, Math.min(WidgetStore.MAX_STOPS, rows));
     }
 
     private static int widthDp(AppWidgetManager manager, int widgetId) {

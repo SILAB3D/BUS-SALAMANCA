@@ -4,7 +4,7 @@
 
     TAMANO PERSONALIZABLE: `resizeMode` horizontal|vertical es lo que deja
     estirarlo, y de la altura resultante sale cuantas paradas se ensenan (1 a 4,
-    ver FavouritesWidget.rowsForHeight).
+    ver FavouritesWidget.fit), y las paradas se reparten el alto entero.
 
     ANCHO MINIMO 180dp: por debajo de eso la insignia del numero y la campana
     se comen la fila entera y el nombre de la parada se queda sin sitio, que es
