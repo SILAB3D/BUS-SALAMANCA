@@ -148,13 +148,15 @@ export function trackingDirectionOptions(stopId: string, lineId: string): LineDi
  * publica "linea N, M minutos". Lo unico que delata una presencia es que ese
  * contador caiga a cero o uno, o que la fuente diga "LLEGANDO A PARADA". Asi
  * que se mira eso mismo en las paradas anteriores del recorrido —que vienen ya
- * en el orden real del trayecto— y se toma la MAS AVANZADA que lo cumpla.
+ * en el orden real del trayecto— y, dentro del tramo mas avanzado que lo
+ * cumpla, se toma su parada MAS LEJANA.
  *
- * Lo de "la mas avanzada" no es un detalle: las paradas se consultan en serie,
- * una cada dos segundos, de modo que los datos de la ventana NO son del mismo
- * instante. Puede quedar un "llegando" rezagado de hace medio minuto y otro mas
- * adelante recien traido. Como un autobus solo avanza, el indice mayor es
- * siempre la verdad mas nueva.
+ * El tramo mas avanzado porque los datos de la ventana NO son del mismo
+ * instante (se consultan en serie, una cada dos segundos) y puede quedar un
+ * "llegando" rezagado varias paradas atras. La mas lejana de ese tramo porque,
+ * con paradas seguidas y cercanas, el mismo autobus sale "llegando" en dos o
+ * tres a la vez, y la mas avanzada lo adelantaba respecto a donde esta.
+ * La regla vive en `locateBus` (services/bus-position.ts).
  *
  * Devuelve el indice dentro de `window`, o -1 si no consta en ninguna.
  *

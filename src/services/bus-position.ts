@@ -14,14 +14,20 @@
  * vez. Queda anotado como el sitio por donde seguir.
  *
  * La deduccion consiste en mirar ese mismo indicio en las paradas ANTERIORES
- * del recorrido —que vienen ya en el orden real del trayecto— y quedarse con la
- * mas avanzada que lo cumpla.
+ * del recorrido —que vienen ya en el orden real del trayecto— y, dentro del
+ * tramo mas avanzado que lo cumpla, quedarse con su parada MAS LEJANA.
  *
- * Lo de "la mas avanzada" no es un detalle de estilo. Las paradas se consultan
- * en serie, una cada dos segundos, asi que los datos de una ventana NO son del
- * mismo instante: puede quedar un "llegando" rezagado de hace medio minuto y
- * otro mas adelante recien traido. Como un autobus solo avanza, el indice mayor
- * es siempre la verdad mas nueva.
+ * Por que el tramo mas avanzado: las paradas se consultan en serie, una cada
+ * dos segundos, asi que los datos de una ventana NO son del mismo instante.
+ * Puede quedar un "llegando" rezagado de hace medio minuto varias paradas atras
+ * y otro mas adelante recien traido. Como un autobus solo avanza, el tramo
+ * mayor es el del autobus que viene a tu parada.
+ *
+ * Por que la mas lejana de ese tramo: cuando dos o mas paradas SEGUIDAS estan
+ * cerca, el mismo autobus sale "llegando" en todas a la vez (a un minuto de la
+ * primera es tambien un minuto de la siguiente). Quedarse con la mas avanzada
+ * lo adelantaba una o dos paradas respecto a donde de verdad esta; la mas
+ * lejana del tramo es la unica en la que seguro ya esta llegando.
  *
  * El modulo es puro: no toca DOM, ni red, ni estado. Lo usan las dos partes que
  * cuentan paradas —"ver por donde viene" y el aviso de proximo bus— porque dos
@@ -101,13 +107,21 @@ export function shouldScanRoute(minutesUntil: number): boolean {
  * @returns el indice dentro de la ventana, o -1 si no consta en ninguna.
  */
 export function locateBus(minutesByStop: Array<number | null>): number {
-  let found = -1
-
-  for (let index = 0; index < minutesByStop.length; index += 1) {
+  const atStop = (index: number): boolean => {
     const minutes = minutesByStop[index]
-    if (minutes !== null && minutes <= AT_STOP_MINUTES) {
-      found = index
-    }
+    return minutes !== null && minutes !== undefined && minutes <= AT_STOP_MINUTES
+  }
+
+  // Primero el tramo mas avanzado: se busca desde tu parada hacia atras...
+  let found = minutesByStop.length - 1
+  while (found >= 0 && !atStop(found)) {
+    found -= 1
+  }
+
+  // ...y se retrocede mientras las paradas anteriores, SEGUIDAS, tambien lo
+  // den como "llegando": es el mismo autobus visto desde paradas cercanas.
+  while (found > 0 && atStop(found - 1)) {
+    found -= 1
   }
 
   return found
