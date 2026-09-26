@@ -1821,16 +1821,27 @@ async function main() {
       number(widgetJava, /COMPACT_WIDTH_DP = (\d+)/)
         > number(widgetJava, /MIN_WIDTH_DP = (\d+)/))
 
-    const rowHeight = number(widgetJava, /ROW_HEIGHT_DP = (\d+)/)
-    const chrome = number(widgetJava, /CHROME_HEIGHT_DP = (\d+)/)
+    const minRow = number(widgetJava, /MIN_ROW_DP = (\d+)/)
+    const gap = number(widgetJava, /ROW_GAP_DP = (\d+)/)
+    const chrome = number(widgetJava, /BOX_PADDING_DP = (\d+)/) + number(widgetJava, /HEADER_DP = (\d+)/)
     const minHeight = number(widgetJava, /MIN_HEIGHT_DP = (\d+)/)
     const rowsFor = (height) =>
-      Math.max(1, Math.min(4, Math.floor((Math.max(height, minHeight) - chrome) / rowHeight)))
+      Math.max(1, Math.min(4, Math.floor((Math.max(height, minHeight) - chrome + gap) / minRow)))
 
     // Alturas de la rejilla del lanzador: n celdas de alto miden 70n-30 dp.
     check('cada celda de alto añade una parada al widget',
       rowsFor(110) === 1 && rowsFor(180) === 2 && rowsFor(250) === 3 && rowsFor(320) === 4,
       `110dp ${rowsFor(110)} · 180dp ${rowsFor(180)} · 250dp ${rowsFor(250)} · 320dp ${rowsFor(320)}`)
+
+    // Las paradas se reparten el alto entero: sin el peso en la raíz de la
+    // fila volvería el hueco en blanco bajo la última parada.
+    const widgetRow = await fs.readFile(
+      path.join(projectRoot, 'android', 'app', 'src', 'main', 'res', 'layout',
+        'widget_favourites_row.xml'),
+      'utf8',
+    )
+    check('las paradas del widget llenan todo el alto',
+      /<FrameLayout[^>]*android:layout_height="0dp"[^>]*android:layout_weight="1"/.test(widgetRow))
     check('por muy grande que se haga no enseña una quinta parada',
       rowsFor(600) === 4)
 
